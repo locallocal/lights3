@@ -1,6 +1,7 @@
 #include "app/admin_jobs.h"
 
 #include <chrono>
+#include <optional>
 #include <stdexcept>
 
 #include "core/log.h"
@@ -29,6 +30,12 @@ const char* job_op_name(JobOp op) {
             return "gc";
         case JobOp::TierReconcile:
             return "reconcile";
+        case JobOp::TablePlan:
+            return "plan";
+        case JobOp::TableRun:
+            return "run";
+        case JobOp::TablePurge:
+            return "purge";
     }
     return "?";
 }
@@ -44,6 +51,10 @@ const char* job_group_name(JobOp op) {
         case JobOp::TierGc:
         case JobOp::TierReconcile:
             return "tier";
+        case JobOp::TablePlan:
+        case JobOp::TableRun:
+        case JobOp::TablePurge:
+            return "tables";
     }
     return "?";
 }
@@ -57,6 +68,10 @@ std::optional<JobOp> parse_job_op(std::string_view group, std::string_view op) {
         if (op == "scan") return JobOp::TierScan;
         if (op == "gc") return JobOp::TierGc;
         if (op == "reconcile") return JobOp::TierReconcile;
+    } else if (group == "tables") {
+        if (op == "plan") return JobOp::TablePlan;
+        if (op == "run") return JobOp::TableRun;
+        if (op == "purge") return JobOp::TablePurge;
     }
     return std::nullopt;
 }
@@ -226,6 +241,10 @@ JobOutcome run_job(JobOp op, storage::IStorageBackend& backend, uint64_t max_byt
             if (auto* t = dynamic_cast<storage::TieredBackend*>(&backend)) return run_tier_job(op, *t);
             throw std::invalid_argument("this backend is not a tiered backend");
         }
+        case JobOp::TablePlan:
+        case JobOp::TableRun:
+        case JobOp::TablePurge:
+            throw std::invalid_argument("table maintenance jobs are resource-level (start_custom), not backend jobs");
     }
     throw std::invalid_argument("unknown op");
 }
@@ -305,13 +324,35 @@ uint64_t AdminJobs::start(const std::string& backend, JobOp op, uint64_t max_byt
             supported = dynamic_cast<storage::TieredBackend*>(b.get()) != nullptr;
             if (!supported) throw Failure{Error::Unsupported, "backend '" + backend + "' is not a tiered backend"};
             break;
+        case JobOp::TablePlan:
+        case JobOp::TableRun:
+        case JobOp::TablePurge:
+            throw Failure{Error::Unsupported, "table maintenance jobs run on a table resource, not a backend"};
     }
+    FsckExtension ext;
+    {
+        std::lock_guard lk(m_);
+        if (op == JobOp::Fsck) ext = fsck_extension_;
+    }
+    return launch(backend, op, max_bytes_per_sec, [backend, op, b, max_bytes_per_sec, ext] {
+        JobOutcome out = run_job(op, *b, max_bytes_per_sec);
+        if (ext)
+            if (auto extra = ext(backend)) merge_outcome(out, *extra);
+        return out;
+    });
+}
 
+uint64_t AdminJobs::start_custom(const std::string& resource, JobOp op, std::function<JobOutcome()> fn) {
+    return launch(resource, op, 0, std::move(fn));
+}
+
+uint64_t AdminJobs::launch(const std::string& resource, JobOp op, uint64_t max_bytes_per_sec,
+                           std::function<JobOutcome()> fn) {
     std::lock_guard lk(m_);
-    Slots& slots = jobs_[backend];
+    Slots& slots = jobs_[resource];
     if (const Job* r = running_of(slots))
         throw Failure{Error::Busy, std::string(job_group_name(op)) + " " + job_op_name(op) + ": job " +
-                                       std::to_string(r->id) + " is still running on '" + backend + "'"};
+                                       std::to_string(r->id) + " is still running on '" + resource + "'"};
     Job& j = slots[op];
     // reap the previous run's thread
     if (j.thread.joinable()) j.thread.join();
@@ -322,21 +363,18 @@ uint64_t AdminJobs::start(const std::string& backend, JobOp op, uint64_t max_byt
     j.finished_ms = 0;
     j.error.clear();
     uint64_t id = j.id;
-    FsckExtension ext = op == JobOp::Fsck ? fsck_extension_ : FsckExtension{};
-    LOG_INFO("{} {} job {} started on '{}' (max {} MB/s)", job_group_name(op), job_op_name(op), id, backend,
+    LOG_INFO("{} {} job {} started on '{}' (max {} MB/s)", job_group_name(op), job_op_name(op), id, resource,
              j.max_mbps);
-    j.thread = std::thread([this, backend, op, b, max_bytes_per_sec, id, ext] {
+    j.thread = std::thread([this, resource, op, id, fn = std::move(fn)] {
         JobOutcome out;
         std::string error;
         try {
-            out = run_job(op, *b, max_bytes_per_sec);
-            if (ext)
-                if (auto extra = ext(backend)) merge_outcome(out, *extra);
+            out = fn();
         } catch (const std::exception& e) {
             error = e.what();
         }
         std::lock_guard lk2(m_);
-        auto bt = jobs_.find(backend);
+        auto bt = jobs_.find(resource);
         if (bt == jobs_.end()) return;
         auto jt = bt->second.find(op);
         if (jt == bt->second.end() || jt->second.id != id) return;
@@ -358,21 +396,11 @@ void AdminJobs::finish_job(Job& j, JobOp op, JobOutcome out, std::string error) 
                  j.id, j.outcome.kind, j.outcome.findings, j.outcome.aborted, j.finished_ms - j.started_ms);
 }
 
-json AdminJobs::status(const std::string& backend, JobOp op) const {
-    std::lock_guard lk(m_);
-    if (!backends_.count(backend)) throw Failure{Error::NoSuchBackend, "no backend named '" + backend + "'"};
+json AdminJobs::status_locked(const std::string& resource, JobOp op, const Job* j, const Slots* slots) const {
     json s;
-    s["backend"] = backend;
+    s["backend"] = resource;
     s["op"] = job_op_name(op);
-    auto bt = jobs_.find(backend);
-    const Job* j = nullptr;
-    if (bt != jobs_.end()) {
-        auto jt = bt->second.find(op);
-        if (jt != bt->second.end()) j = &jt->second;
-        s["busy"] = running_of(bt->second) != nullptr;
-    } else {
-        s["busy"] = false;
-    }
+    s["busy"] = slots != nullptr && running_of(*slots) != nullptr;
     if (!j) {
         s["running"] = false;
         s["job_id"] = nullptr;
@@ -397,6 +425,28 @@ json AdminJobs::status(const std::string& backend, JobOp op) const {
     s["aborted"] = j->outcome.aborted;
     s["stats"] = j->outcome.stats;
     return s;
+}
+
+json AdminJobs::status(const std::string& backend, JobOp op) const {
+    std::lock_guard lk(m_);
+    bool custom = job_group_name(op) == std::string("tables");
+    if (!custom && !backends_.count(backend)) throw Failure{Error::NoSuchBackend, "no backend named '" + backend + "'"};
+    auto bt = jobs_.find(backend);
+    const Slots* slots = bt == jobs_.end() ? nullptr : &bt->second;
+    const Job* j = nullptr;
+    if (slots) {
+        auto jt = slots->find(op);
+        if (jt != slots->end()) j = &jt->second;
+    }
+    return status_locked(backend, op, j, slots);
+}
+
+std::optional<json> AdminJobs::status_by_id(uint64_t id) const {
+    std::lock_guard lk(m_);
+    for (auto& [resource, slots] : jobs_)
+        for (auto& [op, j] : slots)
+            if (j.id == id) return status_locked(resource, op, &j, &slots);
+    return std::nullopt;
 }
 
 json AdminJobs::quarantine(const std::string& backend, std::string_view group) const {

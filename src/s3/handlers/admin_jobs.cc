@@ -12,6 +12,10 @@
 #include "core/log.h"
 #include "s3/handlers/admin_json.h"
 #include "s3/service.h"
+#ifdef LIGHTS3_TABLES
+#include "tables/rest_api.h"
+#include "tables/rest_error.h"
+#endif
 
 namespace lights3::s3 {
 
@@ -69,5 +73,75 @@ Task<http::HttpResponse> S3Service::admin_jobs(http::HttpRequest& req, std::stri
         co_return admin_error(S3Error(S3ErrorCode::InternalError, e.what()), req);
     }
 }
+
+#ifdef LIGHTS3_TABLES
+// /-/admin/tables/<bucket>/<ns-path>/<t>/<op>: the catalog's job entry (RestApi::admin_job)
+// behind the same root gate and error rendering as the backend jobs
+Task<http::HttpResponse> S3Service::admin_tables_jobs(http::HttpRequest& req, std::string& access_key,
+                                                      const RequestContext& ctx) {
+    try {
+        auto ident = verify_identity(req);
+        access_key = ident.access_key;
+        if (!is_root(access_key))
+            throw S3Error(S3ErrorCode::AccessDenied,
+                          "Running maintenance jobs requires a root (statically configured) "
+                          "credential.");
+        constexpr std::string_view kBase = "/-/admin/tables/";
+        std::string rest = req.path.substr(kBase.size());
+        std::vector<std::string> segs;
+        size_t pos = 0;
+        while (pos <= rest.size()) {
+            size_t next = rest.find('/', pos);
+            if (next == std::string::npos) next = rest.size();
+            if (next > pos) segs.push_back(rest.substr(pos, next - pos));
+            pos = next + 1;
+        }
+        if (segs.size() < 4)
+            throw S3Error(S3ErrorCode::InvalidRequest, "Usage: /-/admin/tables/<bucket>/<namespace...>/<table>/<op>.");
+        std::string bucket = segs.front();
+        std::string op = segs.back();
+        std::string table = segs[segs.size() - 2];
+        tables::Levels levels(segs.begin() + 1, segs.end() - 2);
+        nlohmann::json body = nlohmann::json::object();
+        if (req.method == "POST" && req.body) {
+            std::string text;
+            std::byte buf[16 * 1024];
+            for (;;) {
+                size_t n = co_await req.body->read(std::span(buf));
+                if (n == 0) break;
+                if (text.size() + n > 1024 * 1024) throw S3Error(S3ErrorCode::EntityTooLarge, "Body too large.");
+                text.append(reinterpret_cast<const char*>(buf), n);
+            }
+            if (!text.empty()) {
+                body = nlohmann::json::parse(text, nullptr, false);
+                if (!body.is_object()) throw S3Error(S3ErrorCode::InvalidRequest, "The body must be a JSON object.");
+            }
+        }
+        json j;
+        try {
+            j = co_await tables_api_->admin_job(req.method, bucket, levels, table, op, body);
+        } catch (const tables::RestError& e) {
+            throw S3Error(e.status == 404 ? S3ErrorCode::NoSuchKey : S3ErrorCode::InvalidRequest, e.message);
+        }
+        if (req.method == "GET") co_return json_response(200, j);
+        AuditEvent e;
+        e.event = "tables." + op + ".start";
+        e.actor = access_key;
+        e.request_id = ctx.request_id;
+        e.bucket = bucket;
+        e.key = tables::ns_path(levels) + "/" + table;
+        e.detail = "job " + j.value("job_id", json(0)).dump();
+        audit(e);
+        co_return json_response(202, j);
+    } catch (const S3Error& e) {
+        metrics_.s3_error(e.code);
+        co_return admin_error(e, req);
+    } catch (const std::exception& e) {
+        LOG_ERROR("admin api {} {} internal error: {}", req.method, req.path, e.what());
+        metrics_.s3_error(S3ErrorCode::InternalError);
+        co_return admin_error(S3Error(S3ErrorCode::InternalError, e.what()), req);
+    }
+}
+#endif
 
 }  // namespace lights3::s3

@@ -1,8 +1,11 @@
 // Iceberg REST surface through the full S3Service dispatch (docs/s3-tables-design.md §6, §8.1,
 // docs/s3-tables/step-1-catalog-core.md §15): endpoints, error model, guard, config drift
+#include <chrono>
 #include <nlohmann/json.hpp>
 #include <set>
+#include <thread>
 
+#include "app/admin_jobs.h"
 #include "core/fault.h"
 #include "core/util/checksum.h"
 #include "core/util/crypto.h"
@@ -34,6 +37,7 @@ struct TablesEnv {
     std::shared_ptr<tables::Catalog> catalog;
     std::shared_ptr<tables::RestApi> api;
     std::shared_ptr<tables::TableBucketGuard> guard;
+    std::unique_ptr<AdminJobs> jobs;
     std::unique_ptr<S3Service> svc;
     TablesConfig cfg;
 
@@ -80,6 +84,32 @@ struct TablesEnv {
             api = std::make_shared<tables::RestApi>(catalog, cfg, MetricsScope{});
             guard = std::make_shared<tables::TableBucketGuard>(buckets, catalog, cfg.path_prefix, cfg.compat_prefix);
             svc->set_tables(api, guard);
+            // the job framework the application installs (step ④ §5)
+            jobs = std::make_unique<AdminJobs>(std::map<std::string, std::shared_ptr<storage::IStorageBackend>>{});
+            tables::JobHooks jh;
+            jh.start = [this](const std::string& resource, const std::string& op, tables::JobHooks::Fn fn) {
+                auto o = parse_job_op("tables", op);
+                if (!o) throw S3Error(S3ErrorCode::InvalidRequest, "no operation");
+                try {
+                    uint64_t id = jobs->start_custom(resource, *o, [fn] {
+                        JobOutcome out;
+                        out.kind = "tables";
+                        out.stats = fn();
+                        return out;
+                    });
+                    json j = jobs->status(resource, *o);
+                    j["job_id"] = id;
+                    j["running"] = true;
+                    return j;
+                } catch (const AdminJobs::Failure& f) {
+                    throw S3Error(S3ErrorCode::JobInProgress, f.message);
+                }
+            };
+            jh.status = [this](const std::string& resource, const std::string& op) {
+                return jobs->status(resource, *parse_job_op("tables", op));
+            };
+            jh.status_by_id = [this](uint64_t id) { return jobs->status_by_id(id); };
+            api->set_job_hooks(jh);
         }
     }
 
@@ -307,10 +337,12 @@ TEST(tables_rest_full_flow_and_error_model) {
         204);
     CHECK_EQ(env.call("HEAD", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders").status, 404);
     CHECK_EQ(env.call("HEAD", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders2").status, 204);
+    // purgeRequested=true is a drop plus a purge job (step ④, tested in
+    // tables_rest_maintenance_endpoints); the flag itself is validated
     auto purge = env.call("DELETE", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders2", "",
-                          {{"purgeRequested", "true"}});
-    CHECK_EQ(purge.status, 406);
-    CHECK_EQ(TablesEnv::error_type(purge), "UnsupportedOperationException");
+                          {{"purgeRequested", "maybe"}});
+    CHECK_EQ(purge.status, 400);
+    CHECK_EQ(TablesEnv::error_type(purge), "BadRequestException");
     CHECK_EQ(env.call("DELETE", "/tbk").status, 409);
     CHECK_EQ(
         env.call("DELETE", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders2", "", {{"purgeRequested", "false"}})
@@ -687,4 +719,112 @@ TEST(tables_rest_diagnostics_recovery_and_etag) {
     CHECK_EQ(TablesEnv::error_type(missing), "CommitFailedException");
     // the endpoints are extensions: not advertised in /config
     for (auto& e : tables::RestApi::advertised_endpoints()) CHECK(e.find("catalog/") == std::string::npos);
+}
+
+// ---------- step ④: maintenance endpoints, admin-plane jobs, purge ----------
+
+TEST(tables_rest_maintenance_endpoints) {
+    TablesEnv env;
+    CHECK_EQ(env.call("PUT", "/tbk").status, 200);
+    CHECK_EQ(env.call("PUT", "/iceberg/v1/buckets/tbk").status, 200);
+    CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces", R"({"namespace":["sales"]})").status, 200);
+    CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/sales/tables", create_body("t")).status, 200);
+    const std::string table = "/iceberg/v1/tbk/namespaces/sales/tables/t";
+    env.install_snapshot("sales/t/metadata/ml.avro");
+    CHECK_EQ(env.call("POST", table, append_body(1, 1, "s3://tbk/sales/t/metadata/ml.avro")).status, 200);
+    // settings: defaults, then a table object, validated
+    auto cfg0 = env.call("GET", table + "/maintenance/config");
+    CHECK_EQ(cfg0.status, 200);
+    auto cj = TablesEnv::body_json(cfg0);
+    CHECK(!cj["effective"]["delete_enabled"].get<bool>());
+    CHECK(cj["table-config"].is_null());
+    CHECK_EQ(cj["defaults"]["retain_recent_metadata_files"].get<int>(), 10);
+    auto put = env.call("PUT", table + "/maintenance/config",
+                        R"({"delete_enabled":true,"retain_recent_metadata_files":1})");
+    CHECK_EQ(put.status, 200);
+    CHECK(TablesEnv::body_json(put)["effective"]["delete_enabled"].get<bool>());
+    CHECK_EQ(TablesEnv::body_json(put)["effective"]["retain_recent_metadata_files"].get<int>(), 1);
+    CHECK_EQ(env.call("PUT", table + "/maintenance/config", R"({"delete_enabled":"yes"})").status, 400);
+    CHECK_EQ(env.call("PUT", table + "/maintenance/config", R"({"bogus":1})").status, 400);
+    CHECK_EQ(env.call("PUT", "/iceberg/v1/tbk/namespaces/sales/tables/nope/maintenance/config", "{}").status, 404);
+    auto poll = [&](const std::string& path) {
+        for (int i = 0; i < 500; ++i) {
+            auto r = env.call("GET", path);
+            CHECK_EQ(r.status, 200);
+            auto j = TablesEnv::body_json(r);
+            if (!j.value("running", false)) return j;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        throw std::runtime_error("job did not finish");
+    };
+    // plan: 202 + job id; the job document carries the plan
+    auto pl = env.call("POST", table + "/maintenance/plan");
+    CHECK_EQ(pl.status, 202);
+    uint64_t plan_id = TablesEnv::body_json(pl)["job_id"].get<uint64_t>();
+    auto plan_doc = poll(table + "/maintenance/jobs/" + std::to_string(plan_id));
+    CHECK_EQ(plan_doc["op"].get<std::string>(), "plan");
+    CHECK(plan_doc["stats"].contains("version-token"));
+    CHECK(!plan_doc["stats"]["manual-review"].get<bool>());
+    CHECK(plan_doc["stats"]["effective"]["delete_enabled"].get<bool>());
+    // run the latest plan (nothing is old enough to delete: safety window)
+    auto rn = env.call("POST", table + "/maintenance/run", "{}");
+    CHECK_EQ(rn.status, 202);
+    auto run_doc = poll(table + "/maintenance/jobs/" +
+                        std::to_string(TablesEnv::body_json(rn)["job_id"].get<uint64_t>()));
+    CHECK_EQ(run_doc["op"].get<std::string>(), "run");
+    CHECK(run_doc["stats"]["delete_enabled"].get<bool>());
+    CHECK_EQ(run_doc["stats"]["deleted_metadata"].get<int>(), 0);
+    // by plan job id, inline plan, and the refusals
+    CHECK_EQ(env.call("POST", table + "/maintenance/run", R"({"job_id":)" + std::to_string(plan_id) + "}").status, 202);
+    poll(table + "/maintenance/jobs/" + std::to_string(plan_id + 2));
+    CHECK_EQ(env.call("POST", table + "/maintenance/run", R"({"job_id":999})").status, 400);
+    CHECK_EQ(env.call("POST", table + "/maintenance/run", R"({"plan":{"x":1}})").status, 400);
+    json stale = plan_doc["stats"];
+    stale["version-token"] = "t-stale";
+    auto st = env.call("POST", table + "/maintenance/run", json({{"plan", stale}}).dump());
+    CHECK_EQ(st.status, 202);
+    auto stale_doc = poll(table + "/maintenance/jobs/" +
+                          std::to_string(TablesEnv::body_json(st)["job_id"].get<uint64_t>()));
+    CHECK(stale_doc.contains("error"));
+    CHECK(stale_doc["error"].get<std::string>().find("StalePlan") != std::string::npos);
+    CHECK_EQ(env.call("GET", table + "/maintenance/jobs/abc").status, 400);
+    CHECK_EQ(env.call("GET", table + "/maintenance/jobs/999").status, 404);
+    // permissions: config / job status are reads, plan / run / config PUT writes
+    const size_t ro = env.add_policy_cred("ro", R"({"buckets":["tbk"],"readonly":true})");
+    CHECK_EQ(env.call("GET", table + "/maintenance/config", "", {}, {}, ro).status, 200);
+    CHECK_EQ(env.call("GET", table + "/maintenance/jobs/" + std::to_string(plan_id), "", {}, {}, ro).status, 200);
+    CHECK_EQ(env.call("POST", table + "/maintenance/plan", "", {}, {}, ro).status, 403);
+    CHECK_EQ(env.call("PUT", table + "/maintenance/config", "{}", {}, {}, ro).status, 403);
+    // the admin plane: root only, same jobs
+    auto ap = env.call("POST", "/-/admin/tables/tbk/sales/t/plan");
+    CHECK_EQ(ap.status, 202);
+    uint64_t admin_plan = TablesEnv::body_json(ap)["job_id"].get<uint64_t>();
+    auto ad = poll(table + "/maintenance/jobs/" + std::to_string(admin_plan));
+    CHECK_EQ(ad["backend"].get<std::string>(), "tables:tbk/sales/t");
+    auto ag = env.call("GET", "/-/admin/tables/tbk/sales/t/plan");
+    CHECK_EQ(ag.status, 200);
+    CHECK_EQ(TablesEnv::body_json(ag)["job_id"].get<uint64_t>(), admin_plan);
+    CHECK_EQ(env.call("POST", "/-/admin/tables/tbk/sales/t/nope").status, 400);
+    CHECK_EQ(env.call("POST", "/-/admin/tables/tbk/sales/missing/plan").status, 404);
+    CHECK_EQ(env.call("POST", "/-/admin/tables/tbk/sales/t/plan", "", {}, {}, ro).status, 403);
+    CHECK_EQ(env.call("POST", "/-/admin/tables/tbk/sales/t/run", R"({"job_id":999})").status, 400);
+    // purge: tombstone at once, the data in a job
+    auto dp = env.call("DELETE", table, "", {{"purgeRequested", "true"}});
+    CHECK_EQ(dp.status, 204);
+    CHECK(dp.headers.has("x-lights3-job-id"));
+    uint64_t purge_id = std::stoull(*dp.headers.get("x-lights3-job-id"));
+    auto pd = poll(table + "/maintenance/jobs/" + std::to_string(purge_id));
+    CHECK_EQ(pd["op"].get<std::string>(), "purge");
+    CHECK(pd["stats"]["tombstone_removed"].get<bool>());
+    // the reserved directory (2 metadata files) and the location prefix (the manifest list);
+    // the fixture's manifest and data files live under n/t and belong to no table
+    CHECK_EQ(pd["stats"]["deleted_objects"].get<uint64_t>(), uint64_t(3));
+    CHECK_EQ(env.call("HEAD", table).status, 404);
+    CHECK_EQ(env.call("GET", "/tbk/sales/t/metadata/ml.avro").status, 404);
+    CHECK_EQ(env.call("GET", "/tbk/n/t/metadata/m-1.avro").status, 200);
+    auto lt = env.call("GET", "/iceberg/v1/tbk/namespaces/sales/tables");
+    CHECK_EQ(TablesEnv::body_json(lt)["identifiers"].size(), size_t(0));
+    CHECK_EQ(env.call("DELETE", table, "", {{"purgeRequested", "maybe"}}).status, 400);
+    // none of it is advertised
+    for (auto& e : tables::RestApi::advertised_endpoints()) CHECK(e.find("maintenance") == std::string::npos);
 }

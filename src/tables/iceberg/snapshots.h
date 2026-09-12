@@ -8,6 +8,8 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
+#include <set>
 #include <string>
 
 #include "core/task.h"
@@ -47,5 +49,12 @@ struct DeepCheckReport {
 // conflict re-check against the parent snapshot's live file set. Throws RestError(409)
 Task<DeepCheckReport> check_new_snapshots_deep(const SnapshotCheckContext& ctx, const Json& current, const Json& next,
                                                const DeepCheckOptions& opt);
+
+// Every bucket-relative key the snapshots of `md` reach -- manifest lists, manifests and
+// the files of every entry whatever its status (the maintenance planner's reachability
+// set, step ④ §4). nullopt when a codec could not be read; manifests_seen accumulates
+// across calls and exceeding opt.max_manifests is a 409 like any malformed Avro
+Task<std::optional<std::set<std::string>>> reachable_files(const SnapshotCheckContext& ctx, const Json& md,
+                                                           const DeepCheckOptions& opt, size_t& manifests_seen);
 
 }  // namespace lights3::tables::iceberg

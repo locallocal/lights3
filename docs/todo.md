@@ -36,7 +36,7 @@
 | 条目 | 说明 |
 | --- | --- |
 | Versioning | 架构级（六后端 key 布局 / List 语义 / delete marker / GC 全动）；若做，**从 duostore 侧切入成本最低**（meta 是 KV，加 version 维度即可），localfs 的 key→路径映射容纳不下多版本 |
-| S3 Tables（Iceberg REST Catalog） | 设计稿 [s3-tables-design.md](s3-tables-design.md)、实施文档 [s3-tables/](s3-tables/README.md)；**①②③ 已实现（2026-09-12）**：目录、表桶、提交协议、守卫、policy / 租户门、`s3tables` 签名名、凭证下发、lifecycle 排除、Avro 深校验、`catalog/diagnostics` / `recovery`、rename 恢复、`fsck` 对账、LoadTable ETag，单测与 e2e 段。下一步 ④ 维护 |
+| S3 Tables（Iceberg REST Catalog） | 设计稿 [s3-tables-design.md](s3-tables-design.md)、实施文档 [s3-tables/](s3-tables/README.md)；**①②③④ 已实现（2026-09-12）**：目录、表桶、提交协议、守卫、policy / 租户门、`s3tables` 签名名、凭证下发、lifecycle 排除、Avro 深校验、`catalog/diagnostics` / `recovery`、rename 恢复、`fsck` 对账、LoadTable ETag、维护 plan / run / purge 与周期 runner、`lights3-ctl tables`，单测与 e2e 段。下一步 ⑤ 多网关与文档 |
 | SSE-C / SSE-S3 | 服务端加密；需先定密钥来源与 ETag/校验和语义 |
 | OpenTelemetry 全量埋点 | 轻量 trace 层已做（W3C traceparent 透传、每请求一 span、日志关联，[s3-protocol.md §7](s3-protocol.md)）；otel-cpp 导出 span 是长期项 |
 | HTTP/2 | S3 SDK 主流仍 HTTP/1.1，CDN / L7 前置场景才需要；前置代理终结 h2 见 [tls.md §6](tls.md) |

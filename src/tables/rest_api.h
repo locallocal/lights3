@@ -21,6 +21,8 @@
 #include "s3/auth/policy.h"
 #include "s3/auth/sigv4.h"
 #include "tables/catalog.h"
+#include "tables/jobs.h"
+#include "tables/maintenance.h"
 
 namespace lights3::tables {
 
@@ -54,6 +56,16 @@ public:
     };
 
     RestApi(std::shared_ptr<Catalog> catalog, TablesConfig cfg, MetricsScope metrics);
+
+    // The job framework for maintenance (step ④ §5); without it plan / run / purge
+    // answer 406. Set once by the application, not per request
+    void set_job_hooks(JobHooks hooks) { jobs_ = std::move(hooks); }
+    const JobHooks& job_hooks() const { return jobs_; }
+    // The admin-plane entry (POST/GET /-/admin/tables/<bucket>/<ns-path>/<t>/<op>, root
+    // only -- the service verified that): start (POST) or query (GET) the job; `body` is
+    // the request's JSON (run takes {"plan"} / {"job_id"}). Throws s3::S3Error
+    Task<nlohmann::json> admin_job(std::string_view method, std::string_view bucket, const Levels& levels,
+                                   std::string_view table, std::string_view op, const nlohmann::json& body);
 
     // True when the path belongs to the catalog: "<prefix>/v1" or "<prefix>/v1/..."
     bool matches(std::string_view path) const;
@@ -119,6 +131,11 @@ public:
     Task<http::HttpResponse> load_credentials(http::HttpRequest&, Hooks&, const Match&);
     Task<http::HttpResponse> diagnose_table(http::HttpRequest&, Hooks&, const Match&);
     Task<http::HttpResponse> recover_table(http::HttpRequest&, Hooks&, const Match&);
+    Task<http::HttpResponse> get_maintenance_config(http::HttpRequest&, Hooks&, const Match&);
+    Task<http::HttpResponse> put_maintenance_config(http::HttpRequest&, Hooks&, const Match&);
+    Task<http::HttpResponse> plan_maintenance(http::HttpRequest&, Hooks&, const Match&);
+    Task<http::HttpResponse> run_maintenance(http::HttpRequest&, Hooks&, const Match&);
+    Task<http::HttpResponse> maintenance_job(http::HttpRequest&, Hooks&, const Match&);
 
 private:
     // path after "<prefix>/v1/" split on '/', percent-decoded per segment
@@ -140,11 +157,21 @@ private:
     Task<Vending> vend(Hooks& hooks, std::string_view bucket, const TableEntry& entry);
     static void add_vending(nlohmann::json& result, const Vending& v);
     void audit(Hooks& hooks, std::string_view op, const Match& m, std::string detail) const;
+    // the effective settings of a table (properties > table object > tables.maintenance)
+    Task<EffectiveMaintenance> effective_maintenance(std::string_view bucket, const Levels& levels,
+                                                     std::string_view table);
+    // maintenance jobs (the JSON status documents); throw S3Error(JobInProgress) when busy
+    nlohmann::json start_plan(std::string_view bucket, const Levels& levels, std::string_view table);
+    Task<nlohmann::json> start_run(std::string_view bucket, const Levels& levels, std::string_view table,
+                                   const nlohmann::json& body, CommitHooks commit);
+    nlohmann::json start_purge(std::string_view bucket, const Levels& levels, std::string_view table,
+                               CommitHooks commit);
 
     std::shared_ptr<Catalog> catalog_;
     TablesConfig cfg_;
     MetricsScope metrics_;
     std::shared_ptr<MetricCounter> requests_;
+    JobHooks jobs_;
 };
 
 }  // namespace lights3::tables

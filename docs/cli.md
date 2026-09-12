@@ -235,7 +235,8 @@ refs_stale 可能是巡检期间 MPU complete 造成的暂态，复跑确认。�
 管理面）、`website`（桶静态网站配置）、`bench`（压测）、`fsck`（在线对象
 校验）、`quota`（桶配额）、`tenant`（租户与桶归属）、`usage`（用量计数器，
 roadmap §3.9，见 [multi-tenancy.md](multi-tenancy.md)）、`reload`（配置热重载，
-[config-reload.md](config-reload.md)）。全部子命令以 SigV4
+[config-reload.md](config-reload.md)）、`tables`（S3 Tables 目录：表桶、列表、维护、
+诊断，§3.13）。全部子命令以 SigV4
 自签名直连 lights3 的 HTTP 端点，无需 aws cli。
 
 ### 3.1 连接与凭证选项（所有叶子子命令共有）
@@ -586,3 +587,43 @@ lights3-ctl tier quarantine list tierdata
   （`make_<group>()`），公共助手（`--config`、`<backend>` 解析、`g_exit`）在
   `src/cli/cli_common.h`；仅在对应编译开关内注册（`cli_duostore.cc` 只在
   `LIGHTS3_DUOSTORE` 下参与编译），保证裁剪构建不出现不可用命令。
+
+### 3.13 `tables` —— S3 Tables 目录：表桶、列表、维护、诊断
+
+[s3-tables-design.md](s3-tables-design.md) 的运维入口（实现记录见
+[s3-tables/step-4-maintenance.md §10](s3-tables/step-4-maintenance.md)）。目录调用打
+`<prefix>/v1/...`（`--catalog-prefix`，默认 `/iceberg`，即 `tables.path_prefix`），签名
+service 固定 `s3`；`plan` / `run` 走管理面作业（root 凭证），与 §3.12 同一 job 模型
+（202 + job id、每 0.3s 轮询到结束、打印结论文档）。表以 `<namespace>.<table>` 给出，
+多级 namespace 用 `.` 连接。
+
+```text
+lights3-ctl tables enable|disable|status <bucket>          PUT / DELETE / GET <prefix>/v1/buckets/<bucket>（enable / disable 须 root）
+lights3-ctl tables list <bucket> [--namespace=a.b] [--json] 每行 "<namespace>\t<table>"；不指定 namespace 则遍历整棵树
+lights3-ctl tables config <bucket> <ns.table> [--set=<json>]
+                                                            GET / PUT …/maintenance/config：effective / table-config / defaults；
+                                                            --set 的键：retain_recent_metadata_files delete_enabled max_snapshot_age_ms
+                                                            min_snapshots_to_keep orphan_cleanup（省略的键回落到 tables.maintenance）
+lights3-ctl tables plan <bucket> <ns.table> [--no-wait]     POST /-/admin/tables/<bucket>/<ns 各级>/<table>/plan，只读；"stats" 即 plan
+lights3-ctl tables run <bucket> <ns.table> [--plan-job=<id>] [--yes] [--no-wait]
+                                                            执行最近一次 plan（或 --plan-job）：快照过期是普通提交；delete_enabled
+                                                            为真时才删候选文件，且没有 --yes 直接拒绝（退出码 2）；表已变 → StalePlan
+lights3-ctl tables purge <bucket> <ns.table> --yes [--no-wait]
+                                                            DELETE …?purgeRequested=true：先墓碑，再由作业删保留目录、location 前缀、
+                                                            commit 记录与墓碑；不可逆，--yes 必填
+lights3-ctl tables diagnose <bucket> <ns.table>            GET …/catalog/diagnostics（③）
+lights3-ctl tables recover <bucket> <ns.table> [--prune]   POST …/catalog/recovery（③）
+```
+
+退出码：0 成功；1 请求失败或作业 `error`；2 用法错误（含 `run` 缺 `--yes`、`purge` 缺
+`--yes`）。plan 文档里 `manual-review: true` 的表 `run` 会被服务端拒绝（400）——先看
+`notes`（ref 带自己的保留规则、表属性与维护配置冲突、manifest 解析失败等）。
+
+```bash
+lights3-ctl tables enable lake
+lights3-ctl tables list lake
+lights3-ctl tables config lake sales.orders --set='{"delete_enabled":true,"max_snapshot_age_ms":432000000}'
+lights3-ctl tables plan lake sales.orders          # 看候选与要过期的快照
+lights3-ctl tables run lake sales.orders --yes      # 提交过期 + 删候选
+lights3-ctl tables purge lake sales.tmp --yes
+```

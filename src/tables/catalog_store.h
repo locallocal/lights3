@@ -83,6 +83,17 @@ struct RenameIntent {
 const char* rename_stage_name(RenameIntent::Stage s);
 std::optional<RenameIntent::Stage> rename_stage_from_name(std::string_view s);
 
+// Per-table maintenance settings (docs/s3-tables/step-4-maintenance.md §3); every field
+// optional -- unset falls back to tables.maintenance / the table's Iceberg properties
+struct MaintenanceConfig {
+    int version = 1;
+    std::optional<int> retain_recent_metadata_files;
+    std::optional<bool> delete_enabled;
+    std::optional<int64_t> max_snapshot_age_ms;
+    std::optional<int> min_snapshots_to_keep;
+    std::optional<bool> orphan_cleanup;
+};
+
 template <class T>
 struct Versioned {
     T value;
@@ -106,10 +117,12 @@ nlohmann::json to_json(const NamespaceEntry&);
 nlohmann::json to_json(const TableEntry&);
 nlohmann::json to_json(const CommitRecord&);
 nlohmann::json to_json(const RenameIntent&);
+nlohmann::json to_json(const MaintenanceConfig&);
 std::optional<NamespaceEntry> namespace_from_json(const nlohmann::json&);
 std::optional<TableEntry> table_from_json(const nlohmann::json&);
 std::optional<CommitRecord> commit_from_json(const nlohmann::json&);
 std::optional<RenameIntent> rename_from_json(const nlohmann::json&);
+std::optional<MaintenanceConfig> maintenance_from_json(const nlohmann::json&);
 
 struct ITableCatalogStore {
     virtual ~ITableCatalogStore() = default;
@@ -147,6 +160,14 @@ struct ITableCatalogStore {
     virtual Task<std::string> put_rename(std::string_view bucket, const RenameIntent& r,
                                          storage::PutCondition cond) = 0;
     virtual Task<void> delete_rename(std::string_view bucket, std::string_view id) = 0;
+
+    // per-table maintenance settings (step ④ §3); a missing object is nullopt
+    virtual Task<std::optional<MaintenanceConfig>> get_maintenance_config(std::string_view bucket, const Levels& levels,
+                                                                          std::string_view name) = 0;
+    virtual Task<void> put_maintenance_config(std::string_view bucket, const Levels& levels, std::string_view name,
+                                              const MaintenanceConfig& c) = 0;
+    virtual Task<void> delete_maintenance_config(std::string_view bucket, const Levels& levels,
+                                                 std::string_view name) = 0;
 
     // DeleteBucket: drop everything the catalog holds for the bucket
     virtual Task<void> delete_bucket_state(std::string_view bucket) = 0;

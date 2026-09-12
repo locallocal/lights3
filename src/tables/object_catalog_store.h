@@ -26,6 +26,9 @@ public:
     static std::string commit_key(std::string_view bucket, std::string_view table_id, std::string_view commit_id);
     static std::string rename_dir(std::string_view bucket);
     static std::string rename_key(std::string_view bucket, std::string_view id);
+    // "tables-catalog/<bucket>/maint/<ns-path>/<t>.json": kept apart from tbl/ so the
+    // table listings never see it
+    static std::string maint_key(std::string_view bucket, const Levels& levels, std::string_view name);
 
     Task<std::optional<Versioned<NamespaceEntry>>> get_namespace(std::string_view bucket,
                                                                  const Levels& levels) override;
@@ -53,6 +56,12 @@ public:
     Task<std::vector<RenameIntent>> list_renames(std::string_view bucket) override;
     Task<std::string> put_rename(std::string_view bucket, const RenameIntent& r, storage::PutCondition cond) override;
     Task<void> delete_rename(std::string_view bucket, std::string_view id) override;
+
+    Task<std::optional<MaintenanceConfig>> get_maintenance_config(std::string_view bucket, const Levels& levels,
+                                                                  std::string_view name) override;
+    Task<void> put_maintenance_config(std::string_view bucket, const Levels& levels, std::string_view name,
+                                      const MaintenanceConfig& c) override;
+    Task<void> delete_maintenance_config(std::string_view bucket, const Levels& levels, std::string_view name) override;
 
     Task<void> delete_bucket_state(std::string_view bucket) override;
     Task<bool> bucket_state_empty(std::string_view bucket) override;

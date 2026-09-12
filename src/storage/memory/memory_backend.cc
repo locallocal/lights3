@@ -91,6 +91,17 @@ MemoryBackend::Bucket& MemoryBackend::bucket_or_throw(const std::string& name) {
     return it->second;
 }
 
+bool MemoryBackend::set_mtime_for_tests(std::string_view bucket, std::string_view key,
+                                        std::chrono::system_clock::time_point t) {
+    std::lock_guard lk(m_);
+    auto b = buckets_.find(std::string(bucket));
+    if (b == buckets_.end()) return false;
+    auto o = b->second.objects.find(std::string(key));
+    if (o == b->second.objects.end()) return false;
+    o->second.meta.last_modified = t;
+    return true;
+}
+
 Task<void> MemoryBackend::create_bucket(std::string_view bucket) {
     validate_bucket_name(bucket, kAllowReserved);
     std::lock_guard lk(m_);

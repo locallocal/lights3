@@ -763,6 +763,13 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // `lights3-ctl duostore|tier ...`), same job model as fsck
             api_name = req.path.rfind("/-/admin/tier/", 0) == 0 ? "AdminTier" : "AdminDuostore";
             resp = co_await admin_jobs(req, access_key, ctx);
+#ifdef LIGHTS3_TABLES
+        } else if (internal && tables_api_ && req.path.rfind("/-/admin/tables/", 0) == 0) {
+            // Table maintenance jobs on the admin plane (docs/s3-tables/step-4-maintenance.md §5,
+            // `lights3-ctl tables plan|run`), same job model, resource = the table
+            api_name = "AdminTables";
+            resp = co_await admin_tables_jobs(req, access_key, ctx);
+#endif
         } else if (internal && req.path.rfind("/-/admin/objects/", 0) == 0) {
             // Object layout introspection (roadmap §6.2, `lights3-ctl object inspect`)
             api_name = "AdminObjectInspect";

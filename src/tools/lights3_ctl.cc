@@ -20,6 +20,7 @@
 #include "tools/lights3_ctl_object.h"
 #include "tools/lights3_ctl_quota.h"
 #include "tools/lights3_ctl_reload.h"
+#include "tools/lights3_ctl_tables.h"
 #include "tools/lights3_ctl_tenant.h"
 #include "tools/lights3_ctl_usage.h"
 #include "tools/lights3_ctl_website.h"
@@ -41,7 +42,8 @@ int main(int argc, char* argv[]) {
         "`fsck`, bucket quotas under `quota`, tenants under `tenant`, usage "
         "counters under `usage`, configuration hot reload under `reload`, object layout "
         "introspection under `object`, multipart cleanup under `mpu`, duostore / tiered "
-        "maintenance rounds on the live gateway under `duostore` and `tier`; run "
+        "maintenance rounds on the live gateway under `duostore` and `tier`, the S3 Tables "
+        "catalog (table buckets, listing, maintenance, diagnostics) under `tables`; run "
         "`lights3-ctl help <command>` for details.",
         "lights3 ops CLI.",
         // Bare lights3-ctl / lights3-ctl -x: nothing actionable to run; print help and exit as a
@@ -69,6 +71,7 @@ int main(int argc, char* argv[]) {
     root->add_subcommand(lights3_ctl::make_mpu());
     root->add_subcommand(lights3_ctl::make_duostore());
     root->add_subcommand(lights3_ctl::make_tier());
+    root->add_subcommand(lights3_ctl::make_tables());
     root->execute(argc, argv);
     return lights3_ctl::g_exit;
 }

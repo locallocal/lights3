@@ -38,7 +38,7 @@ rados 看 `LIGHTS3_TEST_RADOS_CONF` + `_POOL`。`docker compose --profile e2e ru
   `/iceberg/v1/config` → 启用表桶（非 root 403）→ namespace / 表 → 保留前缀下的
   metadata.json 可读不可写 → 手工 CommitTable（add-snapshot 指向预放的 manifest-list）
   → 同 commit-id 重放幂等 → 陈旧 requirement 409 → 缺 manifest 409 → rename → 非空
-  表桶 DeleteBucket 409 → `purgeRequested=true` 406 → drop → 桶名 `iceberg` 400 →
+  表桶 DeleteBucket 409 → `purgeRequested=maybe` 400 → drop → 桶名 `iceberg` 400 →
   `lights3_tables_commits_total` 计数；步骤 ②：`s3tables` 签名名在目录面通过、S3 面 400，
   `X-Iceberg-Access-Delegation` 下发的会话凭证在表前缀内 PUT 200 / 前缀外 403 / 读 metadata
   200 / AssumeRole 403，表桶上的 lifecycle 规则被接受但 WARN。单测：`test_tables_iceberg.cc`（纯函数）、
@@ -53,7 +53,14 @@ rados 看 `LIGHTS3_TEST_RADOS_CONF` + `_POOL`。`docker compose --profile e2e ru
   深度 / 未知 codec、PyIceberg 固件逐字段对照）、`test_tables_catalog.cc` 追加深校验六种 409
   与 codec 两态、诊断五态与 `recover` 指针不动、rename 五个故障点由另一实例恢复 + Prepared
   超时回滚、`test_tables_rest.cc` 的 diagnostics / recovery / 304 / `skipped-codec`、
-  `test_admin_jobs.cc` 的 fsck 扩展合并与目录对账三类 finding。
+  `test_admin_jobs.cc` 的 fsck 扩展合并与目录对账三类 finding。步骤 ④（[s3-tables/step-4-maintenance.md](s3-tables/step-4-maintenance.md)）：
+  e2e 段加 `maintenance/config` 默认与表级设置、plan 作业绑定 version token 且安全窗口内无候选、
+  run 作业不删文件、只读凭证 plan 403、管理面 `/-/admin/tables/...` 202、`lights3-ctl tables
+  status|list|plan|run|diagnose|recover|purge`（purge 无 `--yes` 退出 2，purge 后 metadata 404、
+  目录 404）。单测：`test_tables_maintenance.cc`（保留集与安全窗口、快照过期与 tag / ref 规则 /
+  `remove-snapshots` 提交、孤儿 fail-closed、StalePlan / `delete_enabled` / 删前复核、purge、
+  runner 经作业框架跳过忙表 + 墓碑 TTL + 后台 tick）、`test_tables_rest.cc` 的
+  `tables_rest_maintenance_endpoints`（端点、权限、管理面、`purgeRequested=true` 作业）。
 - **lights3-ctl 交叉验证**：curl 用 libcurl 的 SigV4，lights3-ctl 用自实现签名，两套客户端
   打同一服务端。`cred create/list/get --show-secret/delete`（lights3-ctl 铸的凭证 curl
   能签、吊销后 curl 403）、`website set/get/delete`（curl 读回 lights3-ctl 写的配置）、

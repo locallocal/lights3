@@ -51,6 +51,13 @@ public:
     ~RedisMetaStore() override;
     RedisMetaStore(const RedisMetaStore&) = delete;
 
+    // KV facade (docs/s3-tables/step-6-optional.md §5)
+    std::optional<KvItem> kv_get(std::string_view key) override;
+    std::string kv_put(std::string_view key, std::string_view value, PutCondition cond) override;
+    bool kv_delete(std::string_view key) override;
+    std::vector<KvItem> kv_scan(std::string_view prefix, std::string_view after, size_t limit) override;
+    std::vector<std::string> kv_put_batch(std::span<const KvPut> puts) override;
+
     void create_bucket(std::string_view b) override;
     void delete_bucket(std::string_view b) override;
     bool bucket_exists(std::string_view b) override;
@@ -152,6 +159,10 @@ private:
 
     // ---- Key construction (§2.2; prefix + '\0'-separated compound segments) ----
     std::string key(std::string_view suffix) const;
+    // tc (HASH key→value), tce (HASH key→etag), tcz (ZSET lex index of keys): the KV facade
+    std::string kv_hash_key() const;
+    std::string kv_etag_key() const;
+    std::string kv_index_key() const;
     std::string buckets_key() const;
     // o:<b>   HASH
     std::string objects_key(std::string_view b) const;

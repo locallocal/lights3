@@ -220,6 +220,20 @@ refs_stale 可能是巡检期间 MPU complete 造成的暂态，复跑确认。�
 ./build/lights3 tier quarantine purge tierdata archive photos/2024/a.jpg -c /etc/lights3/lights3.yaml
 ```
 
+### 2.6 `tables export` / `tables import`
+
+S3 Tables 目录状态在两种后备之间迁移（[s3-tables-design.md §12](s3-tables-design.md)，
+`tables.catalog_backing: object | duostore`）。离线：后端构建、不监听；先停掉全部网关。
+
+```bash
+lights3 tables export catalog.jsonl --config=/etc/lights3/lights3.yaml                 # 读配置里的后备
+lights3 tables import catalog.jsonl --backing=duostore --config=/etc/lights3/lights3.yaml
+```
+
+每行 `{"bucket","key","body"}`：`key` 是两种后备共用的目录键（`tables-catalog/<bucket>/…`），
+`body` 是对象 JSON；import 覆盖同键。表桶标记（`.sys/tables/`）不在其中——两种后备都读
+`.sys`。`--backing` 覆盖配置值，迁移即"旧配置 export → 改配置 → import"。
+
 ### 2.5 配置热重载：`SIGHUP`
 
 `kill -HUP <pid>` 让服务进程重新读取 `--config` 指定的文件（roadmap §4.4，

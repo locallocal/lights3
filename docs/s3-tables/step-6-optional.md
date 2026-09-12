@@ -1,8 +1,7 @@
 # 步骤 ⑥：可选项
 
-> 状态：**未实现，按需**（实施稿 2026-09-11）。对应设计 §6.3 views 行、§9 末段、
-> §12、§14 ⑥。每项独立，无相互依赖；做哪项由需求决定，做完把该项从本文删除并
-> 在设计文档对应章节写明。
+> 状态：**已实现（2026-09-12，分支 feat/s3-tables-step6，全部五项）**。对应设计 §6.3 views 行、§9 末段、
+> §12、§14 ⑥。各项独立；实现记录见 §7，设计文档对应章节已回写。
 
 ## 1. Iceberg views
 
@@ -10,56 +9,77 @@
 实现量小于表（无快照图）。
 
 - `ViewEntry`：与 `TableEntry` 同形（`view_id` / `view_uuid` / `metadata_location` /
-  `version_token` / `generation`，`format_version = 1`），`.sys` 键
+  `version_token` / `generation`，format-version 1），`.sys` 键
   `…/ns/<ns>/view/<name>.json`；保留目录 `<reserved>/<ns>/<name>/view-metadata/`。
-  表与 view 同名互斥（create 时各查一次）。
+  表与 view 同名互斥（create / rename 时各查一次）。
 - REST：`GET/POST …/views`、`GET/HEAD/POST/DELETE …/views/{v}`、`POST /{w}/views/rename`；
-  请求 `{"name","location?","schema","view-version":{"version-id","schema-id","timestamp-ms","summary","representations":[{"type":"sql","sql","dialect"}],"default-namespace"},"properties"}`；
+  请求 `{"name","location?","schema","view-version":{"representations":[{"type":"sql","sql","dialect"}],"default-namespace","summary?"},"properties"}`；
   replace（POST）的 `requirements` 只认 `assert-view-uuid`，`updates` 认
   `assign-uuid|upgrade-format-version|add-schema|add-view-version|set-current-view-version|set-location|set-properties|remove-properties`。
-- 复用 `Catalog::commit_table` 的骨架（去掉快照校验），错误类型 `NoSuchViewException`。
-- `/config.endpoints` 追加 view 端点。
-- 单测：create / load / replace（版本 +1）/ rename / drop；与表同名 409。
+- 错误类型 `NoSuchViewException`；`/config.endpoints` 含 view 端点。
 
-## 2. `/_iceberg/v1` 别名与 `s3tables` 默认签名
+## 2. `/_iceberg/v1` 别名
 
 `tables.compat_prefix` 非空时 dispatch 两个前缀都匹配；`GET /config` 的
-`defaults["lights3.catalog-compat-prefix"]`；CreateBucket 同时保留 `_iceberg` 名。
-签名名在 ② 已放开，这里只是文档与冒烟脚本的 `--compat` 开关。价值：MinIO AIStor
+`defaults["lights3.catalog-compat-prefix"]`；CreateBucket 同时保留两个前缀的首段。
+签名名在 ② 已放开；冒烟脚本用 `LIGHTS3_TABLES_PREFIX=/_iceberg` 切换。价值：MinIO AIStor
 迁移用户的配置零改动。
 
 ## 3. `reportMetrics` 落审计
 
-`POST …/tables/{t}/metrics`（① 已 204 丢弃）改为解析
-`{"report-type":"scan-report"|"commit-report", ...}` 写审计事件 `tables.metrics`
-（`detail` = 精简后的 JSON：`filter`、`projected-field-names`、`metrics.result-data-files`
-等计数）。上限 64 KiB，超出仍 204 但不记录。价值：查询审计与热表统计；零风险。
+`POST …/tables/{t}/metrics` 解析 `{"report-type":"scan-report"|"commit-report", ...}` 写审计事件
+`tables.metrics`（`detail` = 精简后的 JSON：`report-type`、`table-name`、`snapshot-id`、`filter`、
+`projected-field-names`、`metrics` 各计数 / 计时、`metadata`）。上限 64 KiB，超出或不是 JSON
+仍 204 但不记录。
 
 ## 4. compaction 候选规划输出
 
-`plan` 报告增加 `compaction_candidates`：读当前快照的 manifest（③ 已有），把
-`content == 0`、`size_bytes ≤ small_file_threshold` 的数据文件按
-`(partition 目录前缀, sort_order_id)` 分组，组内按 `target_file_size` 贪心装箱，
-输出 `[{"partition":"…","sort-order-id":0,"files":[…],"bytes":N}]`；不执行重写
-（交给 Spark `rewrite_data_files` 或引擎自带 compaction）。`delete` 文件存在的分区
-标 `row_level_required`。价值：给运维/引擎一个"该合并什么"的机器可读清单。
+`plan` 报告的 `compaction-candidates`：读当前快照的 manifest（③ 的遍历），把
+`content == 0`、`size_bytes ≤ small_file_ratio × target` 的数据文件按
+`(桶内目录前缀, sort_order_id)` 分组，组内按 `target_file_size_bytes` 首次适应递减装箱，
+输出 `[{"partition","sort-order-id","files":[…],"bytes","row-level-required"}]`（≥ 2 个文件的箱才
+输出）；不执行重写。目标大小取表属性 `write.target-file-size-bytes`，默认 512 MiB，
+`small_file_ratio` 0.75；有 delete 文件的分区标 `row-level-required`。
 
 ## 5. duostore-meta 后备（设计 §12）
 
-`DuoMetaCatalogStore : ITableCatalogStore`，条件：默认后端是 duostore。
+`DuoMetaCatalogStore : ITableCatalogStore`，条件：默认后端是 duostore，
+`tables.catalog_backing: duostore`。
 
-- `IMetaStore` 增加通用 KV 面：`kv_get(prefix,key) / kv_put(prefix,key,value,PutCondition) / kv_delete / kv_scan(prefix, after, limit)`
-  （新 column family `tc`，redis 用 hash+Lua、tikv 用事务、rocksdb 用 WriteBatch、sqlite 用表）；
-  `PutCondition.if_match_etag` 的 etag = `sha256(value)` 前 16 字节 hex，由 KV 层计算并在事务内比对。
-- 提交协议的 7–9 步合成一个事务（`kv_put` commit + `kv_put` table 同批），崩溃窗口矩阵退化为一行。
-- 配置 `tables.catalog_backing: object | duostore`（默认 object）；两种后备之间迁移用
-  `lights3 tables export|import`（离线，JSON 行）。
-- 单测：`backend_suite` 风格的 `catalog_store_suite.h` 对两个实现跑同一组用例。
-
-价值：单表提交少三次对象写、跨网关靠 meta 事务而非对象 CAS；难度高（四种 meta 各一份 KV 面），
-只有 duostore 部署且提交 QPS 成为瓶颈时才值得。
+- `IMetaStore` 通用 KV 面：`kv_get / kv_put(key, value, PutCondition) / kv_delete / kv_scan(prefix, after, limit) /
+  kv_put_batch`（rocksdb 新 column family `tc`、sqlite 表 `tc`、redis hash `tc` + etag hash `tce` +
+  lex zset `tcz`、tikv 键标签 `T`）；etag = `sha256(value)` 前 16 字节 hex，由引擎算并在自己的
+  原子区内比对（`check_kv_condition`）。
+- 键布局与 `ObjectCatalogStore` 完全相同，因此 `lights3 tables export|import` 在两种后备之间
+  逐字节搬运；提交的记录与指针在 `commit_atomic` 一批落地（`kv_put_batch`），无 STAGED 记录、
+  无 finalization gap。
+- 单测：`catalog_store_suite.h` 对 ObjectCatalogStore(memory) 与 DuoMetaCatalogStore(rocksdb /
+  sqlite / redis / tikv) 跑同一组用例；`meta_store_suite.h` 的 `case_kv_facade` 对四个引擎跑 KV 面。
 
 ## 6. 不做（重申设计 §15）
 
 多表事务、`/plan` `/tasks` `/sign`、compaction 执行、durable-strong 单快照、Delta/Hudi、
 跨区域双活写。
+
+## 7. 实现记录（2026-09-12）
+
+- **views**：`iceberg/view_metadata.{h,cc}`（初始元数据、校验、requirements / updates）；
+  `Catalog::create_view / load_view / view_exists / list_views / replace_view / rename_view / drop_view`；
+  rename 是"先写目标、再把源改墓碑"两步（无 intent：view 没有在途读者要 fence）；replace 复用表提交
+  的骨架但不写 commit 记录（view 无快照图，诊断只针对表）。`ObjectCatalogStore` /
+  `DuoMetaCatalogStore` 的 `namespace_has_children` / `bucket_state_empty` / 子 namespace 列表都认得
+  `view/` 目录；fsck 的对账不覆盖 view。view 的 `location` 默认 `s3://<bucket>/<ns>/<name>`。
+- **别名**：`RestApi::matched_prefix` 决定 dispatch 跳过的段数；`TableBucketGuard` 在 ① 就已保留
+  两个前缀的首段。
+- **reportMetrics**：`RestApi::report_metrics` 解析后经 `Hooks::audit` 记 `tables.metrics`。
+- **compaction**：`iceberg::live_files_of_snapshot`（当前快照的活跃条目）；`DataFile` 多了
+  `sort_order_id`；分区键用桶内目录（不是 URI）。
+- **duostore-meta**：`kv_*` 加在 `IMetaStore` 上带默认 `NotImplemented`（测试替身不受影响）；
+  `DuoStoreBackend::meta()` 暴露引擎；`app.cc` 取**原始**后端实例（不是计量装饰器）做
+  `dynamic_cast`；`Catalog::commit_table` 按 `store_->supports_atomic_commit()` 跳过 STAGED 写与
+  两个 `tables.commit.*` 故障点。`--check-config` 对 `catalog_backing: duostore` + 非 duostore
+  默认后端报错。tikv 变体只做了编译检查（无集群）。`DuoMetaCatalogStore` 的 KV 调用在调用线程
+  同步执行（redis / tikv 是网络往返；与 DuoStoreBackend 在池线程上跑 meta 的做法不同，
+  目录写路径本就串行且量小）。
+- **文档**：设计文档中英文 §6.3 / §9 / §10 / §12 / §14 回写；cli.md §2.6；s3-protocol；testing；
+  README；todo 删去 ⑥ 行。

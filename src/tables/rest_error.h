@@ -34,6 +34,7 @@ inline RestError forbidden(std::string m) { return {403, "ForbiddenException", s
 inline RestError not_authorized(std::string m) { return {401, "NotAuthorizedException", std::move(m)}; }
 inline RestError not_found_ns(std::string m) { return {404, "NoSuchNamespaceException", std::move(m)}; }
 inline RestError not_found_table(std::string m) { return {404, "NoSuchTableException", std::move(m)}; }
+inline RestError not_found_view(std::string m) { return {404, "NoSuchViewException", std::move(m)}; }
 inline RestError not_found_resource(std::string m) { return {404, "NoSuchResourceException", std::move(m)}; }
 inline RestError already_exists(std::string m) { return {409, "AlreadyExistsException", std::move(m)}; }
 inline RestError commit_failed(std::string m) { return {409, "CommitFailedException", std::move(m)}; }

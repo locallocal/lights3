@@ -118,6 +118,8 @@ RocksMetaStore::RocksMetaStore(RocksMetaOptions opt) : opt_(std::move(opt)) {
         {"refs", cf_opt},
         {"gcq", cf_opt},
         {"stats", stats_opt},
+        // S3 Tables catalog backing (KV facade); created on open for existing databases
+        {"tc", cf_opt},
     };
     rocksdb::DB* db = nullptr;
     auto s = rocksdb::DB::Open(options, opt_.path, descs, &cfs_, &db);
@@ -395,6 +397,59 @@ std::vector<BucketInfo> RocksMetaStore::list_buckets_snap(const rocksdb::Snapsho
     }
     if (!it->status().ok()) throw_status("list_buckets", it->status());
     // key byte order is lexicographic order
+    return out;
+}
+
+// ---------- KV facade (docs/s3-tables/step-6-optional.md §5) ----------
+
+std::optional<KvItem> RocksMetaStore::kv_get(std::string_view key) {
+    auto v = get_raw(kTc, key);
+    if (!v) return std::nullopt;
+    return KvItem{std::string(key), *v, kv_etag(*v)};
+}
+
+std::string RocksMetaStore::kv_put(std::string_view key, std::string_view value, PutCondition cond) {
+    KvPut one{std::string(key), std::string(value), cond};
+    return kv_put_batch(std::span<const KvPut>(&one, 1)).front();
+}
+
+std::vector<std::string> RocksMetaStore::kv_put_batch(std::span<const KvPut> puts) {
+    std::lock_guard lk(mu_);
+    rocksdb::WriteBatch batch;
+    std::vector<std::string> etags;
+    for (const auto& p : puts) {
+        std::optional<std::string> current;
+        if (auto v = get_raw(kTc, p.key)) current = kv_etag(*v);
+        check_kv_condition(p.cond, current, p.key);
+        batch.Put(cfs_[kTc], slice(p.key), slice(p.value));
+        etags.push_back(kv_etag(p.value));
+    }
+    commit(batch);
+    return etags;
+}
+
+bool RocksMetaStore::kv_delete(std::string_view key) {
+    std::lock_guard lk(mu_);
+    if (!get_raw(kTc, key)) return false;
+    rocksdb::WriteBatch batch;
+    batch.Delete(cfs_[kTc], slice(key));
+    commit(batch);
+    return true;
+}
+
+std::vector<KvItem> RocksMetaStore::kv_scan(std::string_view prefix, std::string_view after, size_t limit) {
+    std::vector<KvItem> out;
+    if (limit == 0) limit = 1000;
+    auto it = std::unique_ptr<rocksdb::Iterator>(db()->NewIterator(rocksdb::ReadOptions(), cfs_[kTc]));
+    it->Seek(after.empty() ? slice(prefix) : slice(after));
+    for (; it->Valid() && out.size() < limit; it->Next()) {
+        std::string_view k(it->key().data(), it->key().size());
+        if (k.substr(0, prefix.size()) != prefix) break;
+        if (!after.empty() && k <= after) continue;
+        std::string v(it->value().data(), it->value().size());
+        out.push_back(KvItem{std::string(k), v, kv_etag(v)});
+    }
+    if (!it->status().ok()) throw_status("kv_scan", it->status());
     return out;
 }
 

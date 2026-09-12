@@ -88,6 +88,7 @@ std::vector<DataFile> parse_manifest(avro::Reader& reader, size_t max_records,
             f.format = need_string(*df, "manifest", "file_format");
             f.content = small_int(opt_long(*df, "manifest", "content"), "manifest", "content");
             if (f.content > 2) bad("manifest", "content");
+            f.sort_order_id = small_int(opt_long(*df, "manifest", "sort_order_id"), "manifest", "sort_order_id");
             f.size_bytes = need_long(*df, "manifest", "file_size_in_bytes");
             f.record_count = need_long(*df, "manifest", "record_count");
             if (f.size_bytes < 0 || f.record_count < 0) bad("manifest", "file_size_in_bytes");

@@ -299,6 +299,7 @@ buckets:
 tables:
   enabled: true
   credential_vending: true
+  compat_prefix: /_iceberg
 log:
   level: info
 EOF
@@ -1191,6 +1192,33 @@ if [[ -x "$LIGHTS3_CTL" ]]; then
         "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/tbe2e/${TMP_ML#s3://tbe2e/}")"
     check "tables: the purged table is gone from the catalog" "404" "$(s3curl -o /dev/null -w '%{http_code}' -I "$TNS/tables/tmp")"
 fi
+# step ⑥ (docs/s3-tables/step-6-optional.md): the /_iceberg alias, views, reportMetrics
+check "tables: the compat prefix reaches the same catalog" "tbe2e" \
+    "$(s3curl "$BASE/_iceberg/v1/config?warehouse=tbe2e" | jq_field 'j["overrides"]["prefix"]')"
+check "tables: /config advertises the compat prefix" "/_iceberg/v1" \
+    "$(s3curl "$TB/config" | jq_field 'j["defaults"]["lights3.catalog-compat-prefix"]')"
+check "tables: the compat prefix's bucket name is reserved too" "400" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X PUT "$BASE/_iceberg")"
+VIEW_BODY='{"name":"vw","schema":{"type":"struct","fields":[{"id":1,"name":"x","required":false,"type":"int"}]},"view-version":{"representations":[{"type":"sql","sql":"select 1","dialect":"spark"}],"default-namespace":["e2e","demo"]}}'
+check "tables: create view" "1" \
+    "$(s3curl -X POST -H 'Content-Type: application/json' -d "$VIEW_BODY" "$TNS/views" | jq_field 'j["metadata"]["current-version-id"]')"
+VIEW_UUID=$(s3curl "$TNS/views/vw" | jq_field 'j["metadata"]["view-uuid"]')
+check "tables: list views" "vw" "$(s3curl "$BASE/_iceberg/v1/tbe2e/namespaces/e2e%1Fdemo/views" | jq_field 'j["identifiers"][0]["name"]')"
+check "tables: view exists (HEAD 204)" "204" "$(s3curl -o /dev/null -w '%{http_code}' -I "$TNS/views/vw")"
+check "tables: a table may not take a view's name" "409" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"name":"vw","schema":{"type":"struct","fields":[{"id":1,"name":"id","required":true,"type":"long"}]}}' "$TNS/tables")"
+check "tables: replace view adds a version" "2" \
+    "$(s3curl -X POST -H 'Content-Type: application/json' -d "{\"requirements\":[{\"type\":\"assert-view-uuid\",\"uuid\":\"$VIEW_UUID\"}],\"updates\":[{\"action\":\"add-view-version\",\"view-version\":{\"representations\":[{\"type\":\"sql\",\"sql\":\"select 2\",\"dialect\":\"spark\"}],\"schema-id\":-1}},{\"action\":\"set-current-view-version\",\"view-version-id\":-1}]}" "$TNS/views/vw" | jq_field 'j["metadata"]["current-version-id"]')"
+check "tables: a stale view uuid is a 409 CommitFailedException" "CommitFailedException" \
+    "$(s3curl -X POST -H 'Content-Type: application/json' -d '{"requirements":[{"type":"assert-view-uuid","uuid":"00000000-0000-4000-8000-000000000000"}],"updates":[]}' "$TNS/views/vw" | jq_field 'j["error"]["type"]')"
+check "tables: rename view" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+    -d '{"source":{"namespace":["e2e","demo"],"name":"vw"},"destination":{"namespace":["e2e","demo"],"name":"vw2"}}' "$TB/tbe2e/views/rename")"
+check "tables: the old view name is gone" "NoSuchViewException" "$(s3curl "$TNS/views/vw" | jq_field 'j["error"]["type"]')"
+check "tables: drop view" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$TNS/views/vw2")"
+check "tables: reportMetrics is accepted" "204" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"report-type":"scan-report","table-name":"e2e.demo.orders2","snapshot-id":1,"filter":{"type":"true"},"schema-id":0,"projected-field-names":["id"],"metrics":{"result-data-files":{"unit":"count","value":1}},"metadata":{"engine-name":"e2e"}}' "$TNS/tables/orders2/metrics")"
+check "tables: a maintenance plan lists compaction candidates" "0" \
+    "$(s3curl -X POST "$BASE/-/admin/tables/tbe2e/e2e/demo/orders2/plan" >/dev/null; sleep 0.5; s3curl "$BASE/-/admin/tables/tbe2e/e2e/demo/orders2/plan" | jq_field 'len(j["stats"]["compaction-candidates"])')"
 check "tables: drop table" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$TNS/tables/orders2")"
 check "tables: drop namespace" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$TNS")"
 check "tables: the catalog prefix's first segment is not a bucket name" "400" \

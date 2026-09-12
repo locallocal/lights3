@@ -1,6 +1,8 @@
 // Iceberg REST surface through the full S3Service dispatch (docs/s3-tables-design.md §6, §8.1,
 // docs/s3-tables/step-1-catalog-core.md §15): endpoints, error model, guard, config drift
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <nlohmann/json.hpp>
 #include <set>
 #include <thread>
@@ -10,6 +12,7 @@
 #include "core/util/checksum.h"
 #include "core/util/crypto.h"
 #include "core/util/uri.h"
+#include "s3/audit.h"
 #include "s3/auth/credential_store.h"
 #include "s3/lifecycle.h"
 #include "s3/service.h"
@@ -52,7 +55,11 @@ struct TablesEnv {
         bool vending = false;
         bool accept_s3tables = true;
         bool tenants = false;
+        // step ⑥: the /_iceberg alias and an audit log file for reportMetrics
+        std::string compat_prefix;
+        std::string audit_path;
     };
+    std::shared_ptr<AuditLog> audit;
     std::shared_ptr<TenantStore> tenant_store;
     std::shared_ptr<OwnerStore> owner_store;
     std::shared_ptr<TenantRegistry> tenants;
@@ -63,6 +70,7 @@ struct TablesEnv {
         cfg.enabled = enabled;
         cfg.credential_vending = o.vending;
         cfg.accept_s3tables_signing = o.accept_s3tables;
+        cfg.compat_prefix = o.compat_prefix;
         cred_store = sync_wait(CredentialStore::load(backend, acfg));
         auth.set_provider(cred_store);
         std::map<std::string, std::shared_ptr<storage::IStorageBackend>> bmap{{"mem", backend}};
@@ -71,6 +79,12 @@ struct TablesEnv {
         auto router = storage::BucketRouter::build(bcfg, std::move(bmap));
         svc = std::make_unique<S3Service>(router, auth);
         svc->set_credential_store(cred_store);
+        if (!o.audit_path.empty()) {
+            AuditConfig acfg2;
+            acfg2.path = o.audit_path;
+            audit = AuditLog::open(acfg2);
+            svc->set_audit_log(audit);
+        }
         if (o.tenants) {
             tenant_store = sync_wait(TenantStore::load(backend));
             owner_store = sync_wait(OwnerStore::load(backend));
@@ -827,4 +841,121 @@ TEST(tables_rest_maintenance_endpoints) {
     CHECK_EQ(env.call("DELETE", table, "", {{"purgeRequested", "maybe"}}).status, 400);
     // none of it is advertised
     for (auto& e : tables::RestApi::advertised_endpoints()) CHECK(e.find("maintenance") == std::string::npos);
+}
+
+// ---------- step ⑥: views, the /_iceberg alias, reportMetrics into the audit log ----------
+
+TEST(tables_rest_views_compat_prefix_and_metrics) {
+    std::string audit_path = (std::filesystem::temp_directory_path() /
+                              ("lights3-tables-audit-" + std::to_string(::getpid()) + ".log"))
+                                 .string();
+    std::filesystem::remove(audit_path);
+    TablesEnv::Options o;
+    o.compat_prefix = "/_iceberg";
+    o.audit_path = audit_path;
+    {
+        TablesEnv env(o);
+        CHECK_EQ(env.call("PUT", "/tbk").status, 200);
+        CHECK_EQ(env.call("PUT", "/iceberg/v1/buckets/tbk").status, 200);
+        // the alias reaches the same catalog; /config advertises it; its bucket name is reserved
+        auto cfg = env.call("GET", "/_iceberg/v1/config", "", {{"warehouse", "tbk"}});
+        CHECK_EQ(cfg.status, 200);
+        CHECK_EQ(TablesEnv::body_json(cfg)["defaults"]["lights3.catalog-compat-prefix"].get<std::string>(),
+                 "/_iceberg/v1");
+        CHECK_EQ(TablesEnv::body_json(cfg)["overrides"]["prefix"].get<std::string>(), "tbk");
+        CHECK_EQ(env.call("POST", "/_iceberg/v1/tbk/namespaces", R"({"namespace":["sales"]})").status, 200);
+        CHECK_EQ(env.call("HEAD", "/iceberg/v1/tbk/namespaces/sales").status, 204);
+        CHECK_EQ(env.call("PUT", "/_iceberg").status, 400);
+        CHECK_EQ(env.call("PUT", "/iceberg").status, 400);
+        // views: create / list / load / exists / replace / rename / drop, and the endpoints list
+        const std::string body =
+            R"({"name":"v","schema":{"type":"struct","fields":[{"id":1,"name":"x","required":false,"type":"int"}]},
+            "view-version":{"representations":[{"type":"sql","sql":"select 1","dialect":"spark"}],"default-namespace":["sales"]},
+            "properties":{"comment":"c"}})";
+        auto cv = env.call("POST", "/iceberg/v1/tbk/namespaces/sales/views", body);
+        CHECK_EQ(cv.status, 200);
+        auto cvj = TablesEnv::body_json(cv);
+        std::string uuid = cvj["metadata"]["view-uuid"];
+        CHECK_EQ(cvj["metadata"]["current-version-id"].get<int>(), 1);
+        CHECK_EQ(cvj["metadata-location"].get<std::string>().rfind("s3://tbk/.lights3-table/sales/v/view-metadata/", 0),
+                 size_t(0));
+        CHECK(cv.headers.has("ETag"));
+        CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/sales/views", body).status, 409);
+        CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/sales/views", R"({"name":"w"})").status, 400);
+        auto lv = env.call("GET", "/_iceberg/v1/tbk/namespaces/sales/views");
+        CHECK_EQ(TablesEnv::body_json(lv)["identifiers"][0]["name"].get<std::string>(), "v");
+        CHECK_EQ(env.call("HEAD", "/iceberg/v1/tbk/namespaces/sales/views/v").status, 204);
+        auto nf = env.call("GET", "/iceberg/v1/tbk/namespaces/sales/views/nope");
+        CHECK_EQ(nf.status, 404);
+        CHECK_EQ(TablesEnv::error_type(nf), "NoSuchViewException");
+        // a table may not take the view's name and vice versa
+        CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/sales/tables", create_body("v")).status, 409);
+        CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/sales/tables", create_body("t")).status, 200);
+        CHECK_EQ(
+            env.call(
+                   "POST", "/iceberg/v1/tbk/namespaces/sales/views",
+                   R"({"name":"t","schema":{"type":"struct","fields":[]},"view-version":{"representations":[{"type":"sql","sql":"x","dialect":"d"}]}})")
+                .status,
+            409);
+        auto rv = env.call(
+            "POST", "/iceberg/v1/tbk/namespaces/sales/views/v",
+            R"({"identifier":{"namespace":["sales"],"name":"v"},"requirements":[{"type":"assert-view-uuid","uuid":")" +
+                uuid +
+                R"("}],"updates":[{"action":"add-view-version","view-version":{"representations":[{"type":"sql","sql":"select 2","dialect":"spark"}],"schema-id":-1}},{"action":"set-current-view-version","view-version-id":-1}]})");
+        CHECK_EQ(rv.status, 200);
+        CHECK_EQ(TablesEnv::body_json(rv)["metadata"]["current-version-id"].get<int>(), 2);
+        auto stale = env.call(
+            "POST", "/iceberg/v1/tbk/namespaces/sales/views/v",
+            R"({"requirements":[{"type":"assert-view-uuid","uuid":"00000000-0000-4000-8000-000000000000"}],"updates":[]})");
+        CHECK_EQ(stale.status, 409);
+        CHECK_EQ(TablesEnv::error_type(stale), "CommitFailedException");
+        CHECK_EQ(
+            env.call(
+                   "POST", "/iceberg/v1/tbk/views/rename",
+                   R"({"source":{"namespace":["sales"],"name":"v"},"destination":{"namespace":["sales"],"name":"v2"}})")
+                .status,
+            204);
+        CHECK_EQ(env.call("HEAD", "/iceberg/v1/tbk/namespaces/sales/views/v").status, 404);
+        CHECK_EQ(env.call("GET", "/iceberg/v1/tbk/namespaces/sales/views/v2").status, 200);
+        // a read-only credential loads but may not replace / drop
+        const size_t ro = env.add_policy_cred("ro", R"({"buckets":["tbk"],"readonly":true})");
+        CHECK_EQ(env.call("GET", "/iceberg/v1/tbk/namespaces/sales/views/v2", "", {}, {}, ro).status, 200);
+        CHECK_EQ(env.call("DELETE", "/iceberg/v1/tbk/namespaces/sales/views/v2", "", {}, {}, ro).status, 403);
+        CHECK_EQ(env.call("DELETE", "/iceberg/v1/tbk/namespaces/sales/views/v2").status, 204);
+        CHECK_EQ(env.call("DELETE", "/iceberg/v1/tbk/namespaces/sales/views/v2").status, 404);
+        std::set<std::string> endpoints;
+        for (auto& e : tables::RestApi::advertised_endpoints()) endpoints.insert(e);
+        CHECK(endpoints.count("POST /v1/{prefix}/namespaces/{namespace}/views"));
+        CHECK(endpoints.count("GET /v1/{prefix}/namespaces/{namespace}/views/{view}"));
+        CHECK(endpoints.count("POST /v1/{prefix}/views/rename"));
+        // reportMetrics: recorded as tables.metrics; oversized reports are accepted silently
+        auto mr = env.call(
+            "POST", "/iceberg/v1/tbk/namespaces/sales/tables/t/metrics",
+            R"({"report-type":"scan-report","table-name":"sales.t","snapshot-id":1,"filter":{"type":"true"},
+                               "schema-id":0,"projected-field-names":["id"],
+                               "metrics":{"result-data-files":{"unit":"count","value":3},"total-planning-duration":{"count":1,"time-unit":"nanoseconds","total-duration":1200}},
+                               "metadata":{"engine-name":"pyiceberg"}})");
+        CHECK_EQ(mr.status, 204);
+        std::string big = R"({"report-type":"scan-report","table-name":"sales.t","metrics":{},"metadata":{"pad":")" +
+                          std::string(70 * 1024, 'x') + R"("}})";
+        CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/sales/tables/t/metrics", big).status, 204);
+        CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/sales/tables/t/metrics", "not json").status, 204);
+        env.audit->flush();
+    }
+    std::ifstream in(audit_path);
+    std::vector<json> lines;
+    for (std::string line; std::getline(in, line);) lines.push_back(json::parse(line));
+    size_t metrics = 0;
+    for (auto& j : lines) {
+        if (j.value("event", "") != "tables.metrics") continue;
+        ++metrics;
+        json detail = json::parse(j.value("detail", "{}"));
+        CHECK_EQ(detail["report-type"].get<std::string>(), "scan-report");
+        CHECK_EQ(detail["metrics"]["result-data-files"].get<int>(), 3);
+        CHECK_EQ(detail["metrics"]["total-planning-duration"]["count"].get<int>(), 1);
+        CHECK_EQ(detail["projected-field-names"][0].get<std::string>(), "id");
+        CHECK_EQ(j.value("key", ""), "sales/t");
+    }
+    CHECK_EQ(metrics, size_t(1));
+    std::filesystem::remove(audit_path);
 }

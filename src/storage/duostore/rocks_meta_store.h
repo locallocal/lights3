@@ -98,6 +98,13 @@ public:
     // Online-dump snapshot (roadmap §3.7): pins a RocksDB snapshot; all four view
     // reads run against it. Borrows this store — destroy before close()
     std::unique_ptr<IMetaReadView> snapshot() override;
+
+    // KV facade (column family "tc"; docs/s3-tables/step-6-optional.md §5)
+    std::optional<KvItem> kv_get(std::string_view key) override;
+    std::string kv_put(std::string_view key, std::string_view value, PutCondition cond) override;
+    bool kv_delete(std::string_view key) override;
+    std::vector<KvItem> kv_scan(std::string_view prefix, std::string_view after, size_t limit) override;
+    std::vector<std::string> kv_put_batch(std::span<const KvPut> puts) override;
     // Backup chain (backlog-sequence ⑧): rocksdb::BackupEngine on dir/rocksdb --
     // every backup is self-sufficient (SST files shared between backups, so a
     // "full" and an "incremental" entry cost the same); the manifest marker is
@@ -115,7 +122,7 @@ public:
 private:
     class SnapshotView;
     // CF indices (table in §4.1)
-    enum Cf { kDefault = 0, kBuckets, kObjects, kUploads, kParts, kRefs, kGcq, kStats, kNumCf };
+    enum Cf { kDefault = 0, kBuckets, kObjects, kUploads, kParts, kRefs, kGcq, kStats, kTc, kNumCf };
 
     // Id segment reservation (§4.5): one merge of +kIdSegment on the stats counter,
     // then in-memory dispatch

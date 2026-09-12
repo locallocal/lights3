@@ -29,6 +29,9 @@
 
 #include "cli/cli_common.h"
 #include "cli/cli_fsck.h"
+#ifdef LIGHTS3_TABLES
+#include "cli/cli_tables.h"
+#endif
 #include "cli/cli_server.h"
 #include "cli/cli_tier.h"
 #ifdef LIGHTS3_DUOSTORE
@@ -93,6 +96,9 @@ int main(int argc, char** argv) {
 #endif
     root->add_subcommand(make_tier());
     root->add_subcommand(make_fsck());
+#ifdef LIGHTS3_TABLES
+    root->add_subcommand(make_tables());
+#endif
 
     try {
         root->execute(normalize_argv(argc, argv));

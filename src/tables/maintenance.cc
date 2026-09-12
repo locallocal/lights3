@@ -123,6 +123,8 @@ EffectiveMaintenance resolve_maintenance(const TablesConfig& cfg, const std::opt
         }
         e.planner.min_snapshots_to_keep = static_cast<int>(*keep);
     }
+    if (auto target = property_int(table_properties, "write.target-file-size-bytes"))
+        if (*target > 0) e.planner.target_file_size_bytes = *target;
     if (e.planner.retain_recent < 0) e.planner.retain_recent = 0;
     if (e.planner.min_snapshots_to_keep < 1) e.planner.min_snapshots_to_keep = 1;
     return e;
@@ -141,6 +143,16 @@ json MaintenancePlan::to_json() const {
     j["expire-updates"] = expire_updates;
     j["expire-requirements"] = expire_requirements;
     j["orphan-candidates"] = orphan_candidates;
+    j["compaction-candidates"] = json::array();
+    for (auto& c : compaction_candidates) {
+        json g;
+        g["partition"] = c.partition;
+        g["sort-order-id"] = c.sort_order_id;
+        g["files"] = c.files;
+        g["bytes"] = c.bytes;
+        g["row-level-required"] = c.row_level_required;
+        j["compaction-candidates"].push_back(g);
+    }
     j["manual-review"] = manual_review;
     j["notes"] = notes;
     j["planned-unix"] = planned_unix;
@@ -160,6 +172,15 @@ std::optional<MaintenancePlan> MaintenancePlan::from_json(const json& j) {
         p.expire_updates = j.value("expire-updates", json::array());
         p.expire_requirements = j.value("expire-requirements", json::array());
         for (auto& k : j.value("orphan-candidates", json::array())) p.orphan_candidates.push_back(k);
+        for (auto& g : j.value("compaction-candidates", json::array())) {
+            CompactionCandidate c;
+            c.partition = g.value("partition", "");
+            c.sort_order_id = g.value("sort-order-id", 0);
+            for (auto& f : g.value("files", json::array())) c.files.push_back(f);
+            c.bytes = g.value("bytes", int64_t(0));
+            c.row_level_required = g.value("row-level-required", false);
+            p.compaction_candidates.push_back(std::move(c));
+        }
         p.manual_review = j.value("manual-review", false);
         for (auto& n : j.value("notes", json::array())) p.notes.push_back(n);
         p.planned_unix = j.value("planned-unix", int64_t(0));
@@ -336,6 +357,73 @@ Task<MaintenancePlan> plan_table(Catalog& catalog, std::string_view bucket, cons
                 }
             }
             std::sort(plan.orphan_candidates.begin(), plan.orphan_candidates.end());
+        }
+    }
+    // ---- 4. compaction candidates (step ⑥ §4): small data files of the current snapshot,
+    // grouped per (partition directory, sort order), greedily packed to the target ----
+    if (opt.target_file_size_bytes > 0) {
+        const json* current = iceberg::find_snapshot(md, iceberg::current_snapshot_id(md));
+        if (current) {
+            iceberg::SnapshotCheckContext ctx{backend, std::string(bucket), tb.reserved_prefix};
+            std::optional<std::vector<iceberg::DataFile>> files;
+            try {
+                files = co_await iceberg::live_files_of_snapshot(ctx, *current, opt.deep);
+            } catch (const RestError& e) {
+                plan.notes.push_back("compaction scan: " + e.message);
+            }
+            if (files) {
+                const int64_t small = static_cast<int64_t>(opt.target_file_size_bytes * opt.small_file_ratio);
+                std::set<std::string> delete_dirs;
+                std::map<std::pair<std::string, int>, std::vector<const iceberg::DataFile*>> groups;
+                // the bucket-relative directory of a file (Iceberg partitions are directories)
+                auto dir_of = [&](const std::string& path) {
+                    std::string key;
+                    try {
+                        key = path_to_key(bucket, path);
+                    } catch (const RestError&) {
+                        key = path;
+                    }
+                    auto slash = key.rfind('/');
+                    return slash == std::string::npos ? std::string() : key.substr(0, slash);
+                };
+                for (auto& f : *files) {
+                    if (f.content != 0) {
+                        delete_dirs.insert(dir_of(f.path));
+                        continue;
+                    }
+                    if (f.size_bytes <= 0 || f.size_bytes > small) continue;
+                    groups[{dir_of(f.path), f.sort_order_id}].push_back(&f);
+                }
+                for (auto& [key, members] : groups) {
+                    if (members.size() < 2) continue;
+                    std::vector<const iceberg::DataFile*> sorted = members;
+                    std::sort(sorted.begin(), sorted.end(),
+                              [](auto* a, auto* b) { return a->size_bytes > b->size_bytes; });
+                    // first-fit decreasing into bins of the target size
+                    std::vector<CompactionCandidate> bins;
+                    for (auto* f : sorted) {
+                        CompactionCandidate* bin = nullptr;
+                        for (auto& b : bins)
+                            if (b.bytes + f->size_bytes <= opt.target_file_size_bytes) {
+                                bin = &b;
+                                break;
+                            }
+                        if (!bin) {
+                            bins.emplace_back();
+                            bin = &bins.back();
+                            bin->partition = key.first;
+                            bin->sort_order_id = key.second;
+                            bin->row_level_required = delete_dirs.count(key.first) > 0;
+                        }
+                        bin->files.push_back(f->path);
+                        bin->bytes += f->size_bytes;
+                    }
+                    for (auto& b : bins)
+                        if (b.files.size() >= 2) plan.compaction_candidates.push_back(std::move(b));
+                }
+            } else {
+                plan.notes.push_back("compaction scan skipped: a manifest uses an unreadable Avro codec");
+            }
         }
     }
     co_return plan;

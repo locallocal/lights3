@@ -19,6 +19,10 @@
 #ifdef LIGHTS3_TABLES
 #include "tables/fsck.h"
 #include "tables/object_catalog_store.h"
+#ifdef LIGHTS3_DUOSTORE
+#include "storage/duostore/duostore_backend.h"
+#include "tables/duo_meta_catalog_store.h"
+#endif
 #endif
 
 namespace lights3 {
@@ -113,7 +117,22 @@ void Application::start_server() {
     if (auto w = tables_deployment_warning(cfg_)) LOG_WARN("{}", *w);
     if (cfg_.tables.enabled) {
         table_bucket_store_ = sync_wait(tables::TableBucketStore::load(router.default_backend()));
-        auto cat_store = std::make_shared<tables::ObjectCatalogStore>(router.default_backend());
+        std::shared_ptr<tables::ITableCatalogStore> cat_store;
+        if (cfg_.tables.catalog_backing == "duostore") {
+#ifdef LIGHTS3_DUOSTORE
+            // the raw instance (not the metered decorator) owns the meta engine
+            auto raw = backends_.find(cfg_.buckets.default_backend);
+            auto* duo = raw == backends_.end() ? nullptr : dynamic_cast<storage::DuoStoreBackend*>(raw->second.get());
+            if (!duo) throw std::runtime_error("tables.catalog_backing duostore needs a duostore default backend");
+            cat_store = std::make_shared<tables::DuoMetaCatalogStore>(duo->meta());
+            LOG_INFO("tables: catalog state on the duostore meta engine of '{}' (transactional commits)",
+                     cfg_.buckets.default_backend);
+#else
+            throw std::runtime_error("tables.catalog_backing duostore needs a build with duostore");
+#endif
+        } else {
+            cat_store = std::make_shared<tables::ObjectCatalogStore>(router.default_backend());
+        }
         tables_catalog_ = std::make_shared<tables::Catalog>(cat_store, table_bucket_store_, router, pool_, cfg_.tables,
                                                             MetricsScope(metrics_, {{"feature", "tables"}}));
         tables_api_ = std::make_shared<tables::RestApi>(tables_catalog_, cfg_.tables,

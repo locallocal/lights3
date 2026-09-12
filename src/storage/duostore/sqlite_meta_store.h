@@ -89,6 +89,13 @@ public:
     // open WAL read transaction on it — every view read observes the snapshot the
     // transaction materialized. Borrows this store — destroy before close()
     std::unique_ptr<IMetaReadView> snapshot() override;
+
+    // KV facade (table tc; docs/s3-tables/step-6-optional.md §5)
+    std::optional<KvItem> kv_get(std::string_view key) override;
+    std::string kv_put(std::string_view key, std::string_view value, PutCondition cond) override;
+    bool kv_delete(std::string_view key) override;
+    std::vector<KvItem> kv_scan(std::string_view prefix, std::string_view after, size_t limit) override;
+    std::vector<std::string> kv_put_batch(std::span<const KvPut> puts) override;
     // Backup chain (backlog-sequence ⑧): full = TRUNCATE checkpoint + online copy of
     // the database file (sqlite3_backup) into dir/<id>-full.sqlite3; incremental =
     // the -wal file since the previous chain point copied to dir/<id>-wal, then a

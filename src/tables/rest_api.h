@@ -67,8 +67,11 @@ public:
     Task<nlohmann::json> admin_job(std::string_view method, std::string_view bucket, const Levels& levels,
                                    std::string_view table, std::string_view op, const nlohmann::json& body);
 
-    // True when the path belongs to the catalog: "<prefix>/v1" or "<prefix>/v1/..."
+    // True when the path belongs to the catalog: "<prefix>/v1" or "<prefix>/v1/...", for
+    // tables.path_prefix and (when set) tables.compat_prefix (step ⑥ §2)
     bool matches(std::string_view path) const;
+    // the prefix a path was matched under ("" = none)
+    std::string matched_prefix(std::string_view path) const;
     // dispatch entry: never throws; access_key / api_name are out-params for the access log
     Task<http::HttpResponse> dispatch(http::HttpRequest& req, Hooks& hooks, std::string& access_key,
                                       std::string& api_name);
@@ -136,6 +139,13 @@ public:
     Task<http::HttpResponse> plan_maintenance(http::HttpRequest&, Hooks&, const Match&);
     Task<http::HttpResponse> run_maintenance(http::HttpRequest&, Hooks&, const Match&);
     Task<http::HttpResponse> maintenance_job(http::HttpRequest&, Hooks&, const Match&);
+    Task<http::HttpResponse> list_views(http::HttpRequest&, Hooks&, const Match&);
+    Task<http::HttpResponse> create_view(http::HttpRequest&, Hooks&, const Match&);
+    Task<http::HttpResponse> load_view(http::HttpRequest&, Hooks&, const Match&);
+    Task<http::HttpResponse> view_exists(http::HttpRequest&, Hooks&, const Match&);
+    Task<http::HttpResponse> replace_view(http::HttpRequest&, Hooks&, const Match&);
+    Task<http::HttpResponse> drop_view(http::HttpRequest&, Hooks&, const Match&);
+    Task<http::HttpResponse> rename_view(http::HttpRequest&, Hooks&, const Match&);
 
 private:
     // path after "<prefix>/v1/" split on '/', percent-decoded per segment
@@ -147,6 +157,7 @@ private:
     PageCursor page_cursor(const http::HttpRequest& req, std::string_view op, const Match& m) const;
     std::string page_token(std::string_view op, const Match& m, std::string_view after) const;
     nlohmann::json load_table_result(std::string_view bucket, const Catalog::LoadedTable& t) const;
+    nlohmann::json load_view_result(std::string_view bucket, const Catalog::LoadedView& v) const;
     // Credential vending outcome for one LoadTable / LoadCredentials (design §8.4)
     struct Vending {
         // nullopt = not vended; `reason` explains why

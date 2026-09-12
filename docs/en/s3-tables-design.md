@@ -1,9 +1,10 @@
 # S3 Tables: Apache Iceberg REST Catalog (design after studying RustFS)
 
-> Status: **implemented (§14 ①–⑤, 2026-09-12; ⑥ is optional and not done)**. Implementation
-> notes in `docs/s3-tables/step-1-catalog-core.md` §18, `step-2-authz-credentials.md` §12,
-> `step-3-validation-diagnostics.md` §12, `step-4-maintenance.md` §10 and
-> `step-5-multi-gateway-docs.md` §8 (Chinese); deviations are folded into the sections here. The document first answers
+> Status: **implemented (§14 ①–⑥, 2026-09-12)**. Implementation notes in
+> `docs/s3-tables/step-1-catalog-core.md` §18, `step-2-authz-credentials.md` §12,
+> `step-3-validation-diagnostics.md` §12, `step-4-maintenance.md` §10,
+> `step-5-multi-gateway-docs.md` §8 and `step-6-optional.md` §7 (Chinese); deviations are
+> folded into the sections here. The document first answers
 > "how does RustFS do S3 Tables" (§2, verified against source @853ae63 on
 > 2026-09-11), then gives the lights3 plan (§3–§13) and the implementation steps
 > (§14). Once code lands this file stays as the design-level document per repo
@@ -610,7 +611,7 @@ Standard endpoints (advertised in `GET /v1/config` `endpoints`):
 | GET / HEAD / POST / DELETE `/{w}/namespaces/{ns}/tables/{t}` | LoadTable / exists / CommitTable / DropTable | ① |
 | POST `/{w}/tables/rename` | RenameTable | ① |
 | GET `/{w}/namespaces/{ns}/tables/{t}/credentials` | LoadCredentials | ② |
-| GET/POST/HEAD/DELETE `…/views…`, POST `/{w}/views/rename` | Iceberg views (format v1) | ⑥ |
+| GET/POST/HEAD/DELETE `…/views…`, POST `/{w}/views/rename` | Iceberg views (format v1; replace accepts only `assert-view-uuid`, `NoSuchViewException`, a table and a view never share a name) | ⑥ (implemented) |
 
 Extensions (not in `endpoints`, aligned with RustFS / AWS semantics):
 
@@ -857,7 +858,10 @@ window shields in-flight commits), or by convention only one gateway enables it
 `location` prefix + the tombstone, on the same job framework.
 
 Compaction execution is not done (needs Parquet read/write); plan may emit
-binpack candidate groups for external engines (Spark `rewrite_data_files`),
+binpack candidate groups for external engines (Spark `rewrite_data_files`; implemented in ⑥ as
+`compaction-candidates` of the plan: grouped per bucket-relative directory × sort order,
+first-fit-decreasing to `write.target-file-size-bytes`, partitions with delete files
+flagged `row-level-required`),
 optional in ⑥.
 
 ## 10. Configuration
@@ -866,7 +870,8 @@ optional in ⑥.
 tables:
   enabled: false                   # master switch; off → /iceberg/v1 falls through to S3 routing (bucket name iceberg not reserved)
   path_prefix: /iceberg            # REST prefix (+ /v1)
-  compat_prefix: ""                # optional alias such as /_iceberg (⑥)
+  compat_prefix: ""                # optional alias such as /_iceberg (⑥: both prefixes share the route table, /config reports lights3.catalog-compat-prefix)
+  catalog_backing: object          # object | duostore (⑥: with a duostore default backend the catalog state can live in its meta engine)
   accept_s3tables_signing: true    # catalog paths accept credential-scope service = s3tables
   reserved_prefix: .lights3-table/ # reserved prefix inside table buckets (immutable once enabled)
   metadata_max_size: 50MiB
@@ -917,6 +922,13 @@ crash-window matrix collapses to one row. For deployments whose default backend 
 duostore, configured as `tables.catalog_backing: object | duostore`. RustFS's
 "whole catalog in one snapshot object" mode is not adopted (a 64 MiB cap and a
 single lock are not lights3's route).
+
+Implemented (⑥): the generic KV facade of `IMetaStore` -- `kv_get / kv_put / kv_delete /
+kv_scan / kv_put_batch` (rocksdb column family `tc`, sqlite table `tc`, redis hash + lex
+index, tikv key tag `T`; etag = the first 16 hex characters of sha256, compared inside the
+engine's own atomic section); `DuoMetaCatalogStore` uses the `ObjectCatalogStore` key layout,
+`commit_atomic` writes the COMMITTED record and the pointer in one batch, and
+`lights3 tables export|import` migrates between the two backings ([cli.md §2.6](cli.md)).
 
 ## 13. Observability and tests
 
@@ -971,7 +983,7 @@ under `docs/s3-tables/` (Chinese only, like the other implementation-level docs)
 | ③ deep validation and diagnostics (**implemented 2026-09-12, #122**) | Avro reader; snapshot graph and conflict re-check of §7.4; `catalog/diagnostics` / `recovery`; `fsck` reconciliation item; ETag/If-None-Match on LoadTable | manifest fixture cases; crash-window matrix cases; rename recovery cases |
 | ④ maintenance (**implemented 2026-09-12, #123**) | `JobOp::Table*`, plan/run/purge, `purgeRequested=true`, periodic runner, CLI, `tombstone_ttl` cleanup | retained set / safety window / StalePlan cases; DuckDB smoke (manual, local) |
 | ⑤ multi-gateway and docs (**implemented 2026-09-12**) | `tables_multi_gateway_suite.h` (memory / redis / tikv); `--check-config` misconfiguration WARN; a "table catalog" column in deployment.md §5; turn this document into an implementation document + `docs/en/` sync; README index | two-gateway cases; doc review |
-| ⑥ optional | views; the `/_iceberg/v1` alias; `reportMetrics` into audit; compaction candidate planning output; duostore-meta backing (§12) | as needed |
+| ⑥ optional (**implemented 2026-09-12**) | views; the `/_iceberg/v1` alias; `reportMetrics` into audit; compaction candidate planning output; duostore-meta backing (§12) | `test_tables_optional` / `catalog_store_suite` (object + rocksdb / sqlite / redis) / `case_kv_facade`; REST and e2e cases for views / the alias / metrics |
 
 ## 15. Deliberately not done
 

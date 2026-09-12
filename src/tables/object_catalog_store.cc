@@ -143,6 +143,46 @@ json to_json(const RenameIntent& r) {
     return j;
 }
 
+json to_json(const ViewEntry& e) {
+    json j;
+    j["version"] = e.version;
+    j["levels"] = e.levels;
+    j["name"] = e.name;
+    j["view_id"] = e.view_id;
+    j["view_uuid"] = e.view_uuid;
+    j["location"] = e.location;
+    j["metadata_location"] = e.metadata_location;
+    j["version_token"] = e.version_token;
+    j["generation"] = e.generation;
+    j["state"] = table_state_name(e.state);
+    j["created_unix"] = e.created_unix;
+    j["updated_unix"] = e.updated_unix;
+    return j;
+}
+
+std::optional<ViewEntry> view_from_json(const json& j) {
+    return guarded([&]() -> std::optional<ViewEntry> {
+        reject_unknown(j, {"version", "levels", "name", "view_id", "view_uuid", "location", "metadata_location",
+                           "version_token", "generation", "state", "created_unix", "updated_unix"});
+        if (j.at("version").get<int>() != 1) return std::nullopt;
+        ViewEntry e;
+        e.levels = levels_of(j.at("levels"));
+        e.name = j.at("name").get<std::string>();
+        e.view_id = j.at("view_id").get<std::string>();
+        e.view_uuid = j.at("view_uuid").get<std::string>();
+        e.location = j.at("location").get<std::string>();
+        e.metadata_location = j.at("metadata_location").get<std::string>();
+        e.version_token = j.at("version_token").get<std::string>();
+        e.generation = j.at("generation").get<uint64_t>();
+        auto st = table_state_from_name(j.at("state").get<std::string>());
+        if (!st) return std::nullopt;
+        e.state = *st;
+        e.created_unix = j.value("created_unix", int64_t(0));
+        e.updated_unix = j.value("updated_unix", int64_t(0));
+        return e;
+    });
+}
+
 json to_json(const MaintenanceConfig& c) {
     json j;
     j["version"] = c.version;
@@ -271,6 +311,12 @@ std::string ObjectCatalogStore::tbl_dir(std::string_view bucket, const Levels& l
 std::string ObjectCatalogStore::tbl_key(std::string_view bucket, const Levels& levels, std::string_view name) {
     return tbl_dir(bucket, levels) + std::string(name) + ".json";
 }
+std::string ObjectCatalogStore::view_dir(std::string_view bucket, const Levels& levels) {
+    return ns_dir(bucket, levels) + "view/";
+}
+std::string ObjectCatalogStore::view_key(std::string_view bucket, const Levels& levels, std::string_view name) {
+    return view_dir(bucket, levels) + std::string(name) + ".json";
+}
 std::string ObjectCatalogStore::commit_dir(std::string_view bucket, std::string_view table_id) {
     return bucket_root(bucket) + "commits/" + std::string(table_id) + "/";
 }
@@ -382,7 +428,7 @@ Task<ListPage<std::string>> ObjectCatalogStore::list_child_namespaces(std::strin
         for (auto& cp : res.common_prefixes) {
             std::string seg = cp.substr(dir.size());
             if (!seg.empty() && seg.back() == '/') seg.pop_back();
-            if (seg == "tbl" || seg.empty()) continue;
+            if (seg == "tbl" || seg == "view" || seg.empty()) continue;
             if (static_cast<int>(page.items.size()) >= cursor.limit) {
                 page.next_after = page.items.back();
                 co_return page;
@@ -402,6 +448,7 @@ Task<bool> ObjectCatalogStore::namespace_has_children(std::string_view bucket, c
     std::string dir = ns_dir(bucket, levels);
     std::string marker = dir + "_ns.json";
     std::string tbl = dir + "tbl/";
+    std::string view = dir + "view/";
     storage::ListOptions opt;
     opt.prefix = dir;
     opt.max_keys = 100;
@@ -409,10 +456,16 @@ Task<bool> ObjectCatalogStore::namespace_has_children(std::string_view bucket, c
         auto res = co_await backend_->list_objects(storage::kSysBucketName, opt);
         for (auto& o : res.objects) {
             if (o.key == marker) continue;
-            if (o.key.rfind(tbl, 0) != 0) co_return true;
-            std::string name = o.key.substr(tbl.size());
+            bool is_view = o.key.rfind(view, 0) == 0;
+            if (o.key.rfind(tbl, 0) != 0 && !is_view) co_return true;
+            std::string name = o.key.substr(is_view ? view.size() : tbl.size());
             if (name.size() < 5 || name.substr(name.size() - 5) != ".json") continue;
             name.resize(name.size() - 5);
+            if (is_view) {
+                auto v = co_await get_view(bucket, levels, name);
+                if (v && v->value.state != TableState::Deleted) co_return true;
+                continue;
+            }
             auto e = co_await get_table(bucket, levels, name);
             if (e && e->value.state != TableState::Deleted) co_return true;
         }
@@ -450,9 +503,12 @@ Task<std::optional<Versioned<TableEntry>>> ObjectCatalogStore::get_table(std::st
 
 Task<ListPage<std::string>> ObjectCatalogStore::list_tables(std::string_view bucket, const Levels& levels,
                                                             PageCursor cursor) {
+    co_return co_await list_json_names(tbl_dir(bucket, levels), cursor);
+}
+
+Task<ListPage<std::string>> ObjectCatalogStore::list_json_names(std::string dir, PageCursor cursor) {
     ListPage<std::string> page;
     if (!co_await backend_->bucket_exists(storage::kSysBucketName)) co_return page;
-    std::string dir = tbl_dir(bucket, levels);
     storage::ListOptions opt;
     opt.prefix = dir;
     opt.max_keys = std::max(1, cursor.limit) + 1;
@@ -482,6 +538,55 @@ Task<std::string> ObjectCatalogStore::put_table(std::string_view bucket, const L
 
 Task<void> ObjectCatalogStore::delete_table(std::string_view bucket, const Levels& levels, std::string_view name) {
     co_await remove(tbl_key(bucket, levels, name));
+}
+
+// ---------- views ----------
+
+Task<std::optional<Versioned<ViewEntry>>> ObjectCatalogStore::get_view(std::string_view bucket, const Levels& levels,
+                                                                       std::string_view name) {
+    std::string key = view_key(bucket, levels, name);
+    auto raw = co_await read(key);
+    if (!raw) co_return std::nullopt;
+    std::optional<ViewEntry> e;
+    try {
+        e = view_from_json(json::parse(raw->body));
+    } catch (const json::exception&) {
+    }
+    if (!e || e->levels != levels || e->name != name)
+        throw S3Error(S3ErrorCode::InternalError, "catalog entry at " + key + " does not describe itself");
+    co_return Versioned<ViewEntry>{std::move(*e), raw->etag};
+}
+
+Task<ListPage<std::string>> ObjectCatalogStore::list_views(std::string_view bucket, const Levels& levels,
+                                                           PageCursor cursor) {
+    co_return co_await list_json_names(view_dir(bucket, levels), cursor);
+}
+
+Task<std::string> ObjectCatalogStore::put_view(std::string_view bucket, const Levels& levels, std::string_view name,
+                                               const ViewEntry& e, storage::PutCondition cond) {
+    co_return co_await write(view_key(bucket, levels, name), to_json(e).dump(), cond);
+}
+
+Task<void> ObjectCatalogStore::delete_view(std::string_view bucket, const Levels& levels, std::string_view name) {
+    co_await remove(view_key(bucket, levels, name));
+}
+
+// ---------- raw export / import ----------
+
+Task<std::vector<RawEntry>> ObjectCatalogStore::export_raw(std::string_view bucket) {
+    std::vector<RawEntry> out;
+    for (auto& key : co_await list_keys(bucket_root(bucket))) {
+        auto raw = co_await read(key);
+        if (raw) out.push_back({key, std::move(raw->body)});
+    }
+    co_return out;
+}
+
+Task<void> ObjectCatalogStore::import_raw(std::string_view bucket, const RawEntry& e) {
+    if (e.key.rfind(bucket_root(bucket), 0) != 0)
+        throw S3Error(S3ErrorCode::InvalidRequest,
+                      "catalog key " + e.key + " does not belong to bucket " + std::string(bucket));
+    co_await write(e.key, e.body, {});
 }
 
 // ---------- commits ----------
@@ -623,15 +728,21 @@ Task<bool> ObjectCatalogStore::bucket_state_empty(std::string_view bucket) {
             std::string rel = o.key.substr(root.size());
             if (rel.size() >= 8 && rel.substr(rel.size() - 8) == "_ns.json") co_return false;
             auto tbl = rel.find("/tbl/");
-            if (tbl == std::string::npos) continue;
+            auto view = rel.find("/view/");
+            if (tbl == std::string::npos && view == std::string::npos) continue;
             auto raw = co_await read(o.key);
             if (!raw) continue;
-            std::optional<TableEntry> e;
             try {
-                e = table_from_json(json::parse(raw->body));
+                json j = json::parse(raw->body);
+                if (tbl != std::string::npos) {
+                    auto e = table_from_json(j);
+                    if (e && e->state != TableState::Deleted) co_return false;
+                } else {
+                    auto v = view_from_json(j);
+                    if (v && v->state != TableState::Deleted) co_return false;
+                }
             } catch (const json::exception&) {
             }
-            if (e && e->state != TableState::Deleted) co_return false;
         }
         if (!res.is_truncated) break;
         opt.start_after = res.next_token;

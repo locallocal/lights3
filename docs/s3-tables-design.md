@@ -1,12 +1,12 @@
 # S3 Tables：Apache Iceberg REST Catalog（调研 RustFS 后的设计）
 
-> 状态：**已实现（§14 ①–⑤，2026-09-12；⑥ 为可选项未做）**。实现记录见
+> 状态：**已实现（§14 ①–⑥，2026-09-12）**。实现记录见
 > [s3-tables/step-1-catalog-core.md §18](s3-tables/step-1-catalog-core.md)、
 > [step-2-authz-credentials.md §12](s3-tables/step-2-authz-credentials.md)、
 > [step-3-validation-diagnostics.md §12](s3-tables/step-3-validation-diagnostics.md)、
 > [step-4-maintenance.md §10](s3-tables/step-4-maintenance.md)、
-> [step-5-multi-gateway-docs.md §8](s3-tables/step-5-multi-gateway-docs.md)；偏离设计的点已回写
-> 到对应章节。本文先回答"RustFS 是怎么做 S3 Tables
+> [step-5-multi-gateway-docs.md §8](s3-tables/step-5-multi-gateway-docs.md)、
+> [step-6-optional.md §7](s3-tables/step-6-optional.md)；偏离设计的点已回写到对应章节。本文先回答"RustFS 是怎么做 S3 Tables
 > 的"（§2，源码核实 @853ae63，2026-09-11），再给出 lights3 的方案（§3–§13）与
 > 实施拆分（§14）。代码落地后，本文按仓库惯例保留为设计层文档，实现细节写进
 > 对应实现文档；源码注释用 `docs/s3-tables-design.md §N` 引用本文。
@@ -539,7 +539,7 @@ namespace `sales`（及子级）与其数据对象；`readonly: true` 的凭证�
 | GET / HEAD / POST / DELETE `/{w}/namespaces/{ns}/tables/{t}` | LoadTable / 存在性 / CommitTable / DropTable | ① |
 | POST `/{w}/tables/rename` | RenameTable | ① |
 | GET `/{w}/namespaces/{ns}/tables/{t}/credentials` | LoadCredentials | ② |
-| GET/POST/HEAD/DELETE `…/views…`、POST `/{w}/views/rename` | Iceberg views（format v1） | ⑥ |
+| GET/POST/HEAD/DELETE `…/views…`、POST `/{w}/views/rename` | Iceberg views（format v1；replace 只认 `assert-view-uuid`，`NoSuchViewException`，表与 view 同名互斥） | ⑥（已实现） |
 
 扩展端点（不进 `endpoints`，与 RustFS / AWS 语义对齐）：
 
@@ -754,8 +754,10 @@ AdminJobs 参数。`tables.maintenance.delete_enabled: false`（默认）时 run
 一样各实例都跑（删除幂等，安全窗口挡在途提交），或按 `gc_enabled` 约定只在一台
 开。**purge**（drop 后）：删保留目录 + `location` 前缀 + 墓碑，走同一作业框架。
 
-不做 compaction 执行（需 Parquet 读写）；plan 可输出 binpack 候选组供外部引擎
-（Spark `rewrite_data_files`）使用，属 ⑥ 可选。
+不做 compaction 执行（需 Parquet 读写）；plan 输出 binpack 候选组
+（`compaction-candidates`：按桶内目录 × sort order 分组、首次适应递减装箱到
+`write.target-file-size-bytes`，有 delete 文件的分区标 `row-level-required`）供外部引擎
+（Spark `rewrite_data_files`）使用（⑥ 已实现）。
 
 ④ 已落地（实现差异见 [s3-tables/step-4-maintenance.md §10](s3-tables/step-4-maintenance.md)）：
 维护配置对象在 `maint/` 目录而非与指针并列；快照过期只在配置了 age 时执行；周期 runner
@@ -767,7 +769,8 @@ AdminJobs 参数。`tables.maintenance.delete_enabled: false`（默认）时 run
 tables:
   enabled: false                   # 总开关；关闭时 /iceberg/v1 落回 S3 路由（桶名 iceberg 不保留）
   path_prefix: /iceberg            # REST 前缀（+ /v1）
-  compat_prefix: ""                # 可选别名，如 /_iceberg（⑥）
+  compat_prefix: ""                # 可选别名，如 /_iceberg（⑥：两个前缀同一路由表，/config 报 lights3.catalog-compat-prefix）
+  catalog_backing: object          # object | duostore（⑥：默认后端为 duostore 时可把目录状态放进它的 meta 引擎）
   accept_s3tables_signing: true    # 目录路径接受 credential scope service = s3tables
   reserved_prefix: .lights3-table/ # 表桶内保留前缀（启用后不可改）
   metadata_max_size: 50MiB
@@ -812,6 +815,12 @@ rocksdb WriteBatch），列表落到有序迭代；单表提交在一个事务�
 崩溃窗口矩阵退化为单行。适用于默认后端就是 duostore 的部署，配置
 `tables.catalog_backing: object | duostore`。不做 RustFS 的"整份目录一个快照
 对象"模式（64 MiB 上限与单锁不是 lights3 的路线）。
+
+已实现（⑥）：`IMetaStore` 的通用 KV 面 `kv_get / kv_put / kv_delete / kv_scan / kv_put_batch`
+（rocksdb column family `tc`、sqlite 表 `tc`、redis hash + lex 索引、tikv 键标签 `T`；etag =
+sha256 前 16 hex，引擎在自己的原子区内比对）；`DuoMetaCatalogStore` 与 `ObjectCatalogStore`
+同一键布局，`commit_atomic` 把 COMMITTED 记录与指针一批写入，`lights3 tables export|import`
+在两种后备间迁移（[cli.md §2.6](cli.md)）。
 
 ## 13. 可观测性与测试
 
@@ -869,7 +878,7 @@ Trino:      iceberg.catalog.type=rest  iceberg.rest-catalog.uri=…  .warehouse=
 | ③ 深校验与诊断（**已实现 2026-09-12，#122**） | Avro 读取器；§7.4 快照图与冲突复核；`catalog/diagnostics` / `recovery`；`fsck` 对账项；ETag/If-None-Match on LoadTable | manifest 固件用例；崩溃窗口矩阵用例；rename 恢复用例 |
 | ④ 维护（**已实现 2026-09-12，#123**） | `JobOp::Table*`、plan/run/purge、`purgeRequested=true`、周期 runner、CLI、`tombstone_ttl` 清理 | 保留集/安全窗口/StalePlan 用例；DuckDB 冒烟（本机人工） |
 | ⑤ 多网关与文档（**已实现 2026-09-12**） | `tables_multi_gateway_suite.h`（memory / redis / tikv 三处接入）；`--check-config` 误配 WARN；deployment.md §5 矩阵加"表目录"列；本文转成实现文档 + `docs/en/` 同步；README 索引 | 双网关用例；文档评审 |
-| ⑥ 可选 | views；`/_iceberg/v1` 别名；`reportMetrics` 落审计；compaction 候选规划输出；duostore-meta 后备（§12） | 按需 |
+| ⑥ 可选（**已实现 2026-09-12**） | views；`/_iceberg/v1` 别名；`reportMetrics` 落审计；compaction 候选规划输出；duostore-meta 后备（§12） | `test_tables_optional` / `catalog_store_suite`（object + rocksdb / sqlite / redis）/ `case_kv_facade`；REST 与 e2e 的 views / 别名 / metrics 用例 |
 
 ## 15. 明确不做
 

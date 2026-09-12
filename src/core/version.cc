@@ -36,6 +36,9 @@ std::vector<std::string> built_features() {
 #ifdef LIGHTS3_CLOUDPROXY
     out.push_back("cloudproxy");
 #endif
+#ifdef LIGHTS3_TABLES
+    out.push_back("tables");
+#endif
 #ifdef LIGHTS3_DUOSTORE
     out.push_back("duostore");
 #ifdef LIGHTS3_DUOSTORE_REDIS_META
@@ -81,6 +84,15 @@ std::string version_report(const char* program) {
     std::string s = version_line(program);
     s += "\ndrivers:  " + join(built_drivers());
     s += "\nfeatures: " + join(built_features());
+#ifdef LIGHTS3_TABLES
+    // whether deflate-coded Iceberg manifests are validated or skipped (design §7.4)
+    s += "\ntables:   deflate=";
+#ifdef LIGHTS3_TABLES_ZLIB
+    s += "yes";
+#else
+    s += "no";
+#endif
+#endif
     s += '\n';
     return s;
 }

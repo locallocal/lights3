@@ -1090,8 +1090,12 @@ check "tables: metadata.json is readable through the S3 plane" "200" \
     "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/tbe2e/${ML1#s3://tbe2e/}")"
 check "tables: the reserved prefix is not writable through the S3 plane" "400" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X PUT --data-binary 'x' "$BASE/tbe2e/.lights3-table/x")"
+# step ③ walks manifest list → manifest → data files: PyIceberg-written fixtures whose
+# recorded paths / sizes match what is uploaded here (tests/fixtures/tables, m-e2e / ml-e2e)
+FIXTURES="$(cd "$(dirname "$0")/../fixtures/tables" && pwd)"
 s3curl -o /dev/null -X PUT --data-binary 'parquet-bytes' "$BASE/tbe2e/e2e/demo/orders/data/f1.parquet"
-s3curl -o /dev/null -X PUT --data-binary 'avro-bytes' "$BASE/tbe2e/e2e/demo/orders/metadata/snap-1.avro"
+s3curl -o /dev/null -X PUT --data-binary "@$FIXTURES/m-e2e.avro" "$BASE/tbe2e/e2e/demo/orders/metadata/m-e2e.avro"
+s3curl -o /dev/null -X PUT --data-binary "@$FIXTURES/ml-e2e.avro" "$BASE/tbe2e/e2e/demo/orders/metadata/snap-1.avro"
 COMMIT_BODY='{"commit-id":"e2e00000-0000-4000-8000-000000000001","requirements":[{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null}],"updates":[{"action":"add-snapshot","snapshot":{"snapshot-id":1,"sequence-number":1,"timestamp-ms":1757600000000,"manifest-list":"s3://tbe2e/e2e/demo/orders/metadata/snap-1.avro","summary":{"operation":"append"}}},{"action":"set-snapshot-ref","ref-name":"main","type":"branch","snapshot-id":1}]}'
 check "tables: commit advances the generation" "2" \
     "$(s3curl -X POST -H 'Content-Type: application/json' -d "$COMMIT_BODY" "$TNS/tables/orders" | jq_field 'j["generation"]')"
@@ -1103,6 +1107,38 @@ check "tables: a missing manifest list is refused" "409" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"requirements":[],"updates":[{"action":"add-snapshot","snapshot":{"snapshot-id":2,"sequence-number":2,"timestamp-ms":1757600001000,"manifest-list":"s3://tbe2e/e2e/demo/orders/metadata/nope.avro","summary":{"operation":"append"}}}]}' "$TNS/tables/orders")"
 check "tables: load table shows the snapshot" "1" \
     "$(s3curl "$TNS/tables/orders" | jq_field 'j["metadata"]["current-snapshot-id"]')"
+# step ③ (docs/s3-tables/step-3-validation-diagnostics.md): deep validation, ETag, diagnostics / recovery
+check "tables: the snapshot was validated down to the data files" "deep" \
+    "$(s3curl "$TNS/tables/orders" | jq_field 'j["config"]["lights3.snapshot-validation"]')"
+s3curl -o /dev/null -X DELETE "$BASE/tbe2e/e2e/demo/orders/data/f1.parquet"
+check "tables: a manifest naming a missing data file is refused" "409" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"requirements":[],"updates":[{"action":"add-snapshot","snapshot":{"snapshot-id":3,"sequence-number":3,"timestamp-ms":1757600002000,"manifest-list":"s3://tbe2e/e2e/demo/orders/metadata/snap-1.avro","summary":{"operation":"append"}}}]}' "$TNS/tables/orders")"
+s3curl -o /dev/null -X PUT --data-binary 'parquet-bytes' "$BASE/tbe2e/e2e/demo/orders/data/f1.parquet"
+check "tables: a corrupt manifest list is refused" "CommitFailedException" \
+    "$(s3curl -o /dev/null -X PUT --data-binary 'avro-bytes' "$BASE/tbe2e/e2e/demo/orders/metadata/bad.avro"; s3curl -X POST -H 'Content-Type: application/json' -d '{"requirements":[],"updates":[{"action":"add-snapshot","snapshot":{"snapshot-id":4,"sequence-number":4,"timestamp-ms":1757600003000,"manifest-list":"s3://tbe2e/e2e/demo/orders/metadata/bad.avro","summary":{"operation":"append"}}}]}' "$TNS/tables/orders" | jq_field 'j["error"]["type"]')"
+s3curl -o /dev/null -X DELETE "$BASE/tbe2e/e2e/demo/orders/metadata/bad.avro"
+s3curl -o /dev/null -D "$WORK/lt.hdr" "$TNS/tables/orders"
+LT_ETAG=$(grep -i '^etag:' "$WORK/lt.hdr" | awk '{print $2}' | tr -d '\r')
+check "tables: LoadTable carries an ETag" '"' "${LT_ETAG:0:1}"
+check "tables: If-None-Match on the current ETag is a 304" "304" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -H "If-None-Match: $LT_ETAG" "$TNS/tables/orders")"
+check "tables: If-None-Match on a stale ETag is a 200" "200" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -H 'If-None-Match: "stale"' "$TNS/tables/orders")"
+check "tables: diagnostics classify the commit as Committed" "Committed" \
+    "$(s3curl "$TNS/tables/orders/catalog/diagnostics" | jq_field 'j["commits"][0]["state"]')"
+check "tables: nothing under metadata/ is unreferenced" "0" \
+    "$(s3curl "$TNS/tables/orders/catalog/diagnostics" | jq_field 'len(j["unreferenced-metadata"])')"
+check "tables: recovery on a healthy table finalizes nothing" "0" \
+    "$(s3curl -X POST -H 'Content-Type: application/json' -d '{"prune":true}' "$TNS/tables/orders/catalog/recovery" | jq_field 'j["finalized"]+j["pruned"]+j["manual"]')"
+TRO_OUT=$(s3curl -X POST --data-binary '{"comment":"tables-reader","policy":{"buckets":["tbe2e"],"readonly":true}}' "$BASE/-/admin/credentials")
+TRO_AK=$(echo "$TRO_OUT" | json_field access_key)
+TRO_SK=$(echo "$TRO_OUT" | json_field secret_key)
+trocurl() { curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$TRO_AK:$TRO_SK" "$@"; }
+check "tables: diagnostics is a read" "200" \
+    "$(trocurl -o /dev/null -w '%{http_code}' "$TNS/tables/orders/catalog/diagnostics")"
+check "tables: recovery needs write access" "403" \
+    "$(trocurl -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' "$TNS/tables/orders/catalog/recovery")"
+s3curl -o /dev/null -X DELETE "$BASE/-/admin/credentials/$TRO_AK"
 check "tables: metadata-location (AWS shape)" "2" "$(s3curl "$TNS/tables/orders/metadata-location" | jq_field 'j["generation"]')"
 check "tables: rename" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
     -d '{"source":{"namespace":["e2e","demo"],"name":"orders"},"destination":{"namespace":["e2e","demo"],"name":"orders2"}}' "$TB/tbe2e/tables/rename")"
@@ -1152,6 +1188,7 @@ s3curl -o /dev/null -X DELETE "$TB/tbe2e/namespaces/e2e%1Fvend"
 # work dir is deleted at exit anyway, so only the data files are cleaned here
 s3curl -o /dev/null -X DELETE "$BASE/tbe2e/e2e/demo/orders/data/f1.parquet"
 s3curl -o /dev/null -X DELETE "$BASE/tbe2e/e2e/demo/orders/metadata/snap-1.avro"
+s3curl -o /dev/null -X DELETE "$BASE/tbe2e/e2e/demo/orders/metadata/m-e2e.avro"
 
 # Graceful shutdown
 kill -TERM "$SRV_PID"

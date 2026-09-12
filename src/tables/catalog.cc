@@ -45,6 +45,10 @@ Catalog::Catalog(std::shared_ptr<ITableCatalogStore> store, std::shared_ptr<Tabl
     commits_error_ = metrics_.counter("lights3_tables_commits_total", "Table commits by outcome",
                                       {{"result", "error"}});
     commit_seconds_ = metrics_.histogram("lights3_tables_commit_seconds", "Wall time of a table commit", kCommitBounds);
+    validation_files_ = metrics_.counter("lights3_tables_validation_files_total",
+                                         "Data / delete files verified by the deep snapshot check");
+    validation_skipped_ = metrics_.counter("lights3_tables_validation_skipped_total",
+                                           "Snapshots whose Avro codec could not be read (validation skipped)");
 }
 
 // ---------- helpers ----------
@@ -136,14 +140,66 @@ Task<void> Catalog::best_effort_delete(storage::IStorageBackend& backend, std::s
 }
 
 Task<Versioned<TableEntry>> Catalog::require_active(std::string_view bucket, const Levels& levels,
-                                                    std::string_view name) {
+                                                    std::string_view name, bool writer) {
     auto cur = co_await store_->get_table(bucket, levels, name);
+    if (cur && cur->value.state == TableState::Renaming && writer) {
+        // a writer drives the pending intent first (design §5.6); it may complete the
+        // rename (the name is then gone or tombstoned) or roll it back (active again)
+        co_await maybe_recover_renames(bucket, true);
+        cur = co_await store_->get_table(bucket, levels, name);
+    }
     if (!cur || cur->value.state == TableState::Deleted)
         throw not_found_table("table " + ns_display(levels) + "." + std::string(name) + " does not exist");
     if (cur->value.state == TableState::Renaming)
         throw unavailable("table " + ns_display(levels) + "." + std::string(name) + " is being renamed; retry");
     co_return std::move(*cur);
 }
+
+Task<void> Catalog::maybe_recover_renames(std::string_view bucket, bool force) {
+    if (!force) {
+        std::lock_guard lk(locks_mu_);
+        unsigned& n = recovery_calls_[std::string(bucket)];
+        bool due = n % kRenameRecoveryEvery == 0;
+        ++n;
+        if (!due) co_return;
+    }
+    co_await recover_renames(bucket);
+}
+
+Task<int> Catalog::recover_renames(std::string_view bucket) {
+    co_return co_await tables::recover_renames(*store_, bucket, cfg_.maintenance.tombstone_ttl_sec);
+}
+
+iceberg::DeepCheckOptions Catalog::deep_options() const {
+    iceberg::DeepCheckOptions opt;
+    opt.concurrency = cfg_.validate_concurrency;
+    return opt;
+}
+
+std::string Catalog::metadata_dir(const TableBucketEntry& tb, const Levels& levels, std::string_view name) const {
+    return tb.reserved_prefix + ns_path(levels) + "/" + std::string(name) + "/metadata/";
+}
+
+namespace {
+
+// RFC 7232 If-None-Match against the entry ETag: quoted, weak (W/) and list forms, "*"
+bool etag_matches(std::string_view header, std::string_view etag) {
+    size_t pos = 0;
+    while (pos <= header.size()) {
+        size_t comma = header.find(',', pos);
+        if (comma == std::string_view::npos) comma = header.size();
+        std::string_view tok = header.substr(pos, comma - pos);
+        while (!tok.empty() && (tok.front() == ' ' || tok.front() == '\t')) tok.remove_prefix(1);
+        while (!tok.empty() && (tok.back() == ' ' || tok.back() == '\t')) tok.remove_suffix(1);
+        if (tok.size() >= 2 && (tok[0] == 'W' || tok[0] == 'w') && tok[1] == '/') tok.remove_prefix(2);
+        if (tok.size() >= 2 && tok.front() == '"' && tok.back() == '"') tok = tok.substr(1, tok.size() - 2);
+        if (tok == "*" || (!tok.empty() && tok == etag)) return true;
+        pos = comma + 1;
+    }
+    return false;
+}
+
+}  // namespace
 
 // ---------- table buckets ----------
 
@@ -347,9 +403,17 @@ Task<ListPage<std::string>> Catalog::list_tables(std::string_view bucket, const 
     co_return out;
 }
 
-Task<Catalog::LoadedTable> Catalog::load_table(std::string_view bucket, const Levels& levels, std::string_view name) {
+Task<Catalog::LoadedTable> Catalog::load_table(std::string_view bucket, const Levels& levels, std::string_view name,
+                                               std::string_view if_none_match) {
     co_await require_table_bucket(bucket);
     auto cur = co_await require_active(bucket, levels, name);
+    if (!if_none_match.empty() && etag_matches(if_none_match, cur.etag)) {
+        LoadedTable t;
+        t.entry = std::move(cur.value);
+        t.etag = std::move(cur.etag);
+        t.not_modified = true;
+        co_return t;
+    }
     auto& backend = router_.resolve(bucket);
     json md = co_await read_metadata(backend, bucket, cur.value.metadata_location);
     if (md.value("table-uuid", "") != cur.value.table_uuid)
@@ -364,6 +428,10 @@ Task<Catalog::LoadedTable> Catalog::finish_create(std::string_view bucket, const
     // tombstone → conditional replacement; otherwise the name must be free
     storage::PutCondition cond;
     auto existing = co_await store_->get_table(bucket, levels, name);
+    if (existing && existing->value.state == TableState::Renaming) {
+        co_await maybe_recover_renames(bucket, true);
+        existing = co_await store_->get_table(bucket, levels, name);
+    }
     if (existing) {
         if (existing->value.state == TableState::Renaming)
             throw unavailable("table " + std::string(name) + " is being renamed; retry");
@@ -402,6 +470,7 @@ Task<Catalog::LoadedTable> Catalog::create_table(std::string_view bucket, const 
                                                  const CreateTableRequest& req, const CommitHooks& hooks) {
     TableBucketEntry tb = co_await require_table_bucket(bucket);
     require_segment("table name", req.name);
+    co_await maybe_recover_renames(bucket, false);
     if (!co_await namespace_exists(bucket, levels))
         throw not_found_ns("namespace " + ns_display(levels) + " does not exist");
     auto& backend = router_.resolve(bucket);
@@ -468,6 +537,7 @@ Task<Catalog::LoadedTable> Catalog::register_table(std::string_view bucket, cons
                                                    std::string_view metadata_location, const CommitHooks& hooks) {
     TableBucketEntry tb = co_await require_table_bucket(bucket);
     require_segment("table name", name);
+    co_await maybe_recover_renames(bucket, false);
     if (!co_await namespace_exists(bucket, levels))
         throw not_found_ns("namespace " + ns_display(levels) + " does not exist");
     std::string src_key;
@@ -492,7 +562,9 @@ Task<Catalog::LoadedTable> Catalog::register_table(std::string_view bucket, cons
     iceberg::SnapshotCheckContext ctx{backend, std::string(bucket), tb.reserved_prefix};
     json empty;
     empty["snapshots"] = json::array();
-    co_await iceberg::check_new_snapshots_shallow(ctx, empty, md);
+    auto report = co_await iceberg::check_new_snapshots_deep(ctx, empty, md, deep_options());
+    validation_files_->inc(report.files);
+    if (report.skipped_codec) validation_skipped_->inc();
     TableEntry entry;
     entry.levels = levels;
     entry.name = std::string(name);
@@ -505,8 +577,10 @@ Task<Catalog::LoadedTable> Catalog::register_table(std::string_view bucket, cons
     entry.created_unix = entry.updated_unix = now_unix();
     entry.metadata_location = metadata_key(tb, levels, name, 1, entry.table_id);
     std::string body = iceberg::canonical(md);
-    co_return co_await finish_create(bucket, tb, levels, name, std::move(entry), std::move(md), std::move(body),
-                                     backend, hooks);
+    LoadedTable t = co_await finish_create(bucket, tb, levels, name, std::move(entry), std::move(md), std::move(body),
+                                           backend, hooks);
+    t.validation = report.skipped_codec ? "skipped-codec" : "deep";
+    co_return t;
 }
 
 Task<Catalog::LoadedTable> Catalog::commit_table(std::string_view bucket, const Levels& levels, std::string_view name,
@@ -517,11 +591,12 @@ Task<Catalog::LoadedTable> Catalog::commit_table(std::string_view bucket, const 
     };
     TableBucketEntry tb = co_await require_table_bucket(bucket);
     auto& backend = router_.resolve(bucket);
-    auto cur = co_await require_active(bucket, levels, name);
+    co_await maybe_recover_renames(bucket, false);
+    auto cur = co_await require_active(bucket, levels, name, /*writer=*/true);
     // in-process fast path (design §5.1): same-gateway commits on one table serialize here
     auto lock = table_lock(bucket, cur.value.table_id);
     auto permit = co_await lock->sem.acquire();
-    cur = co_await require_active(bucket, levels, name);
+    cur = co_await require_active(bucket, levels, name, /*writer=*/true);
     const std::string table_id = cur.value.table_id;
     const bool replayable = !req.commit_id.empty();
     const std::string commit_id = replayable ? req.commit_id : new_uuid();
@@ -573,7 +648,10 @@ Task<Catalog::LoadedTable> Catalog::commit_table(std::string_view bucket, const 
     iceberg::finish_transition(next, to_client_location(bucket, cur.value.metadata_location), now_ms(),
                                {cfg_.metadata_log_keep});
     iceberg::SnapshotCheckContext ctx{backend, std::string(bucket), tb.reserved_prefix};
-    co_await iceberg::check_new_snapshots_shallow(ctx, current, next);
+    auto report = co_await iceberg::check_new_snapshots_deep(ctx, current, next, deep_options());
+    validation_files_->inc(report.files);
+    if (report.skipped_codec) validation_skipped_->inc();
+    const std::string validation = report.skipped_codec ? "skipped-codec" : "deep";
     std::string body = iceberg::canonical(next);
     if (hooks.quota_check) hooks.quota_check(bucket, static_cast<int64_t>(body.size()), 1);
 
@@ -680,17 +758,18 @@ Task<Catalog::LoadedTable> Catalog::commit_table(std::string_view bucket, const 
     if (hooks.note_usage && wrote) hooks.note_usage(bucket, 1, static_cast<int64_t>(body.size()));
     commits_ok_->inc();
     observe();
-    co_return LoadedTable{std::move(next_entry), std::move(etag1), std::move(next)};
+    co_return LoadedTable{std::move(next_entry), std::move(etag1), std::move(next), validation};
 }
 
 Task<TableEntry> Catalog::update_metadata_location(std::string_view bucket, const Levels& levels, std::string_view name,
                                                    std::string_view new_location, std::string_view expected_token) {
     TableBucketEntry tb = co_await require_table_bucket(bucket);
     auto& backend = router_.resolve(bucket);
-    auto cur = co_await require_active(bucket, levels, name);
+    co_await maybe_recover_renames(bucket, false);
+    auto cur = co_await require_active(bucket, levels, name, /*writer=*/true);
     auto lock = table_lock(bucket, cur.value.table_id);
     auto permit = co_await lock->sem.acquire();
-    cur = co_await require_active(bucket, levels, name);
+    cur = co_await require_active(bucket, levels, name, /*writer=*/true);
     if (cur.value.version_token != expected_token)
         throw commit_failed("versionToken does not match the current table version");
     std::string new_key;
@@ -714,7 +793,9 @@ Task<TableEntry> Catalog::update_metadata_location(std::string_view bucket, cons
     co_await schedule();
     iceberg::check_transition(current, next);
     iceberg::SnapshotCheckContext ctx{backend, std::string(bucket), tb.reserved_prefix};
-    co_await iceberg::check_new_snapshots_shallow(ctx, current, next);
+    auto report = co_await iceberg::check_new_snapshots_deep(ctx, current, next, deep_options());
+    validation_files_->inc(report.files);
+    if (report.skipped_codec) validation_skipped_->inc();
     CommitRecord rec;
     rec.commit_id = "ptr-" + new_uuid();
     rec.table_id = cur.value.table_id;
@@ -772,25 +853,27 @@ Task<void> Catalog::rename_table(std::string_view bucket, const Levels& src_leve
     require_namespace(dst_levels);
     require_segment("table name", dst_name);
     if (src_levels == dst_levels && src_name == dst_name) co_return;
-    auto src = co_await require_active(bucket, src_levels, src_name);
+    co_await maybe_recover_renames(bucket, false);
+    auto src = co_await require_active(bucket, src_levels, src_name, /*writer=*/true);
     if (!co_await namespace_exists(bucket, dst_levels))
         throw not_found_ns("namespace " + ns_display(dst_levels) + " does not exist");
-    storage::PutCondition dst_cond;
     auto dst_existing = co_await store_->get_table(bucket, dst_levels, dst_name);
+    if (dst_existing && dst_existing->value.state == TableState::Renaming) {
+        co_await maybe_recover_renames(bucket, true);
+        dst_existing = co_await store_->get_table(bucket, dst_levels, dst_name);
+    }
     if (dst_existing) {
         if (dst_existing->value.state == TableState::Renaming)
             throw unavailable("table " + std::string(dst_name) + " is being renamed; retry");
         if (dst_existing->value.state != TableState::Deleted)
             throw already_exists("table " + ns_display(dst_levels) + "." + std::string(dst_name) + " already exists");
-        dst_cond.if_match_etag = dst_existing->etag;
-    } else {
-        dst_cond.if_none_match = true;
     }
     auto lock = table_lock(bucket, src.value.table_id);
     auto permit = co_await lock->sem.acquire();
-    src = co_await require_active(bucket, src_levels, src_name);
+    src = co_await require_active(bucket, src_levels, src_name, /*writer=*/true);
 
-    // ① intent
+    // ① the intent (design §5.6); steps ②–⑤ are the same driver any writer runs for a
+    // stranded intent, so a crash anywhere leaves a state some other gateway completes
     RenameIntent intent;
     intent.rename_id = new_uuid();
     intent.src_levels = src_levels;
@@ -802,78 +885,41 @@ Task<void> Catalog::rename_table(std::string_view bucket, const Levels& src_leve
     intent.created_unix = now_unix();
     storage::PutCondition fresh;
     fresh.if_none_match = true;
-    co_await store_->put_rename(bucket, intent, fresh);
-
-    // ② fence the source
-    TableEntry s = src.value;
-    s.state = TableState::Renaming;
-    s.rename_id = intent.rename_id;
-    s.updated_unix = now_unix();
-    storage::PutCondition cas;
-    cas.if_match_etag = src.etag;
-    std::string src_etag2;
-    bool lost = false;
-    try {
-        src_etag2 = co_await store_->put_table(bucket, src_levels, src_name, s, cas);
-    } catch (const S3Error& e) {
-        if (!is_precondition(e)) throw;
-        lost = true;
+    std::string etag = co_await store_->put_rename(bucket, intent, fresh);
+    if (fault::check("tables.rename.after_prepare"))
+        throw S3Error(S3ErrorCode::InternalError, "injected failure after writing the rename intent");
+    RenameOutcome outcome = co_await drive_rename(*store_, bucket, Versioned<RenameIntent>{intent, etag},
+                                                  cfg_.maintenance.tombstone_ttl_sec);
+    switch (outcome) {
+        case RenameOutcome::Completed:
+            co_return;
+        case RenameOutcome::DestinationTaken:
+            throw already_exists("table " + ns_display(dst_levels) + "." + std::string(dst_name) + " already exists");
+        case RenameOutcome::Abandoned:
+            throw commit_failed("table " + std::string(src_name) + " was updated concurrently; retry the rename");
+        case RenameOutcome::Contended:
+            throw unavailable("rename of " + std::string(src_name) + " is being completed by another gateway; retry");
     }
-    if (lost) {
-        co_await store_->delete_rename(bucket, intent.rename_id);
-        throw commit_failed("table " + std::string(src_name) + " was updated concurrently; retry the rename");
-    }
-    intent.stage = RenameIntent::Stage::SourceFenced;
-    co_await store_->put_rename(bucket, intent, {});
+}
 
-    // ③ write the destination
-    TableEntry d = src.value;
-    d.levels = dst_levels;
-    d.name = std::string(dst_name);
-    d.state = TableState::Active;
-    d.rename_id.clear();
-    d.updated_unix = now_unix();
-    bool clash = false;
-    try {
-        co_await store_->put_table(bucket, dst_levels, dst_name, d, dst_cond);
-    } catch (const S3Error& e) {
-        if (!is_precondition(e)) throw;
-        clash = true;
-    }
-    if (clash) {
-        TableEntry back = src.value;
-        back.updated_unix = now_unix();
-        storage::PutCondition undo;
-        undo.if_match_etag = src_etag2;
-        try {
-            co_await store_->put_table(bucket, src_levels, src_name, back, undo);
-        } catch (const std::exception& e) {
-            LOG_WARN("tables: rename rollback of {} failed: {}", src_name, e.what());
-        }
-        co_await store_->delete_rename(bucket, intent.rename_id);
-        throw already_exists("table " + ns_display(dst_levels) + "." + std::string(dst_name) + " already exists");
-    }
-    intent.stage = RenameIntent::Stage::DestinationWritten;
-    co_await store_->put_rename(bucket, intent, {});
+Task<TableDiagnostics> Catalog::diagnose(std::string_view bucket, const Levels& levels, std::string_view name) {
+    TableBucketEntry tb = co_await require_table_bucket(bucket);
+    auto& backend = router_.resolve(bucket);
+    std::string dir = metadata_dir(tb, levels, name);
+    co_return co_await diagnose_table(*store_, backend, bucket, levels, name, dir);
+}
 
-    // ④ tombstone the source
-    s.state = TableState::Deleted;
-    s.rename_id.clear();
-    s.updated_unix = now_unix();
-    storage::PutCondition cas2;
-    cas2.if_match_etag = src_etag2;
-    co_await store_->put_table(bucket, src_levels, src_name, s, cas2);
-    intent.stage = RenameIntent::Stage::SourceTombstoned;
-    co_await store_->put_rename(bucket, intent, {});
-
-    // ⑤ done
-    co_await store_->delete_rename(bucket, intent.rename_id);
+Task<RecoveryReport> Catalog::recover(std::string_view bucket, const Levels& levels, std::string_view name,
+                                      bool prune) {
+    co_await require_table_bucket(bucket);
+    co_return co_await recover_table(*store_, bucket, levels, name, prune);
 }
 
 Task<void> Catalog::drop_table(std::string_view bucket, const Levels& levels, std::string_view name) {
     co_await require_table_bucket(bucket);
+    co_await maybe_recover_renames(bucket, false);
     for (int attempt = 0; attempt < 2; ++attempt) {
-        auto cur = co_await require_active(bucket, levels, name);
+        auto cur = co_await require_active(bucket, levels, name, /*writer=*/true);
         TableEntry e = cur.value;
         e.state = TableState::Deleted;
         e.updated_unix = now_unix();

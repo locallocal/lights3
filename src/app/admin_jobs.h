@@ -11,6 +11,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -54,6 +55,9 @@ std::optional<JobOp> parse_job_op(std::string_view group, std::string_view op);
 // is a thread that may block). Throws std::invalid_argument for a backend type
 // without an offline scrub (memory, cloudproxy, tiered)
 FsckOutcome run_scrub(storage::IStorageBackend& backend, uint64_t max_bytes_per_sec);
+// Fold an extension's outcome into a scrub's: findings add up, the extension's stats
+// land under stats[<ext.kind>]
+void merge_outcome(JobOutcome& base, const JobOutcome& ext);
 // Same for every op (Fsck delegates to run_scrub; max_bytes_per_sec only
 // applies to Fsck). Findings: duostore gc = records_corrupt + packs_quarantined,
 // duostore scan = refs_missing + pack_stats_missing, tier reconcile =
@@ -101,6 +105,15 @@ public:
     bool remove_backend(const std::string& name);
     // a job of any op is running on that backend
     bool busy(const std::string& name) const;
+    // Extra fsck work after run_scrub (S3 Tables catalog reconciliation, docs/s3-tables/
+    // step-3-validation-diagnostics.md §9): called with the backend name inside the job
+    // thread; a returned outcome is merged into the scrub's (findings added, stats under
+    // its kind). nullopt = nothing to add for that backend
+    using FsckExtension = std::function<std::optional<JobOutcome>(const std::string& backend)>;
+    void set_fsck_extension(FsckExtension ext) {
+        std::lock_guard lk(m_);
+        fsck_extension_ = std::move(ext);
+    }
 
 private:
     struct Job {
@@ -124,6 +137,7 @@ private:
     static const Job* running_of(const Slots& s);
 
     std::map<std::string, std::shared_ptr<storage::IStorageBackend>> backends_;
+    FsckExtension fsck_extension_;
     mutable std::mutex m_;
     std::map<std::string, Slots> jobs_;
     uint64_t next_id_ = 1;

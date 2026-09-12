@@ -5,6 +5,11 @@
 
 #include "app/admin_jobs.h"
 #include "core/log.h"
+#include "storage/bucket_router.h"
+#ifdef LIGHTS3_TABLES
+#include "core/task.h"
+#include "tables/fsck.h"
+#endif
 
 namespace lights3_cli {
 
@@ -38,6 +43,20 @@ void run_fsck(const Cmd& c) {
     } catch (const std::invalid_argument& e) {
         throw std::runtime_error("fsck: backend '" + backend + "': " + e.what());
     }
+#ifdef LIGHTS3_TABLES
+    // S3 Tables catalog reconciliation (docs/s3-tables/step-3-validation-diagnostics.md §9):
+    // the catalog lives in .sys of the default backend, so only that backend's scrub
+    // carries it; table buckets on other backends are reached through the router
+    if (app.config().tables.enabled && backend == app.config().buckets.default_backend) {
+        auto router = storage::BucketRouter::build(app.config().buckets, backends);
+        auto rep = sync_wait(tables::reconcile_catalog(it->second, router));
+        JobOutcome ext;
+        ext.kind = "tables";
+        ext.stats = rep.to_json();
+        ext.findings = rep.findings.size();
+        merge_outcome(out, ext);
+    }
+#endif
     LOG_INFO("fsck '{}' ({}): findings {} aborted {} stats {}", backend, out.kind, out.findings, out.aborted,
              out.stats.dump());
     app.shutdown();

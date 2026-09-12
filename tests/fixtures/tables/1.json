@@ -1,0 +1,46 @@
+{
+ "manifest": [
+  {
+   "content": 0,
+   "file_format": "PARQUET",
+   "file_path": "s3://tbk/n/t/data/f1.parquet",
+   "file_sequence_number": 1,
+   "file_size_in_bytes": 100,
+   "record_count": 10,
+   "sequence_number": 1,
+   "snapshot_id": 1,
+   "split_offsets": [
+    4
+   ],
+   "status": 1
+  },
+  {
+   "content": 0,
+   "file_format": "PARQUET",
+   "file_path": "s3://tbk/n/t/data/f2.parquet",
+   "file_sequence_number": 1,
+   "file_size_in_bytes": 200,
+   "record_count": 20,
+   "sequence_number": 1,
+   "snapshot_id": 1,
+   "split_offsets": [
+    4
+   ],
+   "status": 1
+  }
+ ],
+ "manifest-list": [
+  {
+   "added_files_count": 2,
+   "added_snapshot_id": 1,
+   "content": 0,
+   "deleted_files_count": 0,
+   "existing_files_count": 0,
+   "manifest_length": 4262,
+   "manifest_path": "s3://tbk/n/t/metadata/m-1.avro",
+   "min_sequence_number": 1,
+   "partition_spec_id": 0,
+   "sequence_number": 1
+  }
+ ]
+}

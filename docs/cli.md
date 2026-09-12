@@ -149,10 +149,19 @@ dump/load 同模式：构建全部后端、不监听端口，跑完即退出；*
 - **localfs / xlocalfs**：重读每个对象内容、重算 MD5 与存储的 ETag 对照
   （multipart 复合 ETag 按记录的 part 布局重算；无布局的存量对象计为
   unverifiable）；
-- 其余类型（memory/cloudproxy/tiered）报错退出。
+- 其余类型（memory/cloudproxy/tiered）报错退出；
+- **S3 Tables 目录对账**（`tables.enabled` 且 `<backend>` 是默认后端时追加，
+  [s3-tables/step-3-validation-diagnostics.md §9](s3-tables/step-3-validation-diagnostics.md)）：
+  `.sys/tables/` 的表桶标记与 `.sys/tables-catalog/<bucket>/` 的目录状态对照表桶本身：
+  `tables.orphan_state`（标记或目录状态对应的桶不存在 / 未启用）、`tables.dangling_pointer`
+  （表指针指向不存在的 metadata 对象）、`tables.stale_renaming`（表处于 RENAMING 但 intent
+  已不在）、`tables.inconsistent_rename`（intent 的阶段与源/目标条目不符）、
+  `tables.malformed_entry`。明细在结论的 `stats.tables`，每条计一个 finding；修复走
+  `POST …/tables/{t}/catalog/recovery`，fsck 本身不改任何对象。在线 `POST /-/admin/fsck/<默认后端>`
+  同样附带。
 
 退出码：`0` 干净；`1` 存在完整性发现（duostore 的 corrupt/unreadable/
-refs_missing/meta_errors，localfs 的 mismatches/read_errors）。警告级计数
+refs_missing/meta_errors，localfs 的 mismatches/read_errors，tables 的全部 finding）。警告级计数
 （refs_stale、unverifiable、孤儿 sidecar）只记日志不影响退出码——
 refs_stale 可能是巡检期间 MPU complete 造成的暂态，复跑确认。对运行中的
 实例也可安全执行（duostore 侧代价是巡检期间 GC 停摆）。

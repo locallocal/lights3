@@ -1,6 +1,7 @@
 # 步骤 ③：Avro 深校验、诊断与恢复
 
-> 状态：**未实现**（实施稿 2026-09-11）。对应设计 §5.4、§5.6、§7.4、§14 ③。
+> 状态：**已实现（2026-09-12，分支 feat/s3-tables-step3）**。对应设计 §5.4、§5.6、§7.4、§14 ③。
+> 实现与本稿的差异见文末 §12。
 > 依赖 ①。完成后：CommitTable 会读 manifest-list / manifest 核对每个数据文件存在；
 > post-CAS 的 finalization gap 可被诊断与修复；rename 中断可由任何写者恢复；
 > LoadTable 支持 `ETag` / `If-None-Match`；`fsck` 报告目录状态与表桶的不一致。
@@ -190,3 +191,62 @@ findings 计入 `JobOutcome.findings`，`kind = "tables"` 明细进 `stats`。�
   与 `max_files` 是唯一闸门，文档写明。
 - **zlib 可选依赖**：`find_package(ZLIB)` 找不到时编译仍通过，`avro_reader.cc` 用
   `#ifdef LIGHTS3_TABLES_ZLIB`；`--version` 输出加 `tables: deflate=yes|no`。
+
+## 12. 实现记录（2026-09-12）
+
+- **Avro 读取器**（`iceberg/avro_reader.{h,cc}`）：按 §3 实现；`Reader` 持有输入
+  `string_view`（调用方先读满，`DeepCheckOptions::max_avro` 封顶）。bytes / fixed 解码成
+  `json::binary`，union 返回分支值本身（`["null", T]` 的 null 分支即 `null`），
+  `logicalType` 一律忽略（Iceberg 的 map 以 `logicalType: map` 的 record 数组落地，按数组
+  读）。深度上限 64、单条记录 16 MiB、单块解压 128 MiB；负块计数（Spark 写法）已实现并有
+  单测。deflate 走 zlib raw inflate（`LIGHTS3_TABLES_ZLIB`，CMake `find_package(ZLIB QUIET)`），
+  `avro::deflate_supported()` 供测试与 `--version`（输出 `tables:   deflate=yes|no`）；
+  `features` 行同时多了 `tables`。
+- **manifest 模型**（`iceberg/manifest.{h,cc}`）：`DataFile` 多了 `snapshot_id`；
+  `parse_manifest` 接受 manifest 的 `sequence_number` 做继承（null 且 status=ADDED，或
+  manifest 序号为 0），与 PyIceberg 读回的值逐字段一致（固件 `<name>.json` 即 PyIceberg 的
+  读回结果，由 `scripts/tables/gen_fixtures.py` 生成）。
+- **深校验**（`check_new_snapshots_deep`）：流程按 §5，两处与稿子不同：
+  1. 冲突复核只看**归属于新快照**的条目（`entry.snapshot_id == 新快照 id`，为空则看
+     manifest 的 `added_snapshot_id`）。Iceberg 写者 append 时原样复用父快照的 manifest
+     文件（其中的 ADDED 条目属于旧快照），按稿子的写法每次 append 都会被判成"重复 ADD"。
+     `append` 不得带删除的规则同样只作用于归属条目，并扩展到 `content=1` 的 manifest。
+  2. manifest 长度不走单独 HEAD：GET 返回的 `ObjectMeta.size` 直接比对（少一次往返）。
+  父快照的活跃集按 `parent-snapshot-id` 在 `next` 里找，找不到（已过期）或父快照的
+  codec 不可读则跳过复核并记 `skipped_codec`。统计文件按 §5 第 5 步做 Range GET 魔数比对。
+  指标：`lights3_tables_validation_files_total`、`lights3_tables_validation_skipped_total`。
+  `LoadedTable.validation`（`"deep"` / `"skipped-codec"`）进 LoadTable / CommitTable 响应的
+  `config["lights3.snapshot-validation"]`（CommitTable 响应因此多了 `config` 对象，含
+  `lights3.catalog-etag`）。register / metadata-location PUT 同走深校验。
+  **配置不新增键**：并发度仍是 `tables.validate_concurrency`，其余上限用 `DeepCheckOptions`
+  默认值（10 000 manifest / 1 000 000 文件 / 128 MiB）。
+- **诊断与恢复**（`diagnostics.{h,cc}`）：`diagnose_table` 比稿子多一个 `metadata_dir`
+  参数（保留目录由 `Catalog` 算好传入）；`unreferenced_metadata` 的"已引用"集合额外含每条
+  记录的 `prev_metadata_location`；`ITableCatalogStore` 新增 `delete_commit`（prune 用）。
+  REST：`GET …/catalog/diagnostics`（Read）/ `POST …/catalog/recovery`（Write，审计
+  `tables.recovery`），不进 `/config` 的 `endpoints`；`table` 字段是目录条目 JSON 加
+  `etag`，`metadata_location` 改成 `s3://` 形式。`lights3-ctl tables diagnose|recover`
+  留给 ④。
+- **rename 恢复**（`drive_rename` / `recover_renames`）：`Catalog::rename_table` 写完
+  intent 后就调用同一个 `drive_rename`，因此正常路径与恢复路径是同一段代码。每一步对实体
+  CAS，**每次阶段推进对 intent 本身 CAS**（`put_rename` 改为返回 ETag），多个驱动者并发时
+  输家重读判断"已完成"或退出（`Contended`）。Prepared 阶段：源 etag 已变 → 删 intent
+  （`Abandoned`）；超过 `tables.maintenance.tombstone_ttl` 仍未 fence → 同样放弃；已被本
+  intent fence 则继续（不回滚）。目标已被占用 → 源改回 Active、删 intent
+  （`DestinationTaken`，409）。回滚只动"被本 intent fence 的源"。写入口（create / register /
+  commit / drop / rename / metadata-location PUT）：读到 `Renaming` 时强制先恢复再重读；
+  否则每桶每 32 次调用（进程内第一次算）扫一遍 `renames/`。读入口仍 503。故障点五个：
+  `tables.rename.after_prepare|after_fence|after_destination|after_tombstone|before_cleanup`。
+- **ETag**：`Catalog::load_table(..., if_none_match)`，接受带引号 / `W/` / 逗号列表 / `*`；
+  命中回 304 无 body 带 `ETag`，不读 metadata。`config["lights3.catalog-etag"]` 已加。
+- **fsck**：对账逻辑放在 `tables/fsck.{h,cc}`（`reconcile_catalog(sys_backend, router)`），
+  不在 `admin_jobs.cc` 里；`AdminJobs::set_fsck_extension` 让在线 `POST /-/admin/fsck/<默认后端>`
+  与离线 `lights3 fsck <默认后端>` 都把结果并进结论（`findings` 累加，明细在
+  `stats.tables`）。发现种类：`tables.orphan_state`、`tables.dangling_pointer`、
+  `tables.stale_renaming`、`tables.inconsistent_rename`（intent 与源/目标条目不符）、
+  `tables.malformed_entry`。墓碑不查指针。
+- **固件**：`tests/fixtures/tables/`，PyIceberg 0.12.0 生成（本机无 Spark，Spark 固件未入
+  库；PyIceberg 与 Spark 的 Avro 写法差异只在块计数符号，负块计数已用手工构造覆盖）；
+  路径写死在桶 `tbk`（表 `n/t`）与 `tbe2e`（e2e）。单测：`test_tables_avro.cc`（新）、
+  `test_tables_catalog.cc` 追加 4 例、`test_tables_rest.cc` 追加 1 例、`test_admin_jobs.cc`
+  追加 2 例；e2e 段改用真固件并加深校验 409 / 304 / diagnostics / recovery / 只读凭证。

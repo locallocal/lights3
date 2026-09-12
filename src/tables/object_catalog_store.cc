@@ -493,6 +493,11 @@ Task<std::vector<CommitRecord>> ObjectCatalogStore::list_commits(std::string_vie
     co_return out;
 }
 
+Task<void> ObjectCatalogStore::delete_commit(std::string_view bucket, std::string_view table_id,
+                                             std::string_view commit_id) {
+    co_await remove(commit_key(bucket, table_id, commit_id));
+}
+
 // ---------- renames ----------
 
 Task<std::optional<Versioned<RenameIntent>>> ObjectCatalogStore::get_rename(std::string_view bucket,
@@ -529,8 +534,9 @@ Task<std::vector<RenameIntent>> ObjectCatalogStore::list_renames(std::string_vie
     co_return out;
 }
 
-Task<void> ObjectCatalogStore::put_rename(std::string_view bucket, const RenameIntent& r, storage::PutCondition cond) {
-    co_await write(rename_key(bucket, r.rename_id), to_json(r).dump(), cond);
+Task<std::string> ObjectCatalogStore::put_rename(std::string_view bucket, const RenameIntent& r,
+                                                 storage::PutCondition cond) {
+    co_return co_await write(rename_key(bucket, r.rename_id), to_json(r).dump(), cond);
 }
 
 Task<void> ObjectCatalogStore::delete_rename(std::string_view bucket, std::string_view id) {

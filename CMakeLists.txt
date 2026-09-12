@@ -412,8 +412,22 @@ if(LIGHTS3_TABLES)
     src/tables/iceberg/updates.cc
     src/tables/iceberg/transition.cc
     src/tables/iceberg/snapshots.cc
+    src/tables/iceberg/avro_reader.cc
+    src/tables/iceberg/manifest.cc
+    src/tables/diagnostics.cc
+    src/tables/fsck.cc
   )
   target_compile_definitions(lights3_core PUBLIC LIGHTS3_TABLES)
+  # deflate-coded Avro manifests need zlib (docs/s3-tables-design.md §7.4); without it the
+  # deep check skips such snapshots and reports "skipped-codec"
+  find_package(ZLIB QUIET)
+  if(ZLIB_FOUND)
+    target_link_libraries(lights3_core PRIVATE ZLIB::ZLIB)
+    target_compile_definitions(lights3_core PRIVATE LIGHTS3_TABLES_ZLIB)
+    message(STATUS "tables: zlib found, deflate Avro manifests are validated")
+  else()
+    message(STATUS "tables: zlib not found, deflate Avro manifests are skipped at validation")
+  endif()
 endif()
 
 if(LIGHTS3_CLOUDPROXY)
@@ -582,6 +596,7 @@ if(LIGHTS3_BUILD_TESTS)
   if(LIGHTS3_TABLES)
     target_sources(unit_tests PRIVATE
       tests/unit/test_tables_iceberg.cc
+      tests/unit/test_tables_avro.cc
       tests/unit/test_tables_catalog.cc
       tests/unit/test_tables_rest.cc
     )

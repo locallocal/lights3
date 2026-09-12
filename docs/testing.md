@@ -45,7 +45,15 @@ rados 看 `LIGHTS3_TEST_RADOS_CONF` + `_POOL`。`docker compose --profile e2e ru
   `test_tables_catalog.cc`（提交协议、幂等重放、`tables.commit.after_stage|after_cas`
   故障点的崩溃窗口、rename）、`test_tables_rest.cc`（端点、错误模型、policy 与列表过滤、租户门、`s3tables` 签名、
   凭证下发、lifecycle 跳过、守卫、`/config.endpoints` 与路由表一致）、`test_credentials.cc`
-  的 `policy_narrowing_for_vended_sessions`。
+  的 `policy_narrowing_for_vended_sessions`。步骤 ③（[s3-tables/step-3-validation-diagnostics.md](s3-tables/step-3-validation-diagnostics.md)）：
+  e2e 段改用 PyIceberg 写的 manifest 固件（`tests/fixtures/tables/`），深校验通过报
+  `lights3.snapshot-validation: deep`、缺数据文件 409、坏 Avro 409、`If-None-Match` 304、
+  `catalog/diagnostics` 报 `Committed` 且无未引用文件、`catalog/recovery` 无事可做、只读凭证
+  diagnostics 200 / recovery 403。单测：`test_tables_avro.cc`（手工 OCF 每种类型、截断 / sync /
+  深度 / 未知 codec、PyIceberg 固件逐字段对照）、`test_tables_catalog.cc` 追加深校验六种 409
+  与 codec 两态、诊断五态与 `recover` 指针不动、rename 五个故障点由另一实例恢复 + Prepared
+  超时回滚、`test_tables_rest.cc` 的 diagnostics / recovery / 304 / `skipped-codec`、
+  `test_admin_jobs.cc` 的 fsck 扩展合并与目录对账三类 finding。
 - **lights3-ctl 交叉验证**：curl 用 libcurl 的 SigV4，lights3-ctl 用自实现签名，两套客户端
   打同一服务端。`cred create/list/get --show-secret/delete`（lights3-ctl 铸的凭证 curl
   能签、吊销后 curl 403）、`website set/get/delete`（curl 读回 lights3-ctl 写的配置）、

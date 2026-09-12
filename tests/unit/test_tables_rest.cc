@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 #include <set>
 
+#include "core/fault.h"
 #include "core/util/checksum.h"
 #include "core/util/crypto.h"
 #include "core/util/uri.h"
@@ -16,6 +17,7 @@
 #include "tables/object_catalog_store.h"
 #include "tables/rest_api.h"
 #include "unit/mini_test.h"
+#include "unit/tables_fixtures.h"
 
 using namespace lights3;
 using namespace lights3::s3;
@@ -119,6 +121,13 @@ struct TablesEnv {
         return sync_wait(svc->dispatch(std::move(r)));
     }
     static json body_json(const http::HttpResponse& r) { return json::parse(r.small_body); }
+    // fixture "1" (snapshot 1: f1 100 B, f2 200 B) with its manifest list at ml_key of bucket tbk
+    void install_snapshot(const std::string& ml_key) {
+        CHECK_EQ(call("PUT", "/tbk/" + ml_key, tables_fixtures::slurp("ml-1.avro")).status, 200);
+        CHECK_EQ(call("PUT", "/tbk/n/t/metadata/m-1.avro", tables_fixtures::slurp("m-1.avro")).status, 200);
+        CHECK_EQ(call("PUT", "/tbk/n/t/data/f1.parquet", std::string(100, 'a')).status, 200);
+        CHECK_EQ(call("PUT", "/tbk/n/t/data/f2.parquet", std::string(200, 'b')).status, 200);
+    }
     static std::string error_type(const http::HttpResponse& r) { return body_json(r)["error"]["type"]; }
     // adds a dynamic credential with a policy; returns its index in acfg.credentials
     size_t add_policy_cred(const std::string& comment, const std::string& policy_json, const std::string& tenant = "") {
@@ -244,8 +253,8 @@ TEST(tables_rest_full_flow_and_error_model) {
     CHECK_EQ(env.call("POST", "/tbk/.lights3-table/mpu", "", {{"uploads", ""}}).status, 400);
     CHECK_EQ(env.call("PUT", "/tbk/other", "y", {}, {{"x-amz-copy-source", "/tbk/" + key1}}).status, 200);
     CHECK_EQ(env.call("PUT", "/tbk/.lights3-table/copy", "", {}, {{"x-amz-copy-source", "/tbk/other"}}).status, 400);
-    // commit
-    CHECK_EQ(env.call("PUT", "/tbk/sales/eu/orders/metadata/snap-1.avro", "avro").status, 200);
+    // commit: a PyIceberg-written manifest list, its manifest and data files (step ③ walks them)
+    env.install_snapshot("sales/eu/orders/metadata/snap-1.avro");
     auto cm = env.call("POST", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders",
                        append_body(1, 1, "s3://tbk/sales/eu/orders/metadata/snap-1.avro", "c-1"));
     CHECK_EQ(cm.status, 200);
@@ -600,4 +609,82 @@ TEST(tables_rest_lifecycle_skips_table_buckets) {
                       {{"lifecycle", ""}})
                  .status,
              200);
+}
+
+// ---------- step ③: diagnostics / recovery endpoints, If-None-Match, validation flag ----------
+
+TEST(tables_rest_diagnostics_recovery_and_etag) {
+    struct FaultReset {
+        ~FaultReset() { fault::reset(); }
+    } guard;
+    TablesEnv env;
+    CHECK_EQ(env.call("PUT", "/tbk").status, 200);
+    CHECK_EQ(env.call("PUT", "/iceberg/v1/buckets/tbk").status, 200);
+    CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces", R"({"namespace":["sales"]})").status, 200);
+    auto ct = env.call("POST", "/iceberg/v1/tbk/namespaces/sales/tables", create_body("t"));
+    CHECK_EQ(ct.status, 200);
+    const std::string table = "/iceberg/v1/tbk/namespaces/sales/tables/t";
+    // ETag / If-None-Match (step ③ §8): a hit is a bodiless 304 that still carries the ETag
+    auto lt = env.call("GET", table);
+    CHECK_EQ(lt.status, 200);
+    std::string etag = *lt.headers.get("ETag");
+    CHECK_EQ(TablesEnv::body_json(lt)["config"]["lights3.catalog-etag"].get<std::string>(),
+             etag.substr(1, etag.size() - 2));
+    CHECK_EQ(TablesEnv::body_json(lt)["config"]["lights3.snapshot-validation"].get<std::string>(), "deep");
+    auto nm = env.call("GET", table, "", {}, {{"If-None-Match", etag}});
+    CHECK_EQ(nm.status, 304);
+    CHECK(nm.small_body.empty());
+    CHECK_EQ(*nm.headers.get("ETag"), etag);
+    CHECK_EQ(env.call("GET", table, "", {}, {{"If-None-Match", "W/" + etag + ", \"other\""}}).status, 304);
+    CHECK_EQ(env.call("GET", table, "", {}, {{"If-None-Match", "\"stale\""}}).status, 200);
+    // diagnostics of a fresh table: no records, nothing unreferenced
+    auto dg = env.call("GET", table + "/catalog/diagnostics");
+    CHECK_EQ(dg.status, 200);
+    auto dj = TablesEnv::body_json(dg);
+    CHECK_EQ(dj["commits"].size(), size_t(0));
+    CHECK_EQ(dj["unreferenced-metadata"].size(), size_t(0));
+    CHECK_EQ(dj["table"]["name"].get<std::string>(), "t");
+    CHECK_EQ(dj["table"]["etag"].get<std::string>(), etag.substr(1, etag.size() - 2));
+    // a commit that dies after the pointer CAS leaves a finalization gap (design §5.4)
+    env.install_snapshot("sales/t/metadata/ml.avro");
+    fault::arm("tables.commit.after_cas:1");
+    auto gap = env.call("POST", table, append_body(1, 1, "s3://tbk/sales/t/metadata/ml.avro", "c-gap"));
+    CHECK_EQ(gap.status, 500);
+    auto ptr = env.call("GET", table + "/metadata-location");
+    CHECK_EQ(TablesEnv::body_json(ptr)["generation"].get<int>(), 2);
+    dj = TablesEnv::body_json(env.call("GET", table + "/catalog/diagnostics"));
+    CHECK_EQ(dj["commits"].size(), size_t(1));
+    CHECK_EQ(dj["commits"][0]["commit-id"].get<std::string>(), "c-gap");
+    CHECK_EQ(dj["commits"][0]["state"].get<std::string>(), "FinalizationRequired");
+    std::string etag2 = *env.call("GET", table).headers.get("ETag");
+    auto rc = env.call("POST", table + "/catalog/recovery", R"({"prune":false})");
+    CHECK_EQ(rc.status, 200);
+    CHECK_EQ(TablesEnv::body_json(rc)["finalized"].get<int>(), 1);
+    CHECK_EQ(TablesEnv::body_json(rc)["pruned"].get<int>(), 0);
+    dj = TablesEnv::body_json(env.call("GET", table + "/catalog/diagnostics"));
+    CHECK_EQ(dj["commits"][0]["state"].get<std::string>(), "Committed");
+    // the pointer did not move
+    CHECK_EQ(*env.call("GET", table).headers.get("ETag"), etag2);
+    CHECK_EQ(env.call("POST", table + "/catalog/recovery", R"({"prune":"yes"})").status, 400);
+    CHECK_EQ(env.call("POST", table + "/catalog/recovery").status, 200);
+    CHECK_EQ(env.call("GET", "/iceberg/v1/tbk/namespaces/sales/tables/nope/catalog/diagnostics").status, 404);
+    // permissions: diagnostics is a read, recovery a write
+    const size_t ro = env.add_policy_cred("ro", R"({"buckets":["tbk"],"readonly":true})");
+    CHECK_EQ(env.call("GET", table + "/catalog/diagnostics", "", {}, {}, ro).status, 200);
+    CHECK_EQ(env.call("POST", table + "/catalog/recovery", "{}", {}, {}, ro).status, 403);
+    // a manifest list in a codec the reader cannot decode: accepted, flagged in config
+    CHECK_EQ(env.call("PUT", "/tbk/sales/t/metadata/snappy.avro", tables_fixtures::snappy_manifest_list()).status, 200);
+    auto sc = env.call("POST", table, append_body(2, 2, "s3://tbk/sales/t/metadata/snappy.avro"));
+    CHECK_EQ(sc.status, 200);
+    CHECK_EQ(TablesEnv::body_json(sc)["config"]["lights3.snapshot-validation"].get<std::string>(), "skipped-codec");
+    auto ok = env.call("POST", table, append_body(3, 3, "s3://tbk/sales/t/metadata/ml.avro"));
+    CHECK_EQ(ok.status, 200);
+    CHECK_EQ(TablesEnv::body_json(ok)["config"]["lights3.snapshot-validation"].get<std::string>(), "deep");
+    // a data file the manifest names is gone: 409 CommitFailedException
+    CHECK_EQ(env.call("DELETE", "/tbk/n/t/data/f1.parquet").status, 204);
+    auto missing = env.call("POST", table, append_body(4, 4, "s3://tbk/sales/t/metadata/ml.avro"));
+    CHECK_EQ(missing.status, 409);
+    CHECK_EQ(TablesEnv::error_type(missing), "CommitFailedException");
+    // the endpoints are extensions: not advertised in /config
+    for (auto& e : tables::RestApi::advertised_endpoints()) CHECK(e.find("catalog/") == std::string::npos);
 }

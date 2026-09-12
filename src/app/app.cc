@@ -17,6 +17,7 @@
 #include "storage/bucket_router.h"
 #include "storage/registry.h"
 #ifdef LIGHTS3_TABLES
+#include "tables/fsck.h"
 #include "tables/object_catalog_store.h"
 #endif
 
@@ -221,6 +222,24 @@ void Application::start_server() {
     // polling. The service speaks (group, op) strings; the mapping to ops and the
     // 409 code (ScrubInProgress for fsck, JobInProgress for the rounds) live here
     admin_jobs_ = std::make_unique<AdminJobs>(backends_);
+#ifdef LIGHTS3_TABLES
+    // the catalog reconciliation rides on the default backend's fsck (step ③ §9)
+    if (cfg_.tables.enabled) {
+        std::string default_name = cfg_.buckets.default_backend;
+        admin_jobs_->set_fsck_extension([this, default_name](const std::string& backend) -> std::optional<JobOutcome> {
+            if (backend != default_name) return std::nullopt;
+            auto it = backends_.find(backend);
+            if (it == backends_.end()) return std::nullopt;
+            auto router = storage::BucketRouter::build(cfg_.buckets, backends_);
+            auto rep = sync_wait(tables::reconcile_catalog(it->second, router));
+            JobOutcome ext;
+            ext.kind = "tables";
+            ext.stats = rep.to_json();
+            ext.findings = rep.findings.size();
+            return ext;
+        });
+    }
+#endif
     auto job_failure = [](const AdminJobs::Failure& f, bool fsck) -> s3::S3Error {
         switch (f.code) {
             case AdminJobs::Error::NoSuchBackend:

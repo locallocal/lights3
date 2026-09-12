@@ -64,6 +64,14 @@ constexpr std::string_view kPoints[] = {
     "tables.commit.after_stage",
     // after the pointer CAS, before the record is finalized
     "tables.commit.after_cas",
+    // table rename (design §5.6): after each of the five steps, before the next one
+    // (the intent is written / the source fenced / the destination written / the
+    // source tombstoned / the intent about to be deleted)
+    "tables.rename.after_prepare",
+    "tables.rename.after_fence",
+    "tables.rename.after_destination",
+    "tables.rename.after_tombstone",
+    "tables.rename.before_cleanup",
 };
 
 }  // namespace lights3::fault

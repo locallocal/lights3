@@ -137,10 +137,15 @@ struct ITableCatalogStore {
     virtual Task<void> put_commit(std::string_view bucket, std::string_view table_id, const CommitRecord& r,
                                   storage::PutCondition cond) = 0;
     virtual Task<std::vector<CommitRecord>> list_commits(std::string_view bucket, std::string_view table_id) = 0;
+    // recovery pruning (step ③); a missing record is not an error
+    virtual Task<void> delete_commit(std::string_view bucket, std::string_view table_id,
+                                     std::string_view commit_id) = 0;
 
     virtual Task<std::optional<Versioned<RenameIntent>>> get_rename(std::string_view bucket, std::string_view id) = 0;
     virtual Task<std::vector<RenameIntent>> list_renames(std::string_view bucket) = 0;
-    virtual Task<void> put_rename(std::string_view bucket, const RenameIntent& r, storage::PutCondition cond) = 0;
+    // returns the new ETag (the rename driver advances stages under CAS)
+    virtual Task<std::string> put_rename(std::string_view bucket, const RenameIntent& r,
+                                         storage::PutCondition cond) = 0;
     virtual Task<void> delete_rename(std::string_view bucket, std::string_view id) = 0;
 
     // DeleteBucket: drop everything the catalog holds for the bucket

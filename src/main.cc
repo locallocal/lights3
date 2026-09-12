@@ -16,9 +16,8 @@
 // This file holds only the root command and main; each command group lives in
 // its own src/cli/cli_<group>.cc with a make_<group>() factory, shared helpers
 // in cli/cli_common.h. ccmd's root options do not propagate down, so --config
-// is registered on every leaf. cflag accepts long-option values only as
-// --name=value; the `--name value` form used by the e2e scripts and older docs
-// is folded into that shape by normalize_argv below, so both keep working.
+// is registered on every leaf. cflag (v0.0.2) accepts long-option values both as
+// --name=value and as `--name value`, so argv goes to ccmd untouched.
 #include <ccmd.h>
 
 #include <cstdio>
@@ -46,40 +45,9 @@ int g_exit = 0;
 
 }  // namespace lights3_cli
 
-namespace {
-
-// Rewrite `--config <v>` into `--config=<v>` (the only form cflag understands
-// for non-bool long options). Applies to the value-taking long options the
-// command tree registers; everything after `--` is left untouched.
-std::vector<std::string> normalize_argv(int argc, char** argv) {
-    static const char* const kValueFlags[] = {"--config", "--backend", "--file", "--max-mbps"};
-    std::vector<std::string> out;
-    out.reserve(static_cast<size_t>(argc));
-    for (int i = 0; i < argc; ++i) {
-        std::string a = argv[i];
-        if (a == "--") {
-            for (; i < argc; ++i) out.emplace_back(argv[i]);
-            break;
-        }
-        bool folded = false;
-        for (const char* f : kValueFlags) {
-            if (a == f && i + 1 < argc) {
-                out.push_back(a + "=" + argv[i + 1]);
-                ++i;
-                folded = true;
-                break;
-            }
-        }
-        if (!folded) out.push_back(std::move(a));
-    }
-    return out;
-}
-
-}  // namespace
-
 int main(int argc, char** argv) {
     using namespace lights3_cli;
-    auto root = std::make_shared<ccmd::c_command>(
+    auto root = std::make_shared<ccmd::command>(
         "lights3", "lights3 --config=config/lights3.yaml", "lights3 [--config=<path>] | lights3 <command> ...",
         "S3-compatible object storage server. With no command the server starts and "
         "runs until SIGINT/SIGTERM; run `lights3 help <command>` for the admin commands.",
@@ -101,7 +69,7 @@ int main(int argc, char** argv) {
 #endif
 
     try {
-        root->execute(normalize_argv(argc, argv));
+        root->execute(argc, argv);
         return g_exit;
     } catch (const std::exception& e) {
         fprintf(stderr, "fatal: %s\n", e.what());

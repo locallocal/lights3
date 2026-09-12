@@ -15,7 +15,7 @@
 
 namespace lights3_cli {
 
-using Cmd = std::shared_ptr<ccmd::c_command>;
+using Cmd = std::shared_ptr<ccmd::command>;
 
 // ccmd callbacks return nothing; the process exit code is carried out through
 // this (0 success / 1 runtime failure / 2 usage error). Defined in main.cc.

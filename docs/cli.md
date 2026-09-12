@@ -1,7 +1,7 @@
 # 命令行工具：`lights3` 与 `lights3-ctl`
 
-本文是两个可执行文件的命令参考。二者都基于 `third_party/ccmd`
-（header-only 子命令框架，内嵌 `cflag` 做选项解析），共享同一套命令行语义，
+本文是两个可执行文件的命令参考。二者都基于 `third_party/ccmd` v0.0.2
+（header-only 子命令框架，内嵌 header-only 的 `cflag` v0.0.2 做选项解析），共享同一套命令行语义，
 先在 §1 说清，后文不再重复。启动装配流程见 [architecture.md §4](architecture.md#4-进程结构与启动流程)，
 凭证管理面见 [credential-management.md](credential-management.md)，
 静态网站见 [static-website.md](static-website.md)。
@@ -12,12 +12,17 @@
   `<程序> help [<命令组> [<子命令>]]` 或任一层级的 `-h/--help` 打印该层帮助。
 - **选项不向下继承**：每个叶子子命令拥有独立的选项集，选项必须写在叶子
   子命令之后（`lights3-ctl cred list --endpoint=…`，而不是 `lights3-ctl --endpoint=… cred list`）。
-- **长选项取值只接受 `--name=value`**；`--name value` 会被 cflag 当作缺值报错。
-  短选项两种都可以：`-e http://…` 或 `-ehttp://…`。bool 选项裸写即为 true
-  （`--insecure`、`--keep`）。
-  例外：`lights3` 主程序在进入 ccmd 前把 `--config <path>`（以及
-  `--backend`/`--file`）折叠成 `=` 形式，因此空格写法对 `lights3` 也可用
-  （e2e 脚本与旧文档沿用这一写法）；`lights3-ctl` 没有这层兼容。
+- **取值写法**：长选项 `--name=value` 与 `--name value` 都可以（cflag v0.0.2 起；
+  之前只有 `lights3` 主程序对 `--config`/`--backend`/`--file` 做过空格写法的折叠，
+  该垫片已删除）；短选项 `-e http://…` 或 `-ehttp://…`。bool 选项裸写即为 true
+  （`--insecure`、`--keep`），显式取值只能写 `--name=true|false`（也接受 `1/0`、`t/f`）；
+  多个短 bool 可合写（`-dv`）。整数选项按目标类型做范围检查，部分解析（`10x`）报错。
+- **`--flag-file=<path>`**：每个（叶子）命令都内置，从 JSON / YAML / gflags 三种格式的文件
+  读入选项（按扩展名 `.json`/`.yaml`/`.yml` 判定，其余按内容嗅探），在它出现的位置生效，
+  后面的命令行参数覆盖文件里的值；文件里可再写 `flag-file` 嵌套（最多 16 层）。
+  `help`、`h`、`flag-file` 是保留名，本仓库的命令树不注册这三个名字。
+- **帮助输出**：`Commands:` / `Options:` 两栏对齐、每行 100 列内自动换行，`Options:` 里
+  连同内置的 `-h --help` 与 `--flag-file` 一起列出，默认值以 `(default: …)` 结尾。
 - **`--` 终止选项解析**，其后全部视为位置参数。
 - **退出码**：`0` 成功；`1` 运行期失败（请求被拒、IO 错误、服务启动异常）；
   `2` 用法错误（缺位置参数、缺凭证、数值越界、裸命令组）。ccmd 自身对

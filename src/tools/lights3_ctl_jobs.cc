@@ -76,10 +76,10 @@ int print_ledger(SignedClient& cli, const std::string& path) {
 namespace {
 
 // One round leaf: `lights3-ctl <group> <op> <backend> [--no-wait | --status]`
-std::shared_ptr<ccmd::c_command> make_round(const std::string& group, const std::string& op, const std::string& what,
-                                            const std::string& findings) {
+std::shared_ptr<ccmd::command> make_round(const std::string& group, const std::string& op, const std::string& what,
+                                          const std::string& findings) {
     std::string label = group + " " + op;
-    auto cmd = std::make_shared<ccmd::c_command>(
+    auto cmd = std::make_shared<ccmd::command>(
         op, "lights3-ctl " + label + " " + group + "data", "lights3-ctl " + label + " <backend> [--no-wait | --status]",
         "Run one " + what + " on the running gateway (POST /-/admin/" + group + "/<backend>/" + op +
             ", root credential), wait for it and print the outcome document " +
@@ -88,7 +88,7 @@ std::shared_ptr<ccmd::c_command> make_round(const std::string& group, const std:
             ". --no-wait returns the job id at once; --status prints the running/last " +
             "outcome instead of starting anything. One job per backend at a time, whatever " +
             "the operation (409 JobInProgress).",
-        "run one " + what + ".", [group, op, label](const std::shared_ptr<ccmd::c_command>& c) {
+        "run one " + what + ".", [group, op, label](const std::shared_ptr<ccmd::command>& c) {
             bool status = c->var<bool>("status");
             bool wait = !c->var<bool>("no-wait");
             if (c->args().size() != 1 || (status && !wait)) {
@@ -106,15 +106,15 @@ std::shared_ptr<ccmd::c_command> make_round(const std::string& group, const std:
 }
 
 // `lights3-ctl <group> quarantine list <backend>`: the ledger, read-only
-std::shared_ptr<ccmd::c_command> make_quarantine(const std::string& group, const std::string& what,
-                                                 const std::string& fields) {
-    auto list = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_quarantine(const std::string& group, const std::string& what,
+                                               const std::string& fields) {
+    auto list = std::make_shared<ccmd::command>(
         "list", "lights3-ctl " + group + " quarantine list " + group + "data",
         "lights3-ctl " + group + " quarantine list <backend>",
         "Print the " + what + " of a backend on the running gateway as JSON (GET /-/admin/" + group +
             "/<backend>/quarantine, root credential): {\"backend\",\"kind\"," + "\"entries\":[{" + fields +
             "}]}. Read-only; acting on an entry stays with the " + "offline `lights3 " + group + " quarantine` verbs.",
-        "print the " + what + ".", [group](const std::shared_ptr<ccmd::c_command>& c) {
+        "print the " + what + ".", [group](const std::shared_ptr<ccmd::command>& c) {
             if (c->args().size() != 1) {
                 fprintf(stderr, "lights3-ctl: usage: %s\n", c->usage().c_str());
                 g_exit = 2;
@@ -124,10 +124,10 @@ std::shared_ptr<ccmd::c_command> make_quarantine(const std::string& group, const
             run_admin(c, [&](SignedClient& cli) { return print_ledger(cli, path); });
         });
     add_conn_flags(list);
-    auto cmd = std::make_shared<ccmd::c_command>(
+    auto cmd = std::make_shared<ccmd::command>(
         "quarantine", "lights3-ctl " + group + " quarantine list " + group + "data",
         "lights3-ctl " + group + " quarantine list <backend>", "The " + what + " (read-only).",
-        "inspect the " + what + ".", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "inspect the " + what + ".", [](const std::shared_ptr<ccmd::command>& c) {
             c->print_help();
             g_exit = 2;
         });
@@ -137,8 +137,8 @@ std::shared_ptr<ccmd::c_command> make_quarantine(const std::string& group, const
 
 }  // namespace
 
-std::shared_ptr<ccmd::c_command> make_duostore() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_duostore() {
+    auto cmd = std::make_shared<ccmd::command>(
         "duostore", "lights3-ctl duostore gc duodata", "lights3-ctl duostore <command> [options]",
         "duostore maintenance on the running gateway through the admin plane (root "
         "credential): one GC round (gc), one orphan scan (scan), the corrupt-pack "
@@ -147,7 +147,7 @@ std::shared_ptr<ccmd::c_command> make_duostore() {
         "they run inside the gateway, so a local meta engine needs no downtime. Options "
         "must follow the leaf subcommand as --name=value.",
         "duostore gc / orphan scan / quarantine ledger on a live gateway.",
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        [](const std::shared_ptr<ccmd::command>& c) {
             c->print_help();
             g_exit = 2;
         });
@@ -163,8 +163,8 @@ std::shared_ptr<ccmd::c_command> make_duostore() {
     return cmd;
 }
 
-std::shared_ptr<ccmd::c_command> make_tier() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_tier() {
+    auto cmd = std::make_shared<ccmd::command>(
         "tier", "lights3-ctl tier reconcile tierdata", "lights3-ctl tier <command> [options]",
         "tiered-backend maintenance on the running gateway through the admin plane "
         "(root credential): one scan round (scan: coldness demotion, watermark eviction, "
@@ -173,7 +173,7 @@ std::shared_ptr<ccmd::c_command> make_tier() {
         "(quarantine list). The same rounds the timers and the offline `lights3 tier` "
         "commands run. Options must follow the leaf subcommand as --name=value.",
         "tiered scan / gc / reconcile / quarantine ledger on a live gateway.",
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        [](const std::shared_ptr<ccmd::command>& c) {
             c->print_help();
             g_exit = 2;
         });

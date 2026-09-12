@@ -50,13 +50,13 @@ struct ConnOpts {
 };
 
 // Common connection options: each ccmd subcommand's option set is independent, so register them one by one
-void add_conn_flags(const std::shared_ptr<ccmd::c_command>& cmd);
+void add_conn_flags(const std::shared_ptr<ccmd::command>& cmd);
 
 // Reads the connection flags registered by add_conn_flags, with env fallback
 // LIGHTS3_ADMIN_AK/LIGHTS3_ADMIN_SK. On a usage error (missing credentials,
 // https without OpenSSL) prints to stderr, sets g_exit = 2 and returns false;
 // a malformed endpoint throws (callers route exceptions to exit code 1).
-bool read_conn_opts(const std::shared_ptr<ccmd::c_command>& cmd, ConnOpts& out);
+bool read_conn_opts(const std::shared_ptr<ccmd::command>& cmd, ConnOpts& out);
 
 // SigV4 self-signing synchronous HTTP client (signing side of s3/auth/sigv4 +
 // httplib). Not thread-safe: one instance per thread. keep-alive is enabled —
@@ -103,7 +103,7 @@ int finish(const httplib::Result& r, int expect, const std::string& ok_note = ""
 
 // Reads connection options + env-var fallback, builds the client and runs fn; exceptions all land here as exit codes
 template <class Fn>
-void run_admin(const std::shared_ptr<ccmd::c_command>& cmd, Fn&& fn) {
+void run_admin(const std::shared_ptr<ccmd::command>& cmd, Fn&& fn) {
     try {
         ConnOpts conn;
         if (!read_conn_opts(cmd, conn)) return;

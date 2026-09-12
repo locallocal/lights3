@@ -85,8 +85,8 @@ std::string human_age(int64_t sec) {
     return std::to_string(sec / 86400) + "d";
 }
 
-bool read_common(const std::shared_ptr<ccmd::c_command>& c, std::string& bucket, std::string& prefix,
-                 int64_t& older_sec, std::string& output) {
+bool read_common(const std::shared_ptr<ccmd::command>& c, std::string& bucket, std::string& prefix, int64_t& older_sec,
+                 std::string& output) {
     prefix = c->var<std::string>("prefix");
     output = c->var<std::string>("output");
     if (output != "text" && output != "json") {
@@ -114,7 +114,7 @@ bool read_common(const std::shared_ptr<ccmd::c_command>& c, std::string& bucket,
     return true;
 }
 
-void add_common_flags(const std::shared_ptr<ccmd::c_command>& cmd) {
+void add_common_flags(const std::shared_ptr<ccmd::command>& cmd) {
     cmd->varp<std::string>("prefix", "p", "", "only uploads whose key starts with this prefix.");
     cmd->var<std::string>("older-than", "",
                           "only uploads initiated at least this long ago (e.g. 1h, 2d); default all.");
@@ -144,13 +144,13 @@ void print_uploads(const std::vector<Upload>& ups, const std::string& output, co
     printf("%zu upload(s)\n", ups.size());
 }
 
-std::shared_ptr<ccmd::c_command> make_list() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_list() {
+    auto cmd = std::make_shared<ccmd::command>(
         "list", "lights3-ctl mpu list photos --older-than=1d", "lights3-ctl mpu list <bucket> [options]",
         "List in-progress multipart uploads of a bucket (every page), one line per upload: "
         "initiated, age, upload id, key. --older-than / --prefix narrow the set — the same "
         "selection `abort --all` acts on.",
-        "list in-progress multipart uploads.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "list in-progress multipart uploads.", [](const std::shared_ptr<ccmd::command>& c) {
             std::string bucket, prefix, output;
             int64_t older = 0;
             if (!read_common(c, bucket, prefix, older, output)) return;
@@ -168,14 +168,14 @@ std::shared_ptr<ccmd::c_command> make_list() {
     return cmd;
 }
 
-std::shared_ptr<ccmd::c_command> make_abort() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_abort() {
+    auto cmd = std::make_shared<ccmd::command>(
         "abort", "lights3-ctl mpu abort photos --all --older-than=7d",
         "lights3-ctl mpu abort <bucket> (<key> <upload-id> | --all) [options]",
         "Abort multipart uploads: one upload given as <key> <upload-id>, or --all for every "
         "upload the --prefix / --older-than selection matches (zombie cleanup). Prints one "
         "line per aborted upload; a 404 (already gone) counts as done.",
-        "abort multipart uploads.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "abort multipart uploads.", [](const std::shared_ptr<ccmd::command>& c) {
             std::string bucket, prefix, output;
             int64_t older = 0;
             if (!read_common(c, bucket, prefix, older, output)) return;
@@ -228,14 +228,14 @@ std::shared_ptr<ccmd::c_command> make_abort() {
 
 namespace lights3_ctl {
 
-std::shared_ptr<ccmd::c_command> make_mpu() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_mpu() {
+    auto cmd = std::make_shared<ccmd::command>(
         "mpu", "lights3-ctl mpu list photos --older-than=1d", "lights3-ctl mpu <command> [options]",
         "Multipart upload housekeeping over the standard S3 API (ListMultipartUploads / "
         "AbortMultipartUpload): list in-progress uploads with their age, abort one or every "
         "stale one (roadmap §6.2). Works with any credential allowed on the bucket. Options "
         "must follow the leaf subcommand as --name=value.",
-        "list / abort multipart uploads.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "list / abort multipart uploads.", [](const std::shared_ptr<ccmd::command>& c) {
             c->print_help();
             g_exit = 2;
         });

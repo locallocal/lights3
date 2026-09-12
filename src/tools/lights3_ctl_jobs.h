@@ -27,7 +27,7 @@ int run_job(SignedClient& cli, const std::string& path, const std::string& label
 int print_ledger(SignedClient& cli, const std::string& path);
 
 // The command groups (both built on run_job / print_ledger)
-std::shared_ptr<ccmd::c_command> make_duostore();
-std::shared_ptr<ccmd::c_command> make_tier();
+std::shared_ptr<ccmd::command> make_duostore();
+std::shared_ptr<ccmd::command> make_tier();
 
 }  // namespace lights3_ctl

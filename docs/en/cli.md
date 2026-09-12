@@ -3,8 +3,8 @@
 > English translation of [../cli.md](../cli.md). Section numbering matches.
 
 This is the command reference for the two executables. Both are built on
-`third_party/ccmd` (a header-only subcommand framework bundling `cflag` for
-option parsing) and share one set of command-line semantics, spelled out once
+`third_party/ccmd` v0.0.2 (a header-only subcommand framework bundling the
+header-only `cflag` v0.0.2 for option parsing) and share one set of command-line semantics, spelled out once
 in §1. The startup assembly flow is in [architecture.md §4](architecture.md#4-process-structure-and-startup-flow),
 the credential admin plane in [credential-management.md](credential-management.md),
 static websites in [static-website.md](static-website.md).
@@ -17,14 +17,23 @@ static websites in [static-website.md](static-website.md).
 - **Options do not propagate downward**: every leaf subcommand owns an
   independent option set, so options must follow the leaf
   (`lights3-ctl cred list --endpoint=…`, not `lights3-ctl --endpoint=… cred list`).
-- **Long options take values only as `--name=value`**; `--name value` is
-  rejected by cflag as a missing value. Short options accept both
-  `-e http://…` and `-ehttp://…`. A bare bool option means true
-  (`--insecure`, `--keep`).
-  Exception: the `lights3` server folds `--config <path>` (and
-  `--backend`/`--file`) into the `=` form before handing argv to ccmd, so the
-  space form keeps working there (the e2e scripts and older docs use it);
-  `lights3-ctl` has no such shim.
+- **Value syntax**: long options accept both `--name=value` and `--name value`
+  (since cflag v0.0.2; before that only the `lights3` server folded the space
+  form of `--config`/`--backend`/`--file`, and that shim is gone); short options
+  accept `-e http://…` and `-ehttp://…`. A bare bool option means true
+  (`--insecure`, `--keep`); an explicit bool value must use `--name=true|false`
+  (`1/0`, `t/f` are accepted too); short bools combine (`-dv`). Integer options
+  are range-checked against their type and partial parses (`10x`) are rejected.
+- **`--flag-file=<path>`**: built into every (leaf) command; loads options from
+  a JSON / YAML / gflags file (chosen by the `.json`/`.yaml`/`.yml` extension,
+  otherwise sniffed from the content), applied at the position where it
+  appears so later command-line arguments override the file; a file may nest
+  another with `flag-file` (16 levels at most). `help`, `h` and `flag-file` are
+  reserved names; the command tree in this repository registers none of them.
+- **Help output**: `Commands:` / `Options:` are aligned two-column tables
+  wrapped at 100 columns; `Options:` lists the built-in `-h --help` and
+  `--flag-file` next to the command's own flags, defaults end the row as
+  `(default: …)`.
 - **`--` ends option parsing**; everything after it is positional.
 - **Exit codes**: `0` success; `1` runtime failure (request refused, IO error,
   server startup failure); `2` usage error (missing positional, missing

@@ -34,7 +34,7 @@ int g_exit = 0;
 }  // namespace lights3_ctl
 
 int main(int argc, char* argv[]) {
-    auto root = std::make_shared<ccmd::c_command>(
+    auto root = std::make_shared<ccmd::command>(
         "lights3-ctl", "lights3-ctl cred list --endpoint=http://127.0.0.1:9000", "lights3-ctl <command> [options]",
         "lights3 ops CLI (docs/credential-management.md). Credential management "
         "lives under the `cred` command group, benchmarking under `bench`, bucket "
@@ -48,7 +48,7 @@ int main(int argc, char* argv[]) {
         "lights3 ops CLI.",
         // Bare lights3-ctl / lights3-ctl -x: nothing actionable to run; print help and exit as a
         // usage error. `lights3-ctl --version` is the one root-level flag (roadmap §6.3)
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        [](const std::shared_ptr<ccmd::command>& c) {
             if (c->var<bool>("version")) {
                 fputs(lights3::version_report("lights3-ctl").c_str(), stdout);
                 return;

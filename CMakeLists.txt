@@ -283,8 +283,8 @@ add_subdirectory(third_party/spdlog EXCLUDE_FROM_ALL)
 # nlohmann/json: JSON encode/decode for the admin credential API (header-only, docs/credential-management.md §5.4)
 add_subdirectory(third_party/json EXCLUDE_FROM_ALL)
 
-# ccmd: command/subcommand framework (git submodule, header-only + static cflag; needs
-# --recursive init for its cflag submodule). Used by the lights3 entry point
+# ccmd v0.0.2: command/subcommand framework (git submodule, header-only together with its
+# cflag v0.0.2 submodule; needs --recursive init). Used by the lights3 entry point
 # (src/main.cc + src/cli/: --config, `duostore ...`, `tier ...`, `fsck`) and the lights3-ctl ops CLI
 add_subdirectory(third_party/ccmd EXCLUDE_FROM_ALL)
 

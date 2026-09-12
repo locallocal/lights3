@@ -126,7 +126,7 @@ void run_import(const Cmd& c) {
 
 Cmd make_leaf(const char* name, const char* example, const char* usage, const char* help_long, const char* help_short,
               void (*run)(const Cmd&)) {
-    auto cmd = std::make_shared<ccmd::c_command>(name, example, usage, help_long, help_short, run);
+    auto cmd = std::make_shared<ccmd::command>(name, example, usage, help_long, help_short, run);
     add_config_flag(cmd);
     cmd->var<std::string>("file", "", "JSON-lines file (alternative to the positional)");
     cmd->var<std::string>("backing", "",

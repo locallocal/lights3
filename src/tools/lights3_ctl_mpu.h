@@ -8,6 +8,6 @@
 
 namespace lights3_ctl {
 
-std::shared_ptr<ccmd::c_command> make_mpu();
+std::shared_ptr<ccmd::command> make_mpu();
 
 }  // namespace lights3_ctl

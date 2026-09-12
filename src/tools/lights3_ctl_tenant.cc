@@ -28,7 +28,7 @@ std::string tenant_path(const std::string& id) {
     return std::string(kBase) + "/" + util::aws_uri_encode(id, /*encode_slash=*/true);
 }
 
-bool n_args(const std::shared_ptr<ccmd::c_command>& cmd, size_t n) {
+bool n_args(const std::shared_ptr<ccmd::command>& cmd, size_t n) {
     if (cmd->args().size() != n) {
         fprintf(stderr, "lights3-ctl: usage: %s\n", cmd->usage().c_str());
         g_exit = 2;
@@ -39,7 +39,7 @@ bool n_args(const std::shared_ptr<ccmd::c_command>& cmd, size_t n) {
 
 // --max-bytes/--max-objects/--max-buckets -> "quota" object; only flags that were
 // given are emitted (create) or all three are emitted (update = replace semantics)
-json quota_from_flags(const std::shared_ptr<ccmd::c_command>& c, bool all) {
+json quota_from_flags(const std::shared_ptr<ccmd::command>& c, bool all) {
     json q = json::object();
     auto put = [&](const char* flag, const char* field) {
         auto v = c->var<std::string>(flag);
@@ -52,18 +52,18 @@ json quota_from_flags(const std::shared_ptr<ccmd::c_command>& c, bool all) {
     return q;
 }
 
-void add_quota_flags(const std::shared_ptr<ccmd::c_command>& cmd) {
+void add_quota_flags(const std::shared_ptr<ccmd::command>& cmd) {
     cmd->var<std::string>("max-bytes", "", "byte limit over all owned buckets (e.g. 100GiB); 0/empty = unlimited.");
     cmd->var<std::string>("max-objects", "", "object limit over all owned buckets; 0/empty = unlimited.");
     cmd->var<std::string>("max-buckets", "", "bucket count limit; 0/empty = unlimited.");
 }
 
-std::shared_ptr<ccmd::c_command> make_list() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_list() {
+    auto cmd = std::make_shared<ccmd::command>(
         "list", "lights3-ctl tenant list", "lights3-ctl tenant list [options]",
         "List tenants with their quota, buckets and aggregate usage (a tenant admin sees "
         "only its own tenant).",
-        "list tenants.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "list tenants.", [](const std::shared_ptr<ccmd::command>& c) {
             if (!n_args(c, 0)) return;
             run_admin(c, [](SignedClient& cli) { return finish(cli.get(kBase, ""), 200); });
         });
@@ -71,11 +71,11 @@ std::shared_ptr<ccmd::c_command> make_list() {
     return cmd;
 }
 
-std::shared_ptr<ccmd::c_command> make_get() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_get() {
+    auto cmd = std::make_shared<ccmd::command>(
         "get", "lights3-ctl tenant get acme", "lights3-ctl tenant get <id> [options]",
         "Show one tenant: quota, owned buckets, aggregate usage, credential count.", "show one tenant.",
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        [](const std::shared_ptr<ccmd::command>& c) {
             if (!n_args(c, 1)) return;
             std::string id = c->args().front();
             run_admin(c, [&](SignedClient& cli) { return finish(cli.get(tenant_path(id), ""), 200); });
@@ -84,13 +84,13 @@ std::shared_ptr<ccmd::c_command> make_get() {
     return cmd;
 }
 
-std::shared_ptr<ccmd::c_command> make_create() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_create() {
+    auto cmd = std::make_shared<ccmd::command>(
         "create", "lights3-ctl tenant create acme --display-name='ACME Corp' --max-bytes=1TiB",
         "lights3-ctl tenant create <id> [options]",
         "Create a tenant (id: [a-z0-9][a-z0-9._-]{0,63}). Quota flags are optional; "
         "sizes accept KiB/MiB/GiB units.",
-        "create a tenant.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "create a tenant.", [](const std::shared_ptr<ccmd::command>& c) {
             if (!n_args(c, 1)) return;
             run_admin(c, [&](SignedClient& cli) {
                 json body;
@@ -108,13 +108,13 @@ std::shared_ptr<ccmd::c_command> make_create() {
     return cmd;
 }
 
-std::shared_ptr<ccmd::c_command> make_update() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_update() {
+    auto cmd = std::make_shared<ccmd::command>(
         "update", "lights3-ctl tenant update acme --max-bytes=2TiB --max-buckets=50",
         "lights3-ctl tenant update <id> [options]",
         "Replace a tenant's quota and/or display name. The quota is replaced as a whole: "
         "axes not given become unlimited.",
-        "update a tenant's quota / display name.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "update a tenant's quota / display name.", [](const std::shared_ptr<ccmd::command>& c) {
             if (!n_args(c, 1)) return;
             std::string id = c->args().front();
             run_admin(c, [&](SignedClient& cli) {
@@ -138,11 +138,11 @@ std::shared_ptr<ccmd::c_command> make_update() {
     return cmd;
 }
 
-std::shared_ptr<ccmd::c_command> make_delete() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_delete() {
+    auto cmd = std::make_shared<ccmd::command>(
         "delete", "lights3-ctl tenant delete acme", "lights3-ctl tenant delete <id> [options]",
         "Delete a tenant. Refused while it still owns buckets or has credentials.", "delete a tenant.",
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        [](const std::shared_ptr<ccmd::command>& c) {
             if (!n_args(c, 1)) return;
             std::string id = c->args().front();
             run_admin(c,
@@ -152,12 +152,12 @@ std::shared_ptr<ccmd::c_command> make_delete() {
     return cmd;
 }
 
-std::shared_ptr<ccmd::c_command> make_assign() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_assign() {
+    auto cmd = std::make_shared<ccmd::command>(
         "assign", "lights3-ctl tenant assign acme logs-bucket", "lights3-ctl tenant assign <id> <bucket> [options]",
         "Make an existing bucket owned by the tenant. A bucket owned by another tenant is "
         "refused unless --force.",
-        "assign a bucket to a tenant.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "assign a bucket to a tenant.", [](const std::shared_ptr<ccmd::command>& c) {
             if (!n_args(c, 2)) return;
             std::string id = c->args()[0], bucket = c->args()[1];
             bool force = c->var<bool>("force");
@@ -171,13 +171,13 @@ std::shared_ptr<ccmd::c_command> make_assign() {
     return cmd;
 }
 
-std::shared_ptr<ccmd::c_command> make_unassign() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_unassign() {
+    auto cmd = std::make_shared<ccmd::command>(
         "unassign", "lights3-ctl tenant unassign acme logs-bucket",
         "lights3-ctl tenant unassign <id> <bucket> [options]",
         "Detach a bucket from the tenant (it becomes unowned: visible to root and legacy "
         "credentials only).",
-        "detach a bucket from a tenant.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "detach a bucket from a tenant.", [](const std::shared_ptr<ccmd::command>& c) {
             if (!n_args(c, 2)) return;
             std::string id = c->args()[0], bucket = c->args()[1];
             run_admin(c, [&](SignedClient& cli) {
@@ -193,14 +193,14 @@ std::shared_ptr<ccmd::c_command> make_unassign() {
 
 namespace lights3_ctl {
 
-std::shared_ptr<ccmd::c_command> make_tenant() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_tenant() {
+    auto cmd = std::make_shared<ccmd::command>(
         "tenant", "lights3-ctl tenant list --endpoint=http://127.0.0.1:9000", "lights3-ctl tenant <command> [options]",
         "Manage tenants and bucket ownership via /-/admin/tenants (docs/multi-tenancy.md). "
         "Mutations need the root credential; `list`/`get` also work for a tenant admin "
         "on its own tenant. Options must follow the leaf subcommand; long options take "
         "values as --name=value.",
-        "manage tenants and bucket ownership.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "manage tenants and bucket ownership.", [](const std::shared_ptr<ccmd::command>& c) {
             c->print_help();
             g_exit = 2;
         });

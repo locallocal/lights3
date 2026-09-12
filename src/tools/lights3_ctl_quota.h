@@ -9,6 +9,6 @@
 namespace lights3_ctl {
 
 // Builds the `quota` command group (get / set / clear).
-std::shared_ptr<ccmd::c_command> make_quota();
+std::shared_ptr<ccmd::command> make_quota();
 
 }  // namespace lights3_ctl

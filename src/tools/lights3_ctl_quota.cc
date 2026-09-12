@@ -19,7 +19,7 @@ using lights3_ctl::g_exit;
 using lights3_ctl::run_admin;
 using lights3_ctl::SignedClient;
 
-bool one_bucket_arg(const std::shared_ptr<ccmd::c_command>& cmd, std::string& bucket) {
+bool one_bucket_arg(const std::shared_ptr<ccmd::command>& cmd, std::string& bucket) {
     if (cmd->args().size() != 1) {
         fprintf(stderr, "lights3-ctl: usage: %s\n", cmd->usage().c_str());
         g_exit = 2;
@@ -29,11 +29,11 @@ bool one_bucket_arg(const std::shared_ptr<ccmd::c_command>& cmd, std::string& bu
     return true;
 }
 
-std::shared_ptr<ccmd::c_command> make_get() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_get() {
+    auto cmd = std::make_shared<ccmd::command>(
         "get", "lights3-ctl quota get logs", "lights3-ctl quota get <bucket> [options]",
         "Print a bucket's quota XML (404 NoSuchQuotaConfiguration when none is set).", "show a bucket's quota.",
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        [](const std::shared_ptr<ccmd::command>& c) {
             std::string bucket;
             if (!one_bucket_arg(c, bucket)) return;
             run_admin(c, [&](SignedClient& cli) {
@@ -47,14 +47,14 @@ std::shared_ptr<ccmd::c_command> make_get() {
     return cmd;
 }
 
-std::shared_ptr<ccmd::c_command> make_set() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_set() {
+    auto cmd = std::make_shared<ccmd::command>(
         "set", "lights3-ctl quota set logs --max-bytes=50GiB --max-objects=1000000",
         "lights3-ctl quota set <bucket> [options]",
         "Set (replace) a bucket's quota. At least one of --max-bytes / --max-objects "
         "must be > 0; sizes accept KiB/MiB/GiB units. Enforced on PutObject, "
         "CopyObject, UploadPart and CompleteMultipartUpload (QuotaExceeded, 403).",
-        "set a bucket's quota.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "set a bucket's quota.", [](const std::shared_ptr<ccmd::command>& c) {
             std::string bucket;
             if (!one_bucket_arg(c, bucket)) return;
             auto bytes = c->var<std::string>("max-bytes");
@@ -77,11 +77,11 @@ std::shared_ptr<ccmd::c_command> make_set() {
     return cmd;
 }
 
-std::shared_ptr<ccmd::c_command> make_clear() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_clear() {
+    auto cmd = std::make_shared<ccmd::command>(
         "clear", "lights3-ctl quota clear logs", "lights3-ctl quota clear <bucket> [options]",
         "Remove a bucket's quota (idempotent).", "remove a bucket's quota.",
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        [](const std::shared_ptr<ccmd::command>& c) {
             std::string bucket;
             if (!one_bucket_arg(c, bucket)) return;
             run_admin(c, [&](SignedClient& cli) {
@@ -96,14 +96,14 @@ std::shared_ptr<ccmd::c_command> make_clear() {
 
 namespace lights3_ctl {
 
-std::shared_ptr<ccmd::c_command> make_quota() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_quota() {
+    auto cmd = std::make_shared<ccmd::command>(
         "quota", "lights3-ctl quota set logs --max-bytes=50GiB", "lights3-ctl quota <command> [options]",
         "Manage per-bucket quotas via the ?quota subresource (docs/multi-tenancy.md §3; "
         "set/clear need the root static credential). Tenant-level quotas are set with "
         "`lights3-ctl tenant create|update`. Options must follow the leaf subcommand as "
         "--name=value.",
-        "manage bucket quotas.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "manage bucket quotas.", [](const std::shared_ptr<ccmd::command>& c) {
             c->print_help();
             g_exit = 2;
         });

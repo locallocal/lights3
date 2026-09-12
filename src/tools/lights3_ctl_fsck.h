@@ -10,6 +10,6 @@
 namespace lights3_ctl {
 
 // Builds the `fsck` leaf command.
-std::shared_ptr<ccmd::c_command> make_fsck();
+std::shared_ptr<ccmd::command> make_fsck();
 
 }  // namespace lights3_ctl

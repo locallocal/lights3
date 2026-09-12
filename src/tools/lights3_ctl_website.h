@@ -10,6 +10,6 @@
 namespace lights3_ctl {
 
 // Builds the `website` command group (website get / set / delete).
-std::shared_ptr<ccmd::c_command> make_website();
+std::shared_ptr<ccmd::command> make_website();
 
 }  // namespace lights3_ctl

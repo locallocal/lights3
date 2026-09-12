@@ -14,14 +14,14 @@ namespace lights3_ctl {
 
 namespace util = lights3::util;
 
-std::shared_ptr<ccmd::c_command> make_usage() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_usage() {
+    auto cmd = std::make_shared<ccmd::command>(
         "usage", "lights3-ctl usage logs --rescan", "lights3-ctl usage [bucket] [options]",
         "Show bucket usage counters (objects, committed bytes, in-flight multipart bytes, "
         "last full count). Without a bucket every visible bucket is listed (--tenant "
         "filters by owner, root only). --rescan runs a full count of the given bucket "
         "now and prints the result (roadmap §3.9 ①).",
-        "show bucket usage counters.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "show bucket usage counters.", [](const std::shared_ptr<ccmd::command>& c) {
             if (c->args().size() > 1) {
                 fprintf(stderr, "lights3-ctl: usage: %s\n", c->usage().c_str());
                 g_exit = 2;

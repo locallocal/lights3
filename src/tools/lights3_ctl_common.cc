@@ -48,7 +48,7 @@ Endpoint Endpoint::parse(const std::string& url) {
     return ep;
 }
 
-void add_conn_flags(const std::shared_ptr<ccmd::c_command>& cmd) {
+void add_conn_flags(const std::shared_ptr<ccmd::command>& cmd) {
     cmd->varp<std::string>("endpoint", "e", "http://127.0.0.1:9000", "lights3 endpoint (scheme://host[:port]).");
     cmd->var<std::string>("ak", "", "access key; falls back to env LIGHTS3_ADMIN_AK.");
     cmd->var<std::string>("sk", "",
@@ -61,7 +61,7 @@ void add_conn_flags(const std::shared_ptr<ccmd::c_command>& cmd) {
     cmd->var<std::string>("key", "", "private key (PEM) of --cert.");
 }
 
-bool read_conn_opts(const std::shared_ptr<ccmd::c_command>& cmd, ConnOpts& out) {
+bool read_conn_opts(const std::shared_ptr<ccmd::command>& cmd, ConnOpts& out) {
     out.ak = cmd->var<std::string>("ak");
     out.sk = cmd->var<std::string>("sk");
     if (out.ak.empty())

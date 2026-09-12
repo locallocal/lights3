@@ -9,6 +9,6 @@
 namespace lights3_ctl {
 
 // Builds the `usage` command (usage [bucket] [--rescan] [--tenant=]).
-std::shared_ptr<ccmd::c_command> make_usage();
+std::shared_ptr<ccmd::command> make_usage();
 
 }  // namespace lights3_ctl

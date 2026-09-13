@@ -67,8 +67,8 @@ Every configuration key is documented with its default in the comments of
 | --- | --- |
 | [contributing.md](development/contributing.md) | Development guide: repository layout, build variants, verification routine, code and documentation conventions, branches and commits |
 | [testing.md](development/testing.md) | Testing: the ctest matrix and labels, the e2e sections, fuzz harnesses, fault injection, the performance gate and soak, mint, ubsan/coverage, the one-shot matrix script, the Makefile |
-| [performance-baseline.md](development/performance-baseline.md) | Performance baseline: the `scripts/bench_matrix.sh` matrix of 4 drivers × TLS × put/get, before/after the data-plane work, how to reproduce |
-| [todo.md](development/todo.md) | Open items and plans: pending verification, findings from the performance baseline, long-term items, the not-planned list; entries are deleted when done |
+| [performance-baseline.md](development/performance-baseline.md) | Performance baseline: the `scripts/bench_matrix.sh` matrix of 4 drivers × TLS × put/get, before/after the data-plane work, the 2026-09-13 re-run (beast TLS and pipelined request-body MD5), how to reproduce |
+| [todo.md](development/todo.md) | Open items and plans: pending verification, S3 Tables loose ends, long-term items, the not-planned list; entries are deleted when done |
 
 ### Archive (`docs/archive/`, Chinese only)
 

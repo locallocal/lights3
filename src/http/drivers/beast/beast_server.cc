@@ -1,10 +1,14 @@
 // L1: Boost.Beast driver — asynchronous model (docs/architecture/http-adapter.md §3.1).
-// N threads share one io_context; one session coroutine per connection (one
-// strand per connection). Session coroutines use the project's own Task<void>
-// directly: asio async operations are adapted to suspend/resume via awaiters,
-// matching the junction-point semantics of docs/architecture/concurrency.md §4.1 (the
-// handler's continuation runs back on the connection strand), just without
-// converting between the asio::awaitable and Task coroutine types.
+// One io_context per io thread, each run by exactly that thread; a connection is
+// pinned to one of them at accept, so every completion of its socket is a
+// same-thread continuation (http-adapter.md §2.4 ⑩: with N threads sharing one
+// io_context every completion crossed threads -- ~2.5 futex wake/wait pairs per
+// TLS record, measured 655 futex calls per 4 MiB TLS GET). Session coroutines
+// use the project's own Task<void> directly: asio async operations are adapted
+// to suspend/resume via awaiters, matching the junction-point semantics of
+// docs/architecture/concurrency.md §4.1 (the handler's continuation runs back on
+// the connection's io thread), just without converting between the
+// asio::awaitable and Task coroutine types.
 #include <sys/eventfd.h>
 #include <unistd.h>
 
@@ -69,19 +73,18 @@ IoAwaiter<std::decay_t<Init>> io_op(Init&& init) {
 }
 
 // Posts the continuation back onto the given executor: handler/stream_body
-// may resume on a pool thread, and we must switch back to the connection
-// strand before starting the next socket operation
+// may resume on a pool thread, and we must switch back to the connection's io
+// thread before starting the next socket operation
 struct ResumeOn {
     asio::any_io_executor ex;
     // Fast path (roadmap §4.3 ⑥): a coroutine that is already running on this
-    // connection's strand (the previous await completed inline, or the
-    // handler resumed on the strand) continues without an asio::post round
-    // trip. The connection executors are all strands over the io_context
-    // executor (make_strand at accept), so the type probe matches; anything
-    // else takes the safe post
+    // connection's io thread (the previous await completed inline, or the
+    // handler resumed there) continues without an asio::post round trip. The
+    // connection executors are the plain executors of the per-thread
+    // io_contexts (no strand: one thread per context serializes by
+    // construction), so the type probe matches; anything else takes the safe post
     bool await_ready() const noexcept {
-        using Strand = asio::strand<asio::io_context::executor_type>;
-        if (auto* st = ex.target<Strand>()) return st->running_in_this_thread();
+        if (auto* ex_ioc = ex.target<asio::io_context::executor_type>()) return ex_ioc->running_in_this_thread();
         return false;
     }
     void await_suspend(std::coroutine_handle<> h) {
@@ -92,14 +95,15 @@ struct ResumeOn {
 
 struct AcceptAwaiter {
     tcp::acceptor& acc;
-    asio::io_context& ioc;
+    // io thread the new connection is pinned to: all of the socket's completion
+    // callbacks run on the single thread driving this executor's io_context
+    asio::io_context::executor_type peer_ex;
     beast::error_code ec{};
     std::optional<tcp::socket> sock;
 
     bool await_ready() const noexcept { return false; }
     void await_suspend(std::coroutine_handle<> h) {
-        // One strand per connection: all of this socket's completion callbacks run serialized on the strand
-        acc.async_accept(asio::make_strand(ioc), [this, h](beast::error_code e, tcp::socket s) {
+        acc.async_accept(peer_ex, [this, h](beast::error_code e, tcp::socket s) {
             ec = e;
             sock.emplace(std::move(s));
             h.resume();
@@ -139,8 +143,65 @@ struct Session {
     beast::tcp_stream stream;
     std::atomic<bool> in_flight{false};
 
-    explicit Session(tcp::socket&& s) : stream(std::move(s)) {}
+    // Inactivity watchdog for the multi-operation phases -- body reads and
+    // streaming writes (http-adapter.md §2.4 ⑪). beast::basic_stream arms and
+    // cancels its per-operation timer around every async_read_some /
+    // async_write_some once an expiry is set; under TLS that is once per 16 KiB
+    // record (263 timerfd_settime per 4 MiB GET measured), so those phases run
+    // with expires_never() and this one timer instead. It is armed once, and on
+    // expiry checks the operation in flight: overdue -> the phase's timeout is
+    // counted and the socket closed (the pending operation fails); otherwise it is
+    // re-armed for the remainder, or left dormant when nothing is in flight. All
+    // fields are touched on the connection's io thread only
+    asio::steady_timer watchdog;
+    std::chrono::steady_clock::time_point op_start{};
+    std::chrono::seconds op_timeout{0};
+    driver::Phase op_phase = driver::Phase::Body;
+    bool in_op = false;
+    bool armed = false;
+    bool timed_out = false;
+    // async_wait completions carry the generation they were scheduled with
+    uint64_t wd_gen = 0;
+
+    explicit Session(tcp::socket&& s) : stream(std::move(s)), watchdog(stream.get_executor()) {}
 };
+
+void wd_schedule(std::shared_ptr<Session> s, std::chrono::steady_clock::duration d, driver::ConnCounters& counters) {
+    s->armed = true;
+    uint64_t gen = ++s->wd_gen;
+    s->watchdog.expires_after(d);
+    s->watchdog.async_wait([s, gen, &counters](beast::error_code ec) {
+        // cancelled, or superseded by a later schedule
+        if (ec || gen != s->wd_gen) return;
+        s->armed = false;
+        if (!s->in_op) return;
+        auto elapsed = std::chrono::steady_clock::now() - s->op_start;
+        if (elapsed < s->op_timeout) {
+            wd_schedule(s, s->op_timeout - elapsed, counters);
+            return;
+        }
+        s->timed_out = true;
+        driver::count_timeout(counters, s->op_phase);
+        s->stream.close();
+    });
+}
+
+// Marks the start of one socket operation bounded by `timeout`; arms the watchdog
+// on first use. Pair with wd_end() once the operation completed
+void wd_begin(const std::shared_ptr<Session>& s, int timeout_sec, driver::Phase phase, driver::ConnCounters& counters) {
+    s->in_op = true;
+    s->op_start = std::chrono::steady_clock::now();
+    s->op_timeout = std::chrono::seconds(timeout_sec);
+    s->op_phase = phase;
+    if (!s->armed) wd_schedule(s, s->op_timeout, counters);
+}
+void wd_end(Session& s) { s.in_op = false; }
+// Session end: drop the pending wait so the handler's shared_ptr does not keep
+// the socket alive until the next expiry
+void wd_stop(Session& s) {
+    ++s.wd_gen;
+    s.watchdog.cancel();
+}
 
 // TLS session stream: references the underlying tcp_stream (owned by
 // Session) and itself lives on the session coroutine frame. Timeouts still
@@ -160,6 +221,10 @@ struct BodyCtx {
     // body_timeout: inactivity bound on one body read (roadmap §4.2)
     int idle_timeout_sec;
     driver::ConnCounters* counters = nullptr;
+    // watchdog owner (Session outlives the request)
+    std::shared_ptr<Session> sess;
+    // bounds the deferred 100 Continue write
+    int write_timeout_sec = 0;
     // Expect: 100-continue not yet answered; reply only on the first body read
     bool need_100 = false;
     bool errored = false;
@@ -178,23 +243,25 @@ public:
         if (ctx_->need_100) {
             ctx_->need_100 = false;
             bhttp::response<bhttp::empty_body> cont{bhttp::status::continue_, 11};
+            wd_begin(ctx_->sess, ctx_->write_timeout_sec, driver::Phase::Write, *ctx_->counters);
             auto [ec, n] = co_await io_op([&](auto cb) { bhttp::async_write(*ctx_->stream, cont, std::move(cb)); });
             (void)n;
-            if (ec) fail(ec, "failed to send 100 Continue");
+            wd_end(*ctx_->sess);
+            if (ec) fail(ec, ctx_->sess->timed_out ? "100 Continue write timed out" : "failed to send 100 Continue");
         }
         if (ctx_->parser->is_done()) co_return 0;
 
         auto& body = ctx_->parser->get().body();
         body.data = buf.data();
         body.size = buf.size();
-        beast::get_lowest_layer(*ctx_->stream).expires_after(std::chrono::seconds(ctx_->idle_timeout_sec));
+        // Bounded by the session watchdog, not the per-operation stream expiry
+        wd_begin(ctx_->sess, ctx_->idle_timeout_sec, driver::Phase::Body, *ctx_->counters);
         auto [ec, n] = co_await io_op(
             [&](auto cb) { bhttp::async_read(*ctx_->stream, *ctx_->buffer, *ctx_->parser, std::move(cb)); });
         (void)n;
-        beast::get_lowest_layer(*ctx_->stream).expires_never();
-        if (ec == beast::error::timeout && ctx_->counters) driver::count_timeout(*ctx_->counters, driver::Phase::Body);
+        wd_end(*ctx_->sess);
         if (ec == bhttp::error::need_buffer) ec = {};
-        if (ec) fail(ec, "client disconnected mid-body");
+        if (ec) fail(ec, ctx_->sess->timed_out ? "body read timed out" : "client disconnected mid-body");
         size_t got = buf.size() - body.size;
         body.data = nullptr;
         body.size = 0;
@@ -215,7 +282,8 @@ private:
 
 class BeastServer final : public IHttpServer {
 public:
-    explicit BeastServer(const HttpConfig& cfg) : cfg_(cfg) {
+    explicit BeastServer(const HttpConfig& cfg)
+        : cfg_(cfg), io_(make_io_threads(cfg)), ctl_strand_(asio::make_strand(io_[0]->ioc)) {
         // TLS (docs/archive/gaps.md §7): certificates are loaded at construction; a
         // bad path / bad PEM throws right here — must not be discovered only
         // at the first connection's handshake
@@ -263,7 +331,7 @@ public:
             if (!e) on_stop_signal();
         });
 
-        work_.emplace(asio::make_work_guard(ioc_));
+        for (auto& io : io_) io->work.emplace(asio::make_work_guard(io->ioc));
         spawn_detached(accept_loop(), [] {});
         // When shutdown() arrives before listen(), event_fd_ is still -1 and
         // the signal is swallowed: re-emit it here so the subsequent run()
@@ -282,12 +350,11 @@ public:
     bool reload_tls() override { return tls_holder_ && tls_holder_->reload_now(); }
 
     void run() override {
-        int n = std::max(1, cfg_.io_threads);
-        LOG_INFO("beast driver: io_threads={} -> {} io_context thread(s)", cfg_.io_threads, n);
+        LOG_INFO("beast driver: io_threads={} -> {} io_context(s), one thread each", cfg_.io_threads, io_.size());
         std::vector<std::thread> threads;
-        threads.reserve(n - 1);
-        for (int i = 1; i < n; ++i) threads.emplace_back([this] { ioc_.run(); });
-        ioc_.run();
+        threads.reserve(io_.size() - 1);
+        for (size_t i = 1; i < io_.size(); ++i) threads.emplace_back([this, i] { io_[i]->ioc.run(); });
+        io_[0]->ioc.run();
         for (auto& t : threads) t.join();
         LOG_INFO("beast http server stopped");
     }
@@ -305,9 +372,28 @@ public:
     }
 
 private:
+    // One io_context per io thread (http-adapter.md §2.4 ⑩). Concurrency hint 1:
+    // exactly one thread calls run() on each, which lets asio skip the reactor
+    // wake-ups between its own threads; posting into it from pool threads
+    // (ResumeOn) stays allowed
+    struct IoThread {
+        asio::io_context ioc{1};
+        std::optional<asio::executor_work_guard<asio::io_context::executor_type>> work;
+    };
+    static std::vector<std::unique_ptr<IoThread>> make_io_threads(const HttpConfig& cfg) {
+        std::vector<std::unique_ptr<IoThread>> v;
+        int n = std::max(1, cfg.io_threads);
+        v.reserve(static_cast<size_t>(n));
+        for (int i = 0; i < n; ++i) v.push_back(std::make_unique<IoThread>());
+        return v;
+    }
+
     Task<void> accept_loop() {
         for (;;) {
-            auto accepted = co_await AcceptAwaiter{*acceptor_, ioc_, {}, {}};
+            // Round-robin over the io threads: the connection lives on the chosen
+            // thread for its whole lifetime
+            auto& peer = *io_[next_io_++ % io_.size()];
+            auto accepted = co_await AcceptAwaiter{*acceptor_, peer.ioc.get_executor(), {}, {}};
             auto& ec = accepted.first;
             auto& sock = accepted.second;
             if (ec) {
@@ -377,6 +463,7 @@ private:
         } else {
             co_await session_loop(sess, sess->stream, std::nullopt);
         }
+        wd_stop(*sess);
         beast::error_code ig;
         sess->stream.socket().shutdown(tcp::socket::shutdown_both, ig);
     }
@@ -448,12 +535,13 @@ private:
             if (!driver::parse_body_framing(req.headers).valid) {
                 counters_.parse_error();
                 auto bad = driver::bad_request_response("Invalid message framing.");
-                co_await write_response(stream, bad, /*head_request=*/false, /*keep=*/false);
+                co_await write_response(sess, stream, bad, /*head_request=*/false, /*keep=*/false);
                 break;
             }
             counters_.request_parsed();
 
-            BodyCtx<Stream> bctx{&parser, &stream, &buffer, cfg_.body_timeout_sec, &counters_};
+            BodyCtx<Stream> bctx{
+                &parser, &stream, &buffer, cfg_.body_timeout_sec, &counters_, sess, cfg_.write_timeout_sec};
             if (auto e = req.headers.get("Expect"); e && HeaderMap::ieq(*e, "100-continue")) bctx.need_100 = true;
             std::optional<uint64_t> content_length;
             if (auto l = parser.content_length()) content_length = *l;
@@ -488,7 +576,7 @@ private:
                 keep = false;
                 counters_.keepalive_closes.fetch_add(1, std::memory_order_relaxed);
             }
-            bool ok = co_await write_response(stream, resp, head_request, keep);
+            bool ok = co_await write_response(sess, stream, resp, head_request, keep);
             sess->in_flight.store(false);
             if (!ok) co_return;
             ++served;
@@ -503,11 +591,11 @@ private:
             auto& body = ctx.parser->get().body();
             body.data = tmp.data();
             body.size = tmp.size();
-            beast::get_lowest_layer(*ctx.stream).expires_after(std::chrono::seconds(ctx.idle_timeout_sec));
+            wd_begin(ctx.sess, ctx.idle_timeout_sec, driver::Phase::Body, *ctx.counters);
             auto [ec, n] = co_await io_op(
                 [&](auto cb) { bhttp::async_read(*ctx.stream, *ctx.buffer, *ctx.parser, std::move(cb)); });
             (void)n;
-            beast::get_lowest_layer(*ctx.stream).expires_never();
+            wd_end(*ctx.sess);
             if (ec == bhttp::error::need_buffer) ec = {};
             if (ec) co_return false;
             drained += tmp.size() - body.size;
@@ -518,13 +606,13 @@ private:
     }
 
     template <class Stream>
-    Task<bool> write_response(Stream& stream, HttpResponse& resp, bool head_request, bool keep) {
+    Task<bool> write_response(const std::shared_ptr<Session>& sess, Stream& stream, HttpResponse& resp,
+                              bool head_request, bool keep) {
         bool no_body_status = resp.status == 204 || resp.status == 304 || resp.status < 200;
-        // write_timeout per write op
-        auto idle = std::chrono::seconds(cfg_.write_timeout_sec);
-        auto note_write = [&](const beast::error_code& ec) {
-            if (ec == beast::error::timeout) driver::count_timeout(counters_, driver::Phase::Write);
-        };
+        // write_timeout per write op, enforced by the session watchdog (the
+        // counter is bumped there)
+        auto begin = [&] { wd_begin(sess, cfg_.write_timeout_sec, driver::Phase::Write, counters_); };
+        auto end = [&] { wd_end(*sess); };
 
         // Small response / HEAD / bodyless status code: write the whole message at once
         if (!resp.stream_body || head_request || no_body_status) {
@@ -556,11 +644,10 @@ private:
                 res.set(bhttp::field::content_length, std::to_string(len));
                 if (!head_request) res.body() = std::move(resp.small_body);
             }
-            beast::get_lowest_layer(stream).expires_after(idle);
+            begin();
             auto [ec, n] = co_await io_op([&](auto cb) { bhttp::async_write(stream, res, std::move(cb)); });
             (void)n;
-            beast::get_lowest_layer(stream).expires_never();
-            note_write(ec);
+            end();
             co_return !ec;
         }
 
@@ -580,12 +667,11 @@ private:
         res.body().more = true;
 
         bhttp::response_serializer<bhttp::buffer_body> sr{res};
-        beast::get_lowest_layer(stream).expires_after(idle);
+        begin();
         {
             auto [ec, n] = co_await io_op([&](auto cb) { bhttp::async_write_header(stream, sr, std::move(cb)); });
             (void)n;
-            beast::get_lowest_layer(stream).expires_never();
-            note_write(ec);
+            end();
             if (ec) co_return false;
         }
 
@@ -627,12 +713,11 @@ private:
                 res.body().size = n;
                 res.body().more = true;
             }
-            beast::get_lowest_layer(stream).expires_after(idle);
+            begin();
             auto [ec, wrote] = co_await io_op([&](auto cb) { bhttp::async_write(stream, sr, std::move(cb)); });
             (void)wrote;
-            beast::get_lowest_layer(stream).expires_never();
+            end();
             if (ec == bhttp::error::need_buffer) ec = {};
-            note_write(ec);
             if (ec) co_return false;
             if (n == 0) break;
         }
@@ -676,7 +761,8 @@ private:
             force_timer_.emplace(ctl_strand_, std::chrono::seconds(cfg_.shutdown_force_wait_sec));
             force_timer_->async_wait([this](beast::error_code e2) {
                 // Last resort: stop waiting for stuck sessions
-                if (!e2) ioc_.stop();
+                if (!e2)
+                    for (auto& io : io_) io->ioc.stop();
             });
         });
     }
@@ -711,8 +797,8 @@ private:
                 if (force_timer_) force_timer_->cancel();
                 beast::error_code ig;
                 if (stop_event_) stop_event_->close(ig);
-                // run() returns once the io_context drains
-                work_.reset();
+                // run() returns once every io_context drains
+                for (auto& io : io_) io->work.reset();
             });
         });
     }
@@ -723,12 +809,14 @@ private:
     std::shared_ptr<tls::Holder> tls_holder_;
     // Present means HTTPS (knobs applied at construction)
     std::optional<asio::ssl::context> tls_ctx_;
-    asio::io_context ioc_;
-    // Control-plane strand: all operations on acceptor / stop_event /
-    // grace_timer / force_timer serialize here (the data plane still has one
-    // strand per connection)
-    asio::strand<asio::io_context::executor_type> ctl_strand_ = asio::make_strand(ioc_);
-    std::optional<asio::executor_work_guard<asio::io_context::executor_type>> work_;
+    // Data plane: io_[i] is run by io thread i only; connections are pinned at
+    // accept (accept_loop). Declared before ctl_strand_, which lives on io_[0]
+    std::vector<std::unique_ptr<IoThread>> io_;
+    size_t next_io_ = 0;
+    // Control-plane strand on io_[0]: all operations on acceptor / stop_event /
+    // grace_timer / force_timer serialize here (the data plane needs no strand:
+    // a connection's io_context has exactly one thread)
+    asio::strand<asio::io_context::executor_type> ctl_strand_;
     std::optional<tcp::acceptor> acceptor_;
     std::optional<asio::posix::stream_descriptor> stop_event_;
     std::optional<asio::steady_timer> grace_timer_;

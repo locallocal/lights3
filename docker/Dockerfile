@@ -1,10 +1,11 @@
 # syntax=docker/dockerfile:1
-# LightS3 container image (roadmap §6.3, docs/deployment.md §4).
+# LightS3 container image (roadmap §6.3, docs/deployment.md §4). The build
+# context is the repository root (run from there; .dockerignore lives next to it):
 #
-#   docker build -t lights3 .                                     # builtin/beast/httplib drivers,
+#   docker build -f docker/Dockerfile -t lights3 .                # builtin/beast/httplib drivers,
 #                                                                 # localfs/xlocalfs/tiered/cloudproxy/duostore(+redis,+sqlite)
-#   docker build -t lights3:full --build-arg LIGHTS3_RADOS=ON --build-arg LIGHTS3_TIKV=ON .
-#   docker build --build-arg LIGHTS3_GIT_COMMIT=$(git rev-parse --short=12 HEAD) .   # stamp the build
+#   docker build -f docker/Dockerfile -t lights3:full --build-arg LIGHTS3_RADOS=ON --build-arg LIGHTS3_TIKV=ON .
+#   docker build -f docker/Dockerfile --build-arg LIGHTS3_GIT_COMMIT=$(git rev-parse --short=12 HEAD) .   # stamp the build
 #
 # Stages: builder (full toolchain, cmake --install into /stage), runtime (the
 # shipped image: binaries + setup helper + monitoring assets, non-root user),
@@ -73,8 +74,8 @@ RUN apt-get update \
     && install -d -m 0750 -o lights3 -g lights3 /var/lib/lights3 /var/log/lights3
 COPY --from=builder /stage/usr/bin/lights3 /stage/usr/bin/lights3-ctl /usr/bin/
 COPY --from=builder /stage/usr/share/lights3 /usr/share/lights3
-COPY --chown=root:lights3 --chmod=0640 deploy/docker/lights3.yaml /etc/lights3/lights3.yaml
-COPY --chmod=0755 deploy/docker/entrypoint.sh /usr/local/bin/lights3-entrypoint
+COPY --chown=root:lights3 --chmod=0640 docker/lights3.yaml /etc/lights3/lights3.yaml
+COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/lights3-entrypoint
 VOLUME ["/var/lib/lights3"]
 EXPOSE 9000
 USER lights3
@@ -86,7 +87,7 @@ ENTRYPOINT ["lights3-entrypoint"]
 CMD []
 
 # -------------------------------------------------------------------- e2e ----
-# Test runner for `docker compose --profile e2e up` (docs/deployment.md §4.3):
+# Test runner for `docker compose --profile e2e run --rm e2e` (docs/deployment.md §4.3):
 # the redis / tikv / rados e2e paths that stay SKIP on a developer box
 FROM builder AS e2e
 ARG DEBIAN_FRONTEND=noninteractive
@@ -96,6 +97,6 @@ RUN apt-get update \
     && if [ "$LIGHTS3_RADOS" = "ON" ]; then \
         apt-get install -y --no-install-recommends ceph-common; fi \
     && rm -rf /var/lib/apt/lists/*
-COPY --chmod=0755 deploy/docker/e2e.sh /usr/local/bin/lights3-e2e
+COPY --chmod=0755 docker/e2e.sh /usr/local/bin/lights3-e2e
 WORKDIR /src
 ENTRYPOINT ["lights3-e2e"]

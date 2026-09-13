@@ -5,7 +5,7 @@
 # gateway nginx picks; verified by the S3 combined ETag (recomputed here from the
 # per-part ETags), a byte-for-byte GET, and both gateways' request counters moving.
 #
-#   docker compose --profile multi run --rm e2e-multi
+#   cd docker && docker compose --profile multi run --rm e2e-multi
 #
 #   LIGHTS3_E2E_ENDPOINT   the balancer (default http://nginx-multi:9000)
 #   LIGHTS3_E2E_GATEWAYS   space-separated gateway base URLs for the spread check

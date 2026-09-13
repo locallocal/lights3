@@ -1,5 +1,5 @@
 #!/bin/bash
-# e2e runner inside the `e2e` image (docker compose --profile e2e): wait for the
+# e2e runner inside the `e2e` image (cd docker && docker compose --profile e2e): wait for the
 # compose services the selected tests need, prepare the rados pool, run ctest.
 #
 #   E2E_TESTS   ctest -R regex (default: the three externally-backed duostore paths)

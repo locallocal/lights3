@@ -127,7 +127,12 @@ layout. Without systemd (containers) every systemctl call is skipped.
 
 ### 4.1 The image
 
-Three stages in `Dockerfile`: `builder` (ubuntu:24.04 + toolchain,
+Everything container-related lives in `docker/`: the `Dockerfile`,
+`docker-compose.yml`, the in-image config `lights3.yaml` and entrypoint, the
+per-profile configs and the e2e scripts. The build context stays the repository
+root (`.dockerignore` sits there), so `docker build` takes `-f docker/Dockerfile`.
+
+Three stages in `docker/Dockerfile`: `builder` (ubuntu:24.04 + toolchain,
 `cmake --install` into `/stage`) → `runtime` (the two binaries, the setup
 helper and the monitoring assets only; non-root user `lights3`; `HEALTHCHECK`
 on `/-/healthz`) → `e2e` (builder + curl/python3, optionally the ceph CLI; the
@@ -136,7 +141,7 @@ test runner of §4.3).
 ```bash
 git submodule update --init third_party/{spdlog,httplib,json,rocksdb,hiredis,sqlite}
 git submodule update --init --recursive third_party/ccmd     # or run ./build.sh once
-docker build -t lights3 --build-arg LIGHTS3_GIT_COMMIT=$(git rev-parse --short=12 HEAD) .
+docker build -f docker/Dockerfile -t lights3 --build-arg LIGHTS3_GIT_COMMIT=$(git rev-parse --short=12 HEAD) .
 docker run -d -p 9000:9000 -e LIGHTS3_SECRET_1=my-secret -v lights3-data:/var/lib/lights3 lights3
 docker run --rm lights3 --version
 docker run --rm lights3 lights3-ctl --help
@@ -151,7 +156,7 @@ docker run --rm lights3 lights3-ctl --help
 | `CMAKE_BUILD_TYPE` | `Release` | |
 | `BASE` | `ubuntu:24.04` | a Debian base works too (`libssl3` name fallback) |
 
-The image config `deploy/docker/lights3.yaml`: builtin driver, `0.0.0.0:9000`,
+The image config `docker/lights3.yaml`: builtin driver, `0.0.0.0:9000`,
 localfs under the `/var/lib/lights3` volume; `LIGHTS3_SECRET_1` is mandatory
 (the entrypoint exits 2 without it instead of starting an instance that
 rejects every request); `LIGHTS3_ACCESS_KEY` / `LIGHTS3_REGION` /
@@ -168,7 +173,12 @@ checked against Ubuntu 24.04.
 
 ### 4.2 compose quick start
 
+The compose file is `docker/docker-compose.yml`; its relative paths (build
+context `..`, the mounted profile configs) resolve against that directory, so
+run from `docker/` or pass `-f docker/docker-compose.yml` at the root.
+
 ```bash
+cd docker
 docker compose up -d                          # :9000, AKIDEXAMPLE / lights3-demo-secret
 LIGHTS3_SECRET_1=... docker compose up -d      # your own secret
 aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://demo
@@ -182,10 +192,10 @@ docker compose --profile multi run --rm e2e-multi   # a 5-part multipart spread 
 | profile | Services | Notes |
 | --- | --- | --- |
 | (default) | `lights3` | image `lights3:local`, localfs |
-| `redis` | `redis` (`redis:7-alpine`, AOF on), `lights3-redis` | `deploy/docker/lights3-redis.yaml` mounted read-only as `/etc/lights3/lights3.yaml` |
+| `redis` | `redis` (`redis:7-alpine`, AOF on), `lights3-redis` | `docker/lights3-redis.yaml` mounted read-only as `/etc/lights3/lights3.yaml` |
 | `tikv` | `pd0`, `tikv0` (`pingcap/{pd,tikv}:${TIKV_VERSION:-v8.5.2}`), `lights3-tikv` | single PD, single TiKV; `lights3:full` is built with `LIGHTS3_RADOS=ON LIGHTS3_TIKV=ON` |
 | `rados` | `ceph` (`${CEPH_IMAGE:-quay.io/ceph/demo:latest}`, fixed IP 172.28.0.10), `rados-init` (one-shot pool creation), `lights3-rados` | `ceph.conf` + admin keyring shared read-only through the `ceph-etc` volume; the keyring is root-only, so the consumers run as root |
-| `multi` | `redis`, `ceph`, `rados-init`, `lights3-multi-a` / `-b`, `nginx-multi`, `e2e-multi` | multi-gateway shared storage (the combination [../archive/multi-gateway-multipart-design.md §2](../archive/multi-gateway-multipart-design.md) supports): both gateways use `deploy/docker/lights3-multi.yaml` (redis meta + RADOS data, `read_lease: 5s`), `LIGHTS3_GC_ENABLED` true on a only; `nginx-multi.conf` rotates per request with no stickiness; `e2e-multi.sh` runs a 5-part multipart through nginx and checks the combined ETag, the GET bytes and both gateways' request counters |
+| `multi` | `redis`, `ceph`, `rados-init`, `lights3-multi-a` / `-b`, `nginx-multi`, `e2e-multi` | multi-gateway shared storage (the combination [../archive/multi-gateway-multipart-design.md §2](../archive/multi-gateway-multipart-design.md) supports): both gateways use `docker/lights3-multi.yaml` (redis meta + RADOS data, `read_lease: 5s`), `LIGHTS3_GC_ENABLED` true on a only; `nginx-multi.conf` rotates per request with no stickiness; `e2e-multi.sh` runs a 5-part multipart through nginx and checks the combined ETag, the GET bytes and both gateways' request counters |
 
 `LIGHTS3_GIT_COMMIT=$(git rev-parse --short=12 HEAD) docker compose build`
 stamps the images. Data lives in named volumes (`lights3-data`, …);
@@ -199,12 +209,13 @@ The `duostore-redis` / `duostore-tikv` / `duostore-rados` branches of
 dependencies up and runs ctest inside the `lights3:e2e` image:
 
 ```bash
+cd docker
 docker compose --profile e2e run --rm e2e                                  # all three
 docker compose --profile e2e run --rm -e E2E_TESTS=e2e_duostore_redis e2e  # one of them
 docker compose --profile e2e down -v
 ```
 
-`deploy/docker/e2e.sh` waits for the services (redis TCP; a store in `Up` state
+`docker/e2e.sh` waits for the services (redis TCP; a store in `Up` state
 on PD's `/pd/api/v1/stores`; `ceph -s` succeeding and the `lights3-e2e` pool
 created), then runs `ctest -R "$E2E_TESTS"`. The environment variables are the
 probes `run_e2e.sh` already had:
@@ -276,7 +287,7 @@ proxy: SigV4 signs `Host`, so pass it through verbatim (nginx
 `proxy_set_header Host $http_host`); S3 bodies are large, so disable request
 buffering (`proxy_request_buffering off`, `client_max_body_size 0`). The
 compose `multi` profile (§4.2) is exactly such a minimal deployment;
-`deploy/docker/nginx-multi.conf` is a usable starting point.
+`docker/nginx-multi.conf` is a usable starting point.
 
 ## 6. Upgrade, rollback, uninstall (the `install.sh` channel)
 

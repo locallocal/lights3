@@ -10,6 +10,7 @@
 #include <memory>
 #include <string>
 
+#include "core/thread_pool.h"
 #include "storage/duostore/meta_store.h"
 #include "tables/catalog_store.h"
 
@@ -17,8 +18,10 @@ namespace lights3::tables {
 
 class DuoMetaCatalogStore final : public ITableCatalogStore {
 public:
-    // meta must outlive the store (the DuoStoreBackend owns it)
-    explicit DuoMetaCatalogStore(storage::duostore::IMetaStore& meta) : meta_(meta) {}
+    // meta must outlive the store (the DuoStoreBackend owns it). pool: where the
+    // blocking KV calls run; null = in place on the caller's thread
+    explicit DuoMetaCatalogStore(storage::duostore::IMetaStore& meta, std::shared_ptr<ThreadPool> pool = nullptr)
+        : meta_(meta), pool_(std::move(pool)) {}
 
     Task<std::optional<Versioned<NamespaceEntry>>> get_namespace(std::string_view bucket,
                                                                  const Levels& levels) override;
@@ -72,12 +75,15 @@ public:
     Task<bool> bucket_state_empty(std::string_view bucket) override;
 
 private:
+    // onto a pool thread before touching the engine
+    Task<void> hop();
     // every key under a prefix (paged through kv_scan)
     std::vector<storage::duostore::KvItem> scan_all(const std::string& prefix);
     // the "<dir><name>.json" children of a directory, paged
     ListPage<std::string> list_json_names(const std::string& dir, PageCursor cursor);
 
     storage::duostore::IMetaStore& meta_;
+    std::shared_ptr<ThreadPool> pool_;
 };
 
 }  // namespace lights3::tables

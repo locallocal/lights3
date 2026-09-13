@@ -624,6 +624,7 @@ Extensions (not in `endpoints`, aligned with RustFS / AWS semantics):
 | PUT / GET / DELETE `/buckets/{bucket}` (no `{w}` segment) | enable / inspect / disable table bucket (root) | ① |
 | GET / PUT `…/tables/{t}/metadata-location` | AWS `GetTableMetadataLocation` / `UpdateTableMetadataLocation` shape: `{metadataLocation, versionToken}`; PUT swaps only the pointer but still runs checks 3–5 of §5.2 (the metadata must already be in the reserved directory, i.e. only meaningful for the server copy made by register or maintenance output) | ① |
 | GET `…/tables/{t}/catalog/diagnostics`, POST `…/catalog/recovery` | diagnostics and repair of §5.4 | ③ |
+| GET `…/views/{v}/catalog/diagnostics` | a view's pointer check: `metadata-present` plus the superseded version files in the directory (a view has no commit records, hence no recovery counterpart) | ⑥ closeout |
 | GET/PUT `…/tables/{t}/maintenance/config`, POST `…/maintenance/{plan,run}`, GET `…/maintenance/jobs/{id}` | §9 | ④ |
 
 Recognised but unsupported features answer 406 `UnsupportedOperationException`
@@ -658,7 +659,8 @@ answers 405 `MethodNotAllowedException`.
 - **RegisterTable** `{name, metadata-location, overwrite?}`: `metadata-location`
   must be an `s3://<w>/…` key inside this bucket (it may be outside the reserved
   prefix, i.e. an old table written by an engine); the server reads it (≤ cap,
-  `.json`/`.json.gz`), runs `validate_supported_metadata` and the full
+  `.json`/`.json.gz`; a `.gz` file is gunzipped when zlib is compiled in, see §7.5,
+  and refused with 406 otherwise), runs `validate_supported_metadata` and the full
   `check_snapshots`, then **copies** it to `00001-<uuid>.metadata.json` under the
   reserved directory and points there (the original is untouched); `table_uuid`
   is adopted, `location` is taken from the metadata. This is where the invariant
@@ -771,6 +773,26 @@ Step ① does the shallow "manifest-list object exists + size" check; ③ added 
 Avro validation (implementation notes in §16 ③: the
 conflict re-check only considers entries attributed to the new snapshot, since
 a normal append reuses the parent's manifest files as they are).
+
+### 7.5 gzip-compressed metadata.json (2026-09-13)
+
+An engine writing with `write.metadata.compression-codec=gzip` (the default in some
+Spark distributions) names its metadata `<n>-<uuid>.gz` and stores a gzip member.
+The **read** side supports it: `Catalog::read_metadata` decides by key suffix (the
+content is not sniffed — the writer's naming is the declaration) and inflates through
+`iceberg::gunzip` (`iceberg/gzip.h`, `inflateInit2(15+16)`) before
+`parse_and_validate`. It is a separate path from §7.4's Avro block inflation: OCF
+blocks are headerless raw deflate, a metadata file is a framed gzip member.
+
+- **Ceiling**: the read loop's `metadata_max_size` bounds the **compressed** bytes and
+  `gunzip` applies the same ceiling to the **inflated** ones, so a compression bomb
+  cannot outgrow `tables.metadata_max_size`.
+- **Corrupt / truncated** → 400 (a client error), never 500.
+- **A build without zlib**: `gzip_supported()` is false and register answers 406 saying
+  so (it used to be 406 regardless of the build).
+- **The write side never compresses**: the catalog's own pointer is always a plain
+  `.metadata.json`; register leaves the gz file where it is and copies only the
+  inflated, validated content into the reserved directory.
 
 ## 8. Data-plane integration
 
@@ -943,9 +965,12 @@ engine's own atomic section); `DuoMetaCatalogStore` uses the `ObjectCatalogStore
 Metrics (`MetricsScope{feature=tables}`, as implemented): `lights3_tables_requests_total`,
 `lights3_tables_requests_by_op_total{op,status}`, `lights3_tables_commits_total{result=ok|conflict|error}`,
 `lights3_tables_commit_seconds`, `lights3_tables_validation_files_total`,
-`lights3_tables_validation_skipped_total`. The draft's `lights3_tables_maintenance_deleted_bytes_total`
-and `lights3_tables_finalization_gaps` (gauge) are not wired, see [todo.md §4](../development/todo.md). Access log
-`api_name = Iceberg.<Op>`, slow request threshold unchanged.
+`lights3_tables_validation_skipped_total`, `lights3_tables_maintenance_deleted_bytes_total`
+(bytes a run or a purge actually deleted, the same number as `RunReport.deleted_bytes`)
+and `lights3_tables_finalization_gaps` (gauge: commit records the last diagnosis found
+awaiting finalization, summed per `<bucket>/<table_id>` and cleared by recovery; only
+tables this process diagnosed are counted). Access log `api_name = Iceberg.<Op>`, slow
+request threshold unchanged.
 
 Tests (within the [testing.md](../development/testing.md) system):
 
@@ -1126,14 +1151,18 @@ this design are summarized below; open items are in [todo.md](../development/tod
   sha256 filled in before verification; the admin plane is unchanged.
 - Smoke: PyIceberg uses boto3's default credential chain; DuckDB ATTACH needs
   `SIGV4_REGION` + `SIGV4_SERVICE 's3'`; ctest `tables_smoke` is opt-in. Monitoring
-  assets: 4 rules in the `lights3.tables` alert group, 5 panels in the dashboard row.
+  assets: 5 rules in the `lights3.tables` alert group, 7 panels in the dashboard row.
 
 **⑥ Optional items (#125)**
 
 - Views: rename is a two-step "write the destination, then tombstone the source" without
   an intent; replace writes no commit record; the emptiness checks of both backings know
-  `view/`; fsck / diagnostics do not cover views (todo §3); the default `location` is
-  `s3://<bucket>/<ns>/<name>`.
+  `view/`; the default `location` is `s3://<bucket>/<ns>/<name>`. fsck and diagnostics
+  cover views since 2026-09-13: fsck reports `tables.malformed_entry`,
+  `tables.dangling_pointer` and `tables.duplicate_view` (one view uuid live under two
+  names = a rename that crashed before the tombstone), and
+  `GET …/views/{v}/catalog/diagnostics` reports whether the pointer's object exists plus
+  the superseded version files left in the directory.
 - Alias: `RestApi::matched_prefix` decides how many segments dispatch skips (the first
   segment was reserved in ①).
 - `reportMetrics` is parsed and recorded through `Hooks::audit` as `tables.metrics`
@@ -1144,6 +1173,8 @@ this design are summarized below; open items are in [todo.md](../development/tod
   `dynamic_cast`s the raw backend instance (not the metering decorator);
   `Catalog::commit_table` skips the STAGED write and the `tables.commit.*` fault points
   when `supports_atomic_commit()`; `--check-config` rejects `catalog_backing: duostore`
-  with a non-duostore default backend; KV calls run synchronously on the caller
-  (todo §3); TiKV's get reports an empty value as absent, so the tikv KV facade stores
+  with a non-duostore default backend; KV calls go through `pool->schedule()` onto a
+  pool thread (2026-09-13: redis / tikv are network round trips and must not hold an
+  HTTP io thread; without a pool they run in place); TiKV's get reports an empty value
+  as absent, so the tikv KV facade stores
   every value with a one-byte marker; tikv passed on a tiup playground.

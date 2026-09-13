@@ -9,6 +9,9 @@
 //   tables.inconsistent_rename  a rename intent whose source / destination entries do not
 //                               match its stage
 //   tables.malformed_entry      a catalog object that does not parse
+//   tables.duplicate_view       one view uuid live under two names (a view rename
+//                               crashed between writing the destination and
+//                               tombstoning the source -- views have no intent)
 #pragma once
 
 #include <cstdint>
@@ -32,9 +35,10 @@ struct ReconcileFinding {
 struct ReconcileReport {
     uint64_t table_buckets = 0;
     uint64_t tables = 0;
+    uint64_t views = 0;
     uint64_t intents = 0;
     std::vector<ReconcileFinding> findings;
-    // {"table_buckets","tables","intents","findings":[{kind,bucket,detail}]}
+    // {"table_buckets","tables","views","intents","findings":[{kind,bucket,detail}]}
     nlohmann::json to_json() const;
 };
 

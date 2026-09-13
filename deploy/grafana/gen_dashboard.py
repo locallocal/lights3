@@ -266,6 +266,10 @@ timeseries("Commit P99", [(q("lights3_tables_commit_seconds"), "p99")], unit="s"
            description="Metadata read + deep snapshot validation (one HEAD per data file) + the .sys writes")
 timeseries("Deep validation: files checked / snapshots skipped", [(f'sum (rate(lights3_tables_validation_files_total{{{INST}}}[$__rate_interval]))', "files checked / s"),
                                                                     (f'sum (increase(lights3_tables_validation_skipped_total{{{INST}}}[$__rate_interval]))', "snapshots skipped (unreadable codec)")])
+timeseries("Maintenance bytes deleted", [(f'sum (rate(lights3_tables_maintenance_deleted_bytes_total{{{INST}}}[$__rate_interval]))', "deleted / s")], unit="Bps",
+           description="Expired metadata, orphans and purged tables, as deleted by maintenance runs (design §9); zero while maintenance.delete_enabled is off")
+timeseries("Commit records awaiting finalization", [(f'sum (lights3_tables_finalization_gaps{{{INST}}})', "gaps")],
+           description="Records a diagnosis found STAGED while the pointer had already moved: POST .../catalog/recovery writes them COMMITTED (design §5.4). Only tables this process diagnosed are counted")
 
 dashboard = {
     "__inputs": [{"name": "DS", "label": "Prometheus", "type": "datasource", "pluginId": "prometheus"}],

@@ -1211,6 +1211,12 @@ check "tables: replace view adds a version" "2" \
     "$(s3curl -X POST -H 'Content-Type: application/json' -d "{\"requirements\":[{\"type\":\"assert-view-uuid\",\"uuid\":\"$VIEW_UUID\"}],\"updates\":[{\"action\":\"add-view-version\",\"view-version\":{\"representations\":[{\"type\":\"sql\",\"sql\":\"select 2\",\"dialect\":\"spark\"}],\"schema-id\":-1}},{\"action\":\"set-current-view-version\",\"view-version-id\":-1}]}" "$TNS/views/vw" | jq_field 'j["metadata"]["current-version-id"]')"
 check "tables: a stale view uuid is a 409 CommitFailedException" "CommitFailedException" \
     "$(s3curl -X POST -H 'Content-Type: application/json' -d '{"requirements":[{"type":"assert-view-uuid","uuid":"00000000-0000-4000-8000-000000000000"}],"updates":[]}' "$TNS/views/vw" | jq_field 'j["error"]["type"]')"
+check "tables: view diagnostics reports a live metadata pointer" "true" \
+    "$(s3curl "$TNS/views/vw/catalog/diagnostics" | jq_field 'str(j["metadata-present"]).lower()')"
+check "tables: view diagnostics lists the superseded version" "1" \
+    "$(s3curl "$TNS/views/vw/catalog/diagnostics" | jq_field 'len(j["unreferenced-metadata"])')"
+check "tables: view diagnostics 404s on an unknown view" "NoSuchViewException" \
+    "$(s3curl "$TNS/views/nope/catalog/diagnostics" | jq_field 'j["error"]["type"]')"
 check "tables: rename view" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
     -d '{"source":{"namespace":["e2e","demo"],"name":"vw"},"destination":{"namespace":["e2e","demo"],"name":"vw2"}}' "$TB/tbe2e/views/rename")"
 check "tables: the old view name is gone" "NoSuchViewException" "$(s3curl "$TNS/views/vw" | jq_field 'j["error"]["type"]')"

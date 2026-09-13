@@ -358,6 +358,13 @@ groups:
         annotations:
           summary: "S3 Tables: snapshots committed without deep validation on {{ $labels.instance }}"
           description: "A manifest used an Avro codec this build cannot read (snappy / zstd, or deflate without zlib); the commit was accepted with lights3.snapshot-validation = skipped-codec. Build with zlib or make writers use deflate / null (docs/architecture/s3-tables-design.md §7.4)."
+      - alert: Lights3TablesFinalizationGaps
+        expr: sum by (instance) (lights3_tables_finalization_gaps) > 0
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "S3 Tables: {{ $value }} commit record(s) awaiting finalization on {{ $labels.instance }}"
+          description: "A diagnosis found STAGED records whose pointer had already moved: the commit took effect but its record was never written COMMITTED. POST .../catalog/recovery finalizes them; the gauge only counts tables this gateway diagnosed (docs/architecture/s3-tables-design.md §5.4)."
       - alert: Lights3TablesCommitP99
         expr: histogram_quantile(0.99, sum by (instance, le) (rate(lights3_tables_commit_seconds_bucket[5m]))) > 5
         for: 10m

@@ -3,12 +3,14 @@
 // idempotent replay, crash windows, rename, drop
 #include <nlohmann/json.hpp>
 #include <set>
+#include <sstream>
 
 #include "core/fault.h"
 #include "storage/memory/memory_backend.h"
 #include "tables/catalog.h"
 #include "tables/diagnostics.h"
 #include "tables/iceberg/avro_reader.h"
+#include "tables/iceberg/gzip.h"
 #include "tables/iceberg/metadata.h"
 #include "tables/iceberg/snapshots.h"
 #include "tables/object_catalog_store.h"
@@ -33,7 +35,7 @@ struct Env {
     std::shared_ptr<Catalog> catalog;
     TablesConfig cfg;
 
-    Env() {
+    explicit Env(MetricsScope ms = MetricsScope{}) : metrics(std::move(ms)) {
         cfg.enabled = true;
         std::map<std::string, std::shared_ptr<storage::IStorageBackend>> bmap{{"mem", backend}};
         BucketsConfig bcfg;
@@ -41,10 +43,11 @@ struct Env {
         auto router = storage::BucketRouter::build(bcfg, std::move(bmap));
         buckets = sync_wait(TableBucketStore::load(backend));
         store = std::make_shared<ObjectCatalogStore>(backend);
-        catalog = std::make_shared<Catalog>(store, buckets, router, nullptr, cfg, MetricsScope{});
+        catalog = std::make_shared<Catalog>(store, buckets, router, nullptr, cfg, metrics);
         sync_wait(backend->create_bucket("tbk"));
         sync_wait(catalog->enable_bucket("tbk"));
     }
+    MetricsScope metrics;
     // a second catalog instance sharing the same backend (another gateway)
     std::shared_ptr<Catalog> peer() {
         std::map<std::string, std::shared_ptr<storage::IStorageBackend>> bmap{{"mem", backend}};
@@ -465,10 +468,12 @@ TEST(tables_catalog_register_and_entity_identity) {
     CHECK_EQ(
         status_of([&] { sync_wait(env.catalog->register_table("tbk", ns({"n"}), "ext2", "s3://other/x.json", {})); }),
         400);
+    // gzip metadata is read when zlib is compiled in -- this file simply does not
+    // exist (404); a build without zlib refuses the codec outright (406)
     CHECK_EQ(status_of([&] {
                  sync_wait(env.catalog->register_table("tbk", ns({"n"}), "ext2", "s3://tbk/x.metadata.json.gz", {}));
              }),
-             406);
+             iceberg::gzip_supported() ? 404 : 406);
     // a catalog entry copied to another key does not describe itself -> internal error
     auto raw = sync_wait(
         env.backend->get_object(".sys", ObjectCatalogStore::tbl_key("tbk", ns({"n"}), "ext"), std::nullopt));
@@ -491,6 +496,130 @@ TEST(tables_catalog_register_and_entity_identity) {
     sync_wait(env.catalog->forget_bucket("tbk"));
     CHECK(sync_wait(env.catalog->catalog_empty("tbk")));
     CHECK(env.catalog->table_bucket(env.buckets->snapshot(), "tbk") == nullptr);
+}
+
+namespace {
+
+// A gzip member whose deflate blocks are all "stored": a valid RFC 1952 stream (header,
+// blocks, CRC32 + ISIZE trailer) built without linking zlib into the tests, which is
+// exactly what the reader's gzip framing has to accept
+std::string gzip_stored(const std::string& data) {
+    auto crc32 = [](const std::string& s) {
+        uint32_t c = 0xFFFFFFFFu;
+        for (unsigned char ch : s) {
+            c ^= ch;
+            for (int k = 0; k < 8; ++k) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1)));
+        }
+        return c ^ 0xFFFFFFFFu;
+    };
+    std::string out;
+    const unsigned char hdr[] = {0x1f, 0x8b, 0x08, 0, 0, 0, 0, 0, 0, 0xff};
+    out.append(reinterpret_cast<const char*>(hdr), sizeof(hdr));
+    size_t off = 0;
+    do {
+        size_t n = std::min<size_t>(data.size() - off, 65535);
+        bool last = off + n >= data.size();
+        out.push_back(static_cast<char>(last ? 1 : 0));
+        out.push_back(static_cast<char>(n & 0xff));
+        out.push_back(static_cast<char>((n >> 8) & 0xff));
+        out.push_back(static_cast<char>(~n & 0xff));
+        out.push_back(static_cast<char>((~n >> 8) & 0xff));
+        out.append(data, off, n);
+        off += n;
+    } while (off < data.size());
+    uint32_t crc = crc32(data), len = static_cast<uint32_t>(data.size());
+    for (int i = 0; i < 4; ++i) out.push_back(static_cast<char>((crc >> (8 * i)) & 0xff));
+    for (int i = 0; i < 4; ++i) out.push_back(static_cast<char>((len >> (8 * i)) & 0xff));
+    return out;
+}
+
+// The value of a metric family in the registry's exposition (sum over its children)
+double metric_value(MetricsRegistry& reg, const std::string& name) {
+    std::istringstream in(reg.render());
+    double total = 0;
+    for (std::string line; std::getline(in, line);) {
+        if (line.empty() || line[0] == '#') continue;
+        size_t end = line.find_first_of("{ ");
+        if (end == std::string::npos || line.substr(0, end) != name) continue;
+        size_t sp = line.rfind(' ');
+        if (sp != std::string::npos) total += std::stod(line.substr(sp + 1));
+    }
+    return total;
+}
+
+}  // namespace
+
+// Iceberg engines may write metadata with write.metadata.compression-codec=gzip; the
+// catalog reads those files (register / load) and keeps writing its own uncompressed
+TEST(tables_catalog_registers_gzip_metadata) {
+    if (!iceberg::gzip_supported()) return;
+    Env env;
+    sync_wait(env.catalog->create_namespace("tbk", ns({"n"}), {}));
+    iceberg::CreateTableInput in;
+    in.name = "gz";
+    in.schema = json::parse(R"({"type":"struct","fields":[{"id":1,"name":"id","required":true,"type":"long"}]})");
+    in.location = "s3://tbk/legacy/gz";
+    in.table_uuid = "99999999-2222-4333-8444-555555555555";
+    in.now_ms = 1;
+    std::string plain = iceberg::canonical(iceberg::initial_metadata(in));
+    env.put("legacy/gz/metadata/v1.metadata.json.gz", gzip_stored(plain));
+    auto r = sync_wait(
+        env.catalog->register_table("tbk", ns({"n"}), "gz", "s3://tbk/legacy/gz/metadata/v1.metadata.json.gz", {}));
+    CHECK_EQ(r.entry.table_uuid, in.table_uuid);
+    // the catalog's own copy is plain json under the reserved prefix
+    CHECK_EQ(r.entry.metadata_location.rfind(".lights3-table/n/gz/metadata/00001-", 0), size_t(0));
+    CHECK(r.entry.metadata_location.find(".gz") == std::string::npos);
+    auto loaded = sync_wait(env.catalog->load_table("tbk", ns({"n"}), "gz"));
+    CHECK_EQ(loaded.metadata["table-uuid"].get<std::string>(), in.table_uuid);
+    // a truncated / corrupt member is a client error, not a 500
+    env.put("legacy/bad/v1.metadata.json.gz", gzip_stored(plain).substr(0, 40));
+    CHECK_EQ(status_of([&] {
+                 sync_wait(env.catalog->register_table("tbk", ns({"n"}), "bad",
+                                                       "s3://tbk/legacy/bad/v1.metadata.json.gz", {}));
+             }),
+             400);
+}
+
+// The inflate side on its own: multi-block members, the ceiling (a compression bomb
+// cannot outgrow tables.metadata_max_size) and the corrupt-input verdicts
+TEST(tables_gunzip_bounds_and_errors) {
+    if (!iceberg::gzip_supported()) return;
+    std::string big(200000, 'a');
+    std::string gz = gzip_stored(big);
+    CHECK_EQ(iceberg::gunzip(gz, 1u << 20).size(), big.size());
+    // exactly at the ceiling passes, one byte under it does not
+    CHECK_EQ(iceberg::gunzip(gz, big.size()).size(), big.size());
+    CHECK_EQ(status_of([&] { iceberg::gunzip(gz, big.size() - 1); }), 400);
+    CHECK_EQ(status_of([&] { iceberg::gunzip(gz.substr(0, 30), 1u << 20); }), 400);
+    CHECK_EQ(status_of([&] { iceberg::gunzip("", 1u << 20); }), 400);
+}
+
+// The gauge of design §13: a diagnosis publishes how many commit records still need
+// finalizing, recovery clears it
+TEST(tables_catalog_finalization_gap_gauge) {
+    FaultReset guard;
+    auto reg = std::make_shared<MetricsRegistry>();
+    Env env(MetricsScope(reg, {{"feature", "tables"}}));
+    sync_wait(env.catalog->create_namespace("tbk", ns({"n"}), {}));
+    sync_wait(env.catalog->create_table("tbk", ns({"n"}), table_req("t"), {}));
+    env.install_snapshot("n/t/metadata/ml.avro");
+    auto commit = [&](int64_t snap, const char* id) {
+        return status_of([&] {
+            sync_wait(env.catalog->commit_table("tbk", ns({"n"}), "t",
+                                                append_commit(snap, snap, "n/t/metadata/ml.avro", id), {}));
+        });
+    };
+    CHECK_EQ(commit(1, "c-ok"), 0);
+    sync_wait(env.catalog->diagnose("tbk", ns({"n"}), "t"));
+    CHECK_EQ(metric_value(*reg, "lights3_tables_finalization_gaps"), 0.0);
+    // crash after the pointer CAS: the record stays STAGED although the commit took
+    fault::arm("tables.commit.after_cas:1");
+    CHECK_EQ(commit(2, "c-gap"), 500);
+    sync_wait(env.catalog->diagnose("tbk", ns({"n"}), "t"));
+    CHECK_EQ(metric_value(*reg, "lights3_tables_finalization_gaps"), 1.0);
+    auto rep = sync_wait(env.catalog->recover("tbk", ns({"n"}), "t", false));
+    CHECK_EQ(rep.finalized, 1);
+    CHECK_EQ(metric_value(*reg, "lights3_tables_finalization_gaps"), 0.0);
 }
 
 // ---------- step ③: deep validation, diagnostics / recovery, rename recovery ----------

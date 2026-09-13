@@ -436,6 +436,7 @@ json RunReport::to_json() const {
     j["expired_snapshots"] = expired_snapshots;
     j["deleted_metadata"] = deleted_metadata;
     j["deleted_orphans"] = deleted_orphans;
+    j["deleted_bytes"] = deleted_bytes;
     j["skipped"] = skipped;
     j["delete_enabled"] = delete_enabled;
     j["generation"] = generation;
@@ -488,6 +489,7 @@ Task<RunReport> run_table(Catalog& catalog, const MaintenancePlan& plan, const R
         }
         if (!meta || unix_of(meta->last_modified) > window_limit) co_return false;
         co_await backend.delete_object(plan.bucket, key);
+        rep.deleted_bytes += meta->size;
         if (opt.note_usage) opt.note_usage(plan.bucket, -1, -static_cast<int64_t>(meta->size));
         if (++done % 64 == 0 && catalog.pool()) co_await catalog.pool()->schedule();
         co_return true;
@@ -504,8 +506,10 @@ Task<RunReport> run_table(Catalog& catalog, const MaintenancePlan& plan, const R
         else
             ++rep.skipped;
     }
-    LOG_INFO("tables: maintenance of {}.{} deleted {} metadata file(s) and {} orphan(s), skipped {}",
-             ns_display(plan.levels), plan.name, rep.deleted_metadata, rep.deleted_orphans, rep.skipped);
+    catalog.note_maintenance_deleted(rep.deleted_bytes);
+    LOG_INFO("tables: maintenance of {}.{} deleted {} metadata file(s) and {} orphan(s) ({} bytes), skipped {}",
+             ns_display(plan.levels), plan.name, rep.deleted_metadata, rep.deleted_orphans, rep.deleted_bytes,
+             rep.skipped);
     co_return rep;
 }
 
@@ -566,6 +570,7 @@ Task<PurgeReport> purge_table(Catalog& catalog, std::string_view bucket, const L
     co_await store.delete_maintenance_config(bucket, levels, name);
     co_await store.delete_table(bucket, levels, name);
     rep.tombstone_removed = true;
+    catalog.note_maintenance_deleted(rep.deleted_bytes);
     LOG_INFO("tables: purged {}.{}: {} object(s), {} bytes", ns_display(levels), name, rep.deleted_objects,
              rep.deleted_bytes);
     co_return rep;

@@ -55,6 +55,8 @@ struct RecoveryReport {
     int finalized = 0;
     int pruned = 0;
     int manual = 0;
+    // the diagnosed table (for the finalization-gap gauge); not part of the JSON
+    std::string table_id;
     nlohmann::json to_json() const;
 };
 
@@ -62,6 +64,28 @@ struct RecoveryReport {
 // StagedBeforeTableUpdate records are deleted; ManualReview is only counted
 Task<RecoveryReport> recover_table(ITableCatalogStore& store, std::string_view bucket, const Levels& levels,
                                    std::string_view name, bool prune);
+
+// ---- views (design §6.3) ----
+
+// A view has no commit log: its whole consistency story is "the entry points at a
+// metadata object that exists". What a crashed replace or rename leaves behind is
+// therefore a missing pointer target (here) or one uuid under two names (fsck)
+struct ViewDiagnostics {
+    ViewEntry entry;
+    std::string etag;
+    // the object entry.metadata_location names is readable
+    bool metadata_present = false;
+    // keys under the view's metadata directory the current pointer does not name:
+    // superseded versions, and anything a crashed replace left half-written
+    std::vector<std::string> unreferenced_metadata;
+    nlohmann::json to_json(std::string_view bucket) const;
+};
+
+// metadata_dir = "<reserved>/<ns>/<view>/view-metadata/" inside bucket_backend.
+// Throws not_found_view when the view has no entry (tombstones are diagnosable)
+Task<ViewDiagnostics> diagnose_view(ITableCatalogStore& store, storage::IStorageBackend& bucket_backend,
+                                    std::string_view bucket, const Levels& levels, std::string_view name,
+                                    std::string_view metadata_dir);
 
 // ---- rename intents (design §5.6) ----
 

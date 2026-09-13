@@ -545,6 +545,7 @@ namespace `sales`（及子级）与其数据对象；`readonly: true` 的凭证�
 | PUT / GET / DELETE `/buckets/{bucket}`（无 `{w}` 段） | 启用 / 查看 / 禁用表桶（root） | ① |
 | GET / PUT `…/tables/{t}/metadata-location` | AWS `GetTableMetadataLocation` / `UpdateTableMetadataLocation` 形态：`{metadataLocation, versionToken}`；PUT 只换指针，仍走 §5.2 的 3–5 校验（metadata 须已在保留目录下，即只对 register 后的服务端拷贝或维护产物有意义） | ① |
 | GET `…/tables/{t}/catalog/diagnostics`、POST `…/catalog/recovery` | §5.4 的诊断与修复 | ③ |
+| GET `…/views/{v}/catalog/diagnostics` | view 的指针体检：`metadata-present` 与目录里已被取代的版本文件（view 无 commit 记录，故无 recovery 对应项） | ⑥ 收尾 |
 | GET/PUT `…/tables/{t}/maintenance/config`、POST `…/maintenance/{plan,run}`、GET `…/maintenance/jobs/{id}` | §9 | ④ |
 
 已识别但不支持的特性回 406 `UnsupportedOperationException`（而非 501 XML）：
@@ -575,7 +576,8 @@ namespace `sales`（及子级）与其数据对象；`readonly: true` 的凭证�
   409 `AlreadyExistsException`。响应 200 `LoadTableResult`。
 - **RegisterTable** `{name, metadata-location, overwrite?}`：`metadata-location`
   须为 `s3://<w>/…` 本桶内 key（可在保留前缀外，即引擎自己写的旧表）；服务端读
-  取（≤上限，`.json`/`.json.gz`）、`validate_supported_metadata`、`check_snapshots`
+  取（≤上限；`.json.gz` 在编译进 zlib 时按 gzip 解压，见 §7.5，否则 406）、
+  `validate_supported_metadata`、`check_snapshots`
   全量校验，然后**复制**为保留目录下 `00001-<uuid>.metadata.json` 并以此为指针
   （原文件不动），`table_uuid` 采用原值，`location` 采用 metadata 的 `location`。
   这就是"指针只指保留目录"不变量的来源；AWS 的 register 亦要求 metadata 在表桶内。
@@ -675,6 +677,23 @@ fixed/enum，Iceberg manifest 只用这些）、codec `null` 与 `deflate`（zli
 不引入 avro-cpp（依赖 Boost 与 fmt，且只用到读的十分之一）。
 
 阶段 ① 先做"manifest-list 对象存在 + 大小"的浅校验；③ 已补齐 Avro 深校验（实现差异见 §16 ③：冲突复核只看归属于新快照的条目，否则复用父 manifest 的正常 append 会被误判）。
+
+### 7.5 gzip 压缩的 metadata.json（2026-09-13）
+
+引擎侧 `write.metadata.compression-codec=gzip`（部分 Spark 发行版的默认）写出的
+metadata 文件名为 `<n>-<uuid>.gz`、内容是 gzip 成员。**读侧**支持：
+`Catalog::read_metadata` 按键名后缀判定（不嗅探内容——命名是写方的声明），经
+`iceberg::gunzip`（`iceberg/gzip.h`，`inflateInit2(15+16)`）解压后再走
+`parse_and_validate`。与 §7.4 的 Avro 块解压是两条路径：OCF 块是无头的原始
+deflate，metadata 是带头尾校验的 gzip 成员。
+
+- **上限**：读取时的 `metadata_max_size` 约束的是**压缩字节**，`gunzip` 再以同一上限
+  约束**解压后**的字节——压缩炸弹长不过 `tables.metadata_max_size`。
+- **损坏/截断** → 400（客户端错误），不是 500。
+- **无 zlib 的构建**：`gzip_supported()` 为假，register 直接回 406 并说明原因
+  （此前一律 406，不区分构建）。
+- **写侧不压缩**：目录写出的指针永远是普通 `.metadata.json`；register 把 gz 原文件
+  原样留在原处，只把解压校验后的内容复制进保留目录。
 
 ## 8. 数据面集成
 
@@ -827,9 +846,10 @@ sha256 前 16 hex，引擎在自己的原子区内比对）；`DuoMetaCatalogSto
 指标（`MetricsScope{feature=tables}`，已落地）：`lights3_tables_requests_total`、
 `lights3_tables_requests_by_op_total{op,status}`、`lights3_tables_commits_total{result=ok|conflict|error}`、
 `lights3_tables_commit_seconds`、`lights3_tables_validation_files_total`、
-`lights3_tables_validation_skipped_total`。稿子里的 `lights3_tables_maintenance_deleted_bytes_total`
-与 `lights3_tables_finalization_gaps`（gauge）未加，记 [todo.md §4](../development/todo.md)。访问日志
-`api_name = Iceberg.<Op>`，慢请求阈值照旧。
+`lights3_tables_validation_skipped_total`、`lights3_tables_maintenance_deleted_bytes_total`
+（run 与 purge 实际删掉的字节，`RunReport.deleted_bytes` 同源）、`lights3_tables_finalization_gaps`
+（gauge：最近一次诊断发现的待 finalize 记录数，按 `<bucket>/<table_id>` 累计，recovery 后归零；
+只统计本进程诊断过的表）。访问日志 `api_name = Iceberg.<Op>`，慢请求阈值照旧。
 
 测试（[testing.md](../development/testing.md) 体系内）：
 
@@ -975,18 +995,21 @@ Trino:      iceberg.catalog.type=rest  iceberg.rest-catalog.uri=…  .warehouse=
 - SigV4：PyIceberg / Spark 这类通用客户端不发 `x-amz-content-sha256`，目录面对无该头、非
   presigned 的请求先读满 body 算 sha256 再验签；管理面不变。
 - 冒烟：PyIceberg 走 boto3 默认凭证链；DuckDB ATTACH 须 `SIGV4_REGION` + `SIGV4_SERVICE 's3'`；
-  ctest `tables_smoke` opt-in。监控资产：`lights3.tables` 告警组 4 条、dashboard 行 5 面板。
+  ctest `tables_smoke` opt-in。监控资产：`lights3.tables` 告警组 5 条、dashboard 行 7 面板。
 
 **⑥ 可选项（#125）**
 
 - views：rename 是"先写目标、再把源改墓碑"两步，无 intent；replace 不写 commit 记录；两种后备
-  的目录判空都认得 `view/`；fsck / diagnostics 不覆盖 view（todo §3）；`location` 默认
-  `s3://<bucket>/<ns>/<name>`。
+  的目录判空都认得 `view/`；`location` 默认 `s3://<bucket>/<ns>/<name>`。fsck 与 diagnostics
+  已覆盖 view（2026-09-13）：fsck 对 view 报 `tables.malformed_entry`、`tables.dangling_pointer`
+  与 `tables.duplicate_view`（同一 view uuid 活在两个名字下 = rename 崩在墓碑之前），
+  `GET …/views/{v}/catalog/diagnostics` 报指针对象是否存在与目录里已被取代的版本文件。
 - 别名：`RestApi::matched_prefix` 决定 dispatch 跳过的段数（首段在 ① 就已保留）。
 - `reportMetrics` 解析后经 `Hooks::audit` 记 `tables.metrics`（≤ 64 KiB）。
 - compaction 候选：`iceberg::live_files_of_snapshot`，`DataFile.sort_order_id`，分区键用桶内目录。
 - duostore-meta：`kv_*` 加在 `IMetaStore` 上带默认 `NotImplemented`；app 取原始后端实例（不是
   计量装饰器）做 `dynamic_cast`；`Catalog::commit_table` 按 `supports_atomic_commit()` 跳过
   STAGED 写与 `tables.commit.*` 故障点；`--check-config` 对 `catalog_backing: duostore` + 非
-  duostore 默认后端报错；KV 调用在调用线程同步执行（todo §3）；TiKV 的 get 把空值当不存在，
+  duostore 默认后端报错；KV 调用经 `pool->schedule()` 在池线程执行（2026-09-13：redis / tikv 是
+  网络往返，不能占住 HTTP io 线程；无池时原地执行）；TiKV 的 get 把空值当不存在，
   tikv 的 KV 面给每个值加一字节标记；tikv 在 tiup playground 上通过。

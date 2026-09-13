@@ -161,9 +161,12 @@ dump/load 同模式：构建全部后端、不监听端口，跑完即退出；*
   [s3-tables-design.md §16 ③](../architecture/s3-tables-design.md)）：
   `.sys/tables/` 的表桶标记与 `.sys/tables-catalog/<bucket>/` 的目录状态对照表桶本身：
   `tables.orphan_state`（标记或目录状态对应的桶不存在 / 未启用）、`tables.dangling_pointer`
-  （表指针指向不存在的 metadata 对象）、`tables.stale_renaming`（表处于 RENAMING 但 intent
-  已不在）、`tables.inconsistent_rename`（intent 的阶段与源/目标条目不符）、
-  `tables.malformed_entry`。明细在结论的 `stats.tables`，每条计一个 finding；修复走
+  （表**或 view** 的指针指向不存在的 metadata 对象）、`tables.stale_renaming`（表处于 RENAMING
+  但 intent 已不在）、`tables.inconsistent_rename`（intent 的阶段与源/目标条目不符）、
+  `tables.duplicate_view`（同一 view uuid 活在两个名字下：view rename 崩在写完目标、改源为
+  墓碑之前，view 没有 intent 可重放，只能在这里发现，处置是 drop 掉过时的那个名字）、
+  `tables.malformed_entry`。明细在结论的 `stats.tables`（`table_buckets` / `tables` /
+  `views` / `intents` 计数 + findings），每条计一个 finding；修复走
   `POST …/tables/{t}/catalog/recovery`，fsck 本身不改任何对象。在线 `POST /-/admin/fsck/<默认后端>`
   同样附带。
 

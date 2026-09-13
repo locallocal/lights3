@@ -8,6 +8,7 @@
 #include "core/log.h"
 #include "core/util/crypto.h"
 #include "s3/errors.h"
+#include "tables/iceberg/gzip.h"
 #include "tables/iceberg/metadata.h"
 #include "tables/iceberg/requirements.h"
 #include "tables/iceberg/snapshots.h"
@@ -50,6 +51,28 @@ Catalog::Catalog(std::shared_ptr<ITableCatalogStore> store, std::shared_ptr<Tabl
                                          "Data / delete files verified by the deep snapshot check");
     validation_skipped_ = metrics_.counter("lights3_tables_validation_skipped_total",
                                            "Snapshots whose Avro codec could not be read (validation skipped)");
+    maintenance_deleted_bytes_ = metrics_.counter("lights3_tables_maintenance_deleted_bytes_total",
+                                                  "Bytes deleted by table maintenance runs and purges");
+    finalization_gaps_ = metrics_.gauge("lights3_tables_finalization_gaps",
+                                        "Commit records awaiting finalization, as of the last diagnosis");
+}
+
+void Catalog::note_maintenance_deleted(uint64_t bytes) {
+    if (bytes) maintenance_deleted_bytes_->inc(bytes);
+}
+
+void Catalog::note_finalization_gaps(std::string_view bucket, std::string_view table_id, size_t gaps) {
+    std::string key = std::string(bucket) + "/" + std::string(table_id);
+    size_t total = 0;
+    {
+        std::lock_guard lk(gaps_mu_);
+        if (gaps)
+            gaps_[key] = gaps;
+        else
+            gaps_.erase(key);
+        for (auto& [_, n] : gaps_) total += n;
+    }
+    finalization_gaps_->set(static_cast<int64_t>(total));
 }
 
 // ---------- helpers ----------
@@ -107,6 +130,10 @@ Task<json> Catalog::read_metadata(storage::IStorageBackend& backend, std::string
         text.append(reinterpret_cast<const char*>(buf), n);
     }
     co_await schedule();
+    // gzip-framed metadata (an engine wrote it with write.metadata.compression-codec=
+    // gzip): inflate under the same size ceiling. The limit above bounded the
+    // compressed bytes, gunzip bounds the inflated ones
+    if (iceberg::is_gzip_key(key)) text = iceberg::gunzip(text, cfg_.metadata_max_size);
     co_return iceberg::parse_and_validate(text, cfg_.metadata_max_size);
 }
 
@@ -175,6 +202,10 @@ iceberg::DeepCheckOptions Catalog::deep_options() const {
     iceberg::DeepCheckOptions opt;
     opt.concurrency = cfg_.validate_concurrency;
     return opt;
+}
+
+std::string Catalog::view_metadata_dir(const TableBucketEntry& tb, const Levels& levels, std::string_view name) const {
+    return tb.reserved_prefix + ns_path(levels) + "/" + std::string(name) + "/view-metadata/";
 }
 
 std::string Catalog::metadata_dir(const TableBucketEntry& tb, const Levels& levels, std::string_view name) const {
@@ -548,8 +579,10 @@ Task<Catalog::LoadedTable> Catalog::register_table(std::string_view bucket, cons
     } catch (const RestError&) {
         throw bad_request("metadata-location must be s3://" + std::string(bucket) + "/<key>");
     }
-    if (src_key.size() > 3 && src_key.substr(src_key.size() - 3) == ".gz")
-        throw unsupported("compressed metadata files are not supported");
+    // gzip-compressed metadata is readable when zlib is compiled in; without it the
+    // file can only be refused, and saying why beats "unsupported"
+    if (iceberg::is_gzip_key(src_key) && !iceberg::gzip_supported())
+        throw unsupported("this build cannot read gzip-compressed metadata files (no zlib)");
     auto& backend = router_.resolve(bucket);
     json md;
     try {
@@ -1179,13 +1212,28 @@ Task<TableDiagnostics> Catalog::diagnose(std::string_view bucket, const Levels& 
     TableBucketEntry tb = co_await require_table_bucket(bucket);
     auto& backend = router_.resolve(bucket);
     std::string dir = metadata_dir(tb, levels, name);
-    co_return co_await diagnose_table(*store_, backend, bucket, levels, name, dir);
+    auto d = co_await diagnose_table(*store_, backend, bucket, levels, name, dir);
+    size_t gaps = 0;
+    for (auto& c : d.commits)
+        if (c.state == CommitState::FinalizationRequired) ++gaps;
+    note_finalization_gaps(bucket, d.entry.table_id, gaps);
+    co_return d;
+}
+
+Task<ViewDiagnostics> Catalog::diagnose_view(std::string_view bucket, const Levels& levels, std::string_view name) {
+    TableBucketEntry tb = co_await require_table_bucket(bucket);
+    auto& backend = router_.resolve(bucket);
+    std::string dir = view_metadata_dir(tb, levels, name);
+    co_return co_await tables::diagnose_view(*store_, backend, bucket, levels, name, dir);
 }
 
 Task<RecoveryReport> Catalog::recover(std::string_view bucket, const Levels& levels, std::string_view name,
                                       bool prune) {
     co_await require_table_bucket(bucket);
-    co_return co_await recover_table(*store_, bucket, levels, name, prune);
+    auto rep = co_await recover_table(*store_, bucket, levels, name, prune);
+    // every FinalizationRequired record was just written COMMITTED
+    note_finalization_gaps(bucket, rep.table_id, 0);
+    co_return rep;
 }
 
 Task<void> Catalog::drop_table(std::string_view bucket, const Levels& levels, std::string_view name) {

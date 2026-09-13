@@ -417,6 +417,7 @@ if(LIGHTS3_TABLES)
     src/tables/iceberg/transition.cc
     src/tables/iceberg/snapshots.cc
     src/tables/iceberg/avro_reader.cc
+    src/tables/iceberg/gzip.cc
     src/tables/iceberg/manifest.cc
     src/tables/diagnostics.cc
     src/tables/fsck.cc

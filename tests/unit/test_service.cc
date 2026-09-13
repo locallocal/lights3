@@ -364,7 +364,7 @@ TEST(service_with_auth) {
     CHECK_EQ(hz.status, 200);
 }
 
-// Static website hosting phase 1 (docs/usage/static-website.md): anonymous GET/HEAD object
+// Static website hosting (docs/usage/static-website.md §3): anonymous GET/HEAD object
 // reads on listed buckets only; everything else keeps requiring a signature
 TEST(service_website_anonymous_read) {
     AuthConfig acfg;
@@ -430,7 +430,7 @@ TEST(service_website_anonymous_read) {
     CHECK(part.status != 200);
 }
 
-// Static website hosting phase 2 (docs/usage/static-website.md): index/error document
+// Static website hosting (docs/usage/static-website.md §4): index/error document
 // semantics for anonymous requests; signed requests keep XML errors
 TEST(service_website_index_and_error_documents) {
     AuthConfig acfg;
@@ -513,7 +513,7 @@ TEST(service_website_index_and_error_documents) {
     CHECK_EQ(lt.status, 501);
 }
 
-// Static website hosting phase 3 (docs/usage/static-website.md §4): ?website dynamic API —
+// Static website hosting (docs/usage/static-website.md §2.2): ?website dynamic API —
 // root-only, persisted to .sys/website/<bucket>, multi-instance sync
 TEST(service_bucket_website_api) {
     auto backend = std::make_shared<storage::MemoryBackend>();
@@ -601,7 +601,7 @@ TEST(service_bucket_website_api) {
     CHECK_EQ(sync_wait(svc.dispatch(signed_req("DELETE", "/fixed", "", {{"website", ""}}))).status, 405);
 }
 
-// Static website hosting phase 3: x-amz-website-redirect-location — stored/echoed like
+// Static website hosting (docs/usage/static-website.md §5.1): x-amz-website-redirect-location — stored/echoed like
 // the other first-class fields, and a 301 on the anonymous plane
 TEST(service_website_redirect_location) {
     AuthConfig acfg;

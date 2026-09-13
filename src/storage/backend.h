@@ -47,7 +47,7 @@ struct ObjectMeta {
     std::string content_language;
     // HTTP-date text stored verbatim
     std::string expires;
-    // Website redirect (docs/usage/static-website.md phase ③): echoed as a header on GET/HEAD
+    // Website redirect (docs/usage/static-website.md §5.1): echoed as a header on GET/HEAD
     // like the fields above; the anonymous website plane additionally answers 301 with
     // it as Location. Value must start with '/', 'http://' or 'https://' (checked at PUT)
     std::string website_redirect;

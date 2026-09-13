@@ -325,7 +325,7 @@ lights3-ctl cred unbind-cert --subject=alice
 
 ### 3.3 `website` —— 桶静态网站配置
 
-操作 `?website` 子资源（[static-website.md §4](static-website.md)）。`set`
+操作 `?website` 子资源（[static-website.md §2.2](static-website.md)）。`set`
 后桶变为匿名可读（仅 GET/HEAD 对象），带 index/error 文档语义；YAML 中
 静态配置的桶服务端拒绝动态修改（405）。
 

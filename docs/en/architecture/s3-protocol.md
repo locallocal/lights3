@@ -20,9 +20,12 @@ The first phase covers the subset needed for day-to-day operations of mainstream
 | List | ListObjectsV2 (with V1 compatibility) | prefix / delimiter / max-keys / continuation-token / start-after / fetch-owner; V1 honours only marker, V2 only continuation-token and start-after |
 | Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy supports x-amz-copy-source-if-* and x-amz-copy-source-range (bytes=first-last, both ends required); source/destination may be on different backends; ListParts/ListMultipartUploads are **truly paginated** (marker + max-*, honest IsTruncated; both accept encoding-type, and uploads accepts arbitrary delimiters); non-final parts must be at least 5MiB (`http.min_part_size`, 0 disables), out-of-order parts return `InvalidPartOrder`; per-part checksums persist with the part records, complete computes the composite (`-N`) checksum from **verified** stored values (COMPOSITE; CRC64NVME/explicit FULL_OBJECT → 501) and cross-checks any Checksum* claims in the XML (mismatch → BadDigest) |
 
-Static website hosting **is supported** (docs/usage/static-website.md): per-bucket
-anonymous GET/HEAD object reads, index/error documents, the root-only
-`?website` configuration API, and `x-amz-website-redirect-location`.
+Static website hosting **is supported** (manual
+[usage/static-website.md](../usage/static-website.md), design
+[static-website.md](static-website.md)): per-bucket anonymous GET/HEAD object
+reads, index/error documents, the root-only `?website` configuration API,
+`x-amz-website-redirect-location`, RedirectAllRequestsTo / RoutingRules and
+per-bucket anonymous rate limiting.
 
 Explicitly unsupported (returns `NotImplemented`): versioning, fine-grained ACL
 (only private is accepted), bucket policy, lifecycle transitions/tag filters,
@@ -317,7 +320,7 @@ L1 connection and rate-limit metrics (roadmap §4.2): `lights3_http_connections_
   `lights3_http_parse_errors_total` (malformed request line / headers /
   framing; see [http-adapter.md §2.2](http-adapter.md)); the **website plane**
   `lights3_website_events_total{event=anon_read|index_rewrite|error_document|redirect|throttled}`
-  ([static-website.md §6](../usage/static-website.md)).
+  ([usage/static-website.md §7](../usage/static-website.md)).
 - **Health checks**: `GET /-/healthz` (process liveness) and `GET /-/readyz`
   (per-backend probing: `co_await list_buckets()` uniformly against all backends;
   any failure returns 503 with the failing backend names reported in the body).

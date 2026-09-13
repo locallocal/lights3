@@ -331,7 +331,7 @@ void reject_unsupported_headers(const http::HttpRequest& req) {
         // the five ACL grant headers, same class as x-amz-acl
         "x-amz-grant-",
     };
-    // x-amz-website-redirect-location left this list with docs/usage/static-website.md phase ③,
+    // x-amz-website-redirect-location left this list with docs/usage/static-website.md §5.1,
     // x-amz-tagging with roadmap §2.5: both are first-class metadata fields now
     for (auto& [k, v] : req.headers.items()) {
         std::string lk;
@@ -850,7 +850,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             api_name = "Preflight";
             resp = co_await cors_preflight(req, bucket);
         } else {
-            // Static website hosting phase 1 (docs/usage/static-website.md): requests with no
+            // Static website hosting (docs/architecture/static-website.md §2): requests with no
             // signature material may read objects from explicitly listed website buckets
             // anonymously. Decided before verify -- verify treats a missing Authorization
             // header as AccessDenied; when auth is globally disabled verify() admits
@@ -932,7 +932,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                     metrics_.website(WebsiteEvent::Redirect);
                     early = std::move(*redirect);
                 } else {
-                    // Index document (docs/usage/static-website.md phase ②): an empty key (bucket
+                    // Index document (docs/usage/static-website.md §4): an empty key (bucket
                     // root, with or without trailing slash) or a directory-style key
                     // ("docs/") maps to the index object. Rewriting before the route gate
                     // also turns what would be a bucket-scope listing into a plain object
@@ -1032,7 +1032,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                 else
                     resp = co_await std::move(route(req, bucket, key, auth).with_cancel(req_src.token()));
                 route_end = std::chrono::steady_clock::now();
-                // Object-level website redirect (docs/usage/static-website.md phase ③): on the
+                // Object-level website redirect (docs/usage/static-website.md §5.1): on the
                 // anonymous plane, x-amz-website-redirect-location turns the response into a
                 // 301 — the header value was prefix-validated at PUT, so it is Location-safe.
                 // Signed (REST) requests keep the object body + echo header, matching AWS
@@ -1218,7 +1218,7 @@ std::span<const S3Service::Route> S3Service::route_table() {
          [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth&) {
              return s.get_bucket_location(std::move(b));
          }},
-        // ?website subresource (docs/usage/static-website.md phase ③): flagged routes must precede
+        // ?website subresource (docs/usage/static-website.md §2.2): flagged routes must precede
         // the flagless fallbacks of the same method, or PUT /bucket?website would create a bucket
         {"GET", Scope::Bucket, "website", "", Action::Read, "GetBucketWebsite",
          [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth& auth) {

@@ -19,9 +19,10 @@
 | List | ListObjectsV2（含 V1 兼容） | prefix / delimiter / max-keys / continuation-token / start-after / fetch-owner；V1 只认 marker，V2 只认 continuation-token 与 start-after |
 | Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy 支持 x-amz-copy-source-if-* 与 x-amz-copy-source-range（bytes=first-last，两端必填），源/目标可在不同后端；ListParts/ListMultipartUploads **真分页**（marker + max-*，据实回 IsTruncated；两者均支持 encoding-type，uploads 的 delimiter 任意）；非末片最小 5MiB（`http.min_part_size`，0=关），乱序回 `InvalidPartOrder`；分片校验和随 part 记录持久化，complete 由**已验证**的分片值算复合（`-N`）校验和（COMPOSITE；CRC64NVME/显式 FULL_OBJECT → 501），complete XML 的 Checksum* 声明与存量对照（不符 BadDigest） |
 
-静态网站托管**已支持**（docs/usage/static-website.md）：按桶匿名 GET/HEAD 对象读、
-index/error 文档、`?website` 动态配置 API（root 专属）与
-`x-amz-website-redirect-location`。
+静态网站托管**已支持**（使用手册 [usage/static-website.md](../usage/static-website.md)，
+设计 [static-website.md](static-website.md)）：按桶匿名 GET/HEAD 对象读、index/error 文档、
+`?website` 动态配置 API（root 专属）、`x-amz-website-redirect-location`、
+RedirectAllRequestsTo / RoutingRules 与按桶匿名限速。
 
 明确不支持（返回 `NotImplemented`）：versioning、ACL 细粒度（只认
 private）、bucket policy、lifecycle Transition/按 tag 过滤、SSE-C/KMS、
@@ -268,7 +269,7 @@ L1 连接与限流指标（roadmap §4.2）：`lights3_http_connections_total{re
   `lights3_http_parse_errors_total`（请求行/头部/framing 畸形；详见
   [http-adapter.md §2.2](http-adapter.md)）；**网站面**
   `lights3_website_events_total{event=anon_read|index_rewrite|error_document|redirect|throttled}`
-  （[static-website.md §6](../usage/static-website.md)）。
+  （[usage/static-website.md §7](../usage/static-website.md)）。
 - **健康检查**：`GET /-/healthz`（进程存活）与 `GET /-/readyz`
   （各后端探活：对所有后端一律 `co_await list_buckets()`，任一失败
   返回 503 并在响应体中报告失败的后端名）。三个读端点只认 GET/HEAD，

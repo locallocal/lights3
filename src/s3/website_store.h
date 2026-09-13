@@ -1,4 +1,4 @@
-// Static website configuration store (docs/usage/static-website.md phase ③).
+// Static website configuration store (docs/architecture/static-website.md §4).
 // Static entries come from the YAML config and are immutable via the API (same
 // convention as static credentials); dynamic entries are managed through
 // PUT/DELETE /bucket?website and persisted as .sys/website/<bucket> JSON

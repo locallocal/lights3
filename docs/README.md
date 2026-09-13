@@ -31,6 +31,7 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 | [s3-protocol.md](architecture/s3-protocol.md) | S3 协议实现：API 范围、SigV4 认证（含 presigned、STS 与时钟偏移）、Multipart Upload、错误码映射、可观测性、mint 兼容集 |
 | [credential-management.md](architecture/credential-management.md) | 凭证管理：AK/SK 管理 API、三来源模型（静态 root / 文件 / 动态）、`.sys` 持久化、SK at-rest 加密、凭证文件热加载、多实例同步、per-credential policy、STS 会话 |
 | [multi-tenancy.md](architecture/multi-tenancy.md) | 用量统计、桶/租户配额、租户实体与桶归属、分级管理面、审计日志 |
+| [static-website.md](architecture/static-website.md) | 静态网站托管的设计：匿名判定与双重授权闸门、请求处理顺序、WebsiteStore 持久化与多实例同步、错误页渲染、重定向 Location 生成、放大面与限速 |
 | [s3-tables-design.md](architecture/s3-tables-design.md) | S3 Tables / Apache Iceberg REST Catalog：建在 `.sys` 上的目录状态与 CAS 提交协议、REST 端点与错误模型、Avro 深校验与诊断/恢复、表桶守卫与凭证下发、维护作业、多网关矩阵、views、duostore-meta 目录后备 |
 | [storage/](architecture/storage/README.md) | 存储层全部文档：设计层——`storage-backend.md`（接口抽象、bucket 路由、LocalFs/XLocalFs、新增后端指南）与 tiered / cloudproxy / duostore（含 redis / sqlite / tikv meta、rados data 引擎）各自的 `*-design.md`；实现层——13 篇实现级详解（数据结构、磁盘/键空间布局、读写流程、并发与崩溃一致性，只有中文） |
 
@@ -43,7 +44,7 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 | [config-reload.md](usage/config-reload.md) | 配置热重载：SIGHUP / admin API / `lights3-ctl reload`，整体校验、可热更新子集与"需重启"报告 |
 | [tls.md](usage/tls.md) | TLS：四驱动 HTTPS、证书热重载、mTLS / cipher / 最低版本 / SNI 多证书、反向代理终结样例 |
 | [monitoring.md](usage/monitoring.md) | 监控消费侧：`deploy/` 下的 Prometheus 抓取配置与告警/recording 规则、Grafana dashboard 及其生成器 |
-| [static-website.md](usage/static-website.md) | 静态网站托管：匿名读语义、index / error 文档、路由规则与对象级重定向、限速 |
+| [static-website.md](usage/static-website.md) | 静态网站托管使用手册：启用方式（YAML / `?website` API / `lights3-ctl`）、配置项对照、匿名访问范围、index / error 文档、重定向、限速、指标与排错 |
 
 配置键的完整说明以 [config/lights3.yaml](../config/lights3.yaml) 的注释为准；项目
 介绍（构建 / 运行 / 当前实现范围）见 [README.zh-CN.md](README.zh-CN.md)。

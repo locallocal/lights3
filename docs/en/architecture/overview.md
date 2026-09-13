@@ -232,7 +232,9 @@ A runnable minimal example lives at `config/lights3.yaml` in the repository root
 
 ```text
 lights3/
-├── CMakeLists.txt  Makefile  build.sh
+├── CMakeLists.txt            # project-wide settings only; every source dir has its own
+├── cmake/                    # Dependencies.cmake (third-party), Packaging, the version stamp
+├── Makefile  build.sh
 ├── config/lights3.yaml       # runnable minimal example config
 ├── docs/                     # architecture/ usage/ development/ archive/ + the en/ mirror
 ├── docker/                   # Dockerfile, compose file and per-backend example configs

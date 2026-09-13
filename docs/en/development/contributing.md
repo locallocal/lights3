@@ -26,6 +26,17 @@ system is detailed in [testing.md](testing.md), performance reproduction in
 
 Layering and the request lifecycle: [architecture/overview.md](../architecture/overview.md).
 
+**Build files live with the code**: the root `CMakeLists.txt` only carries
+project-wide settings (standard, warnings, feature options); every source directory
+has its own `CMakeLists.txt` that adds its translation units with
+`target_sources(lights3_core PRIVATE …)`, along with the third-party links,
+definitions and option checks that directory needs. Adding a `.cc` therefore touches
+**only the `CMakeLists.txt` next to it**; adding a directory means a new
+`CMakeLists.txt` plus an `add_subdirectory()` in the parent. Third-party acquisition
+and trimming stay together in `cmake/Dependencies.cmake` (order-sensitive; its header
+explains why it cannot be split up), and executables declared in subdirectories still
+land in the build root (`build*/lights3`) so scripts and docs keep working.
+
 ## 2. Building
 
 ```bash

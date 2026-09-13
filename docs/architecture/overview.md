@@ -205,7 +205,9 @@ log:
 
 ```text
 lights3/
-├── CMakeLists.txt  Makefile  build.sh
+├── CMakeLists.txt            # 只有项目级设置；每个源码目录有自己的 CMakeLists.txt
+├── cmake/                    # Dependencies.cmake（第三方获取与裁剪）、Packaging、版本戳
+├── Makefile  build.sh
 ├── config/lights3.yaml       # 可运行的最小示例配置
 ├── docs/                     # architecture/ usage/ development/ archive/ + en/ 镜像
 ├── docker/                   # Dockerfile、compose 与各后端示例配置

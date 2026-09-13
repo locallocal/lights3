@@ -33,6 +33,14 @@ std::optional<Versioned<T>> decode(const std::optional<KvItem>& item, const std:
 
 }  // namespace
 
+// The engine's KV round trip is a blocking call -- a local RocksDB/SQLite read, but a
+// network hop on redis / tikv (design §12). Catalog work therefore leaves the HTTP io
+// thread here, exactly like DuoStoreBackend's data path; without a pool (tests, the
+// CLI) the call runs in place
+Task<void> DuoMetaCatalogStore::hop() {
+    if (pool_) co_await pool_->schedule();
+}
+
 std::vector<KvItem> DuoMetaCatalogStore::scan_all(const std::string& prefix) {
     std::vector<KvItem> out;
     std::string after;
@@ -72,6 +80,7 @@ ListPage<std::string> DuoMetaCatalogStore::list_json_names(const std::string& di
 
 Task<std::optional<Versioned<NamespaceEntry>>> DuoMetaCatalogStore::get_namespace(std::string_view bucket,
                                                                                   const Levels& levels) {
+    co_await hop();
     std::string key = Keys::ns_key(bucket, levels);
     auto v = decode<NamespaceEntry>(meta_.kv_get(key), key, namespace_from_json);
     if (v && v->value.levels != levels)
@@ -81,6 +90,7 @@ Task<std::optional<Versioned<NamespaceEntry>>> DuoMetaCatalogStore::get_namespac
 
 Task<ListPage<std::string>> DuoMetaCatalogStore::list_child_namespaces(std::string_view bucket, const Levels& parent,
                                                                        PageCursor cursor) {
+    co_await hop();
     ListPage<std::string> page;
     std::string dir = parent.empty() ? Keys::bucket_root(bucket) + "ns/" : Keys::ns_dir(bucket, parent);
     // one scan per child: read the first key under dir past `after`, take its first
@@ -109,6 +119,7 @@ Task<ListPage<std::string>> DuoMetaCatalogStore::list_child_namespaces(std::stri
 }
 
 Task<bool> DuoMetaCatalogStore::namespace_has_children(std::string_view bucket, const Levels& levels) {
+    co_await hop();
     std::string dir = Keys::ns_dir(bucket, levels);
     std::string marker = dir + "_ns.json";
     std::string tbl = dir + "tbl/";
@@ -134,11 +145,13 @@ Task<bool> DuoMetaCatalogStore::namespace_has_children(std::string_view bucket, 
 
 Task<void> DuoMetaCatalogStore::put_namespace(std::string_view bucket, const NamespaceEntry& e,
                                               storage::PutCondition cond) {
+    co_await hop();
     meta_.kv_put(Keys::ns_key(bucket, e.levels), to_json(e).dump(), cond);
     co_return;
 }
 
 Task<void> DuoMetaCatalogStore::delete_namespace(std::string_view bucket, const Levels& levels) {
+    co_await hop();
     meta_.kv_delete(Keys::ns_key(bucket, levels));
     co_return;
 }
@@ -147,6 +160,7 @@ Task<void> DuoMetaCatalogStore::delete_namespace(std::string_view bucket, const 
 
 Task<std::optional<Versioned<TableEntry>>> DuoMetaCatalogStore::get_table(std::string_view bucket, const Levels& levels,
                                                                           std::string_view name) {
+    co_await hop();
     std::string key = Keys::tbl_key(bucket, levels, name);
     auto v = decode<TableEntry>(meta_.kv_get(key), key, table_from_json);
     if (v && (v->value.levels != levels || v->value.name != name))
@@ -156,15 +170,18 @@ Task<std::optional<Versioned<TableEntry>>> DuoMetaCatalogStore::get_table(std::s
 
 Task<ListPage<std::string>> DuoMetaCatalogStore::list_tables(std::string_view bucket, const Levels& levels,
                                                              PageCursor cursor) {
+    co_await hop();
     co_return list_json_names(Keys::tbl_dir(bucket, levels), cursor);
 }
 
 Task<std::string> DuoMetaCatalogStore::put_table(std::string_view bucket, const Levels& levels, std::string_view name,
                                                  const TableEntry& e, storage::PutCondition cond) {
+    co_await hop();
     co_return meta_.kv_put(Keys::tbl_key(bucket, levels, name), to_json(e).dump(), cond);
 }
 
 Task<void> DuoMetaCatalogStore::delete_table(std::string_view bucket, const Levels& levels, std::string_view name) {
+    co_await hop();
     meta_.kv_delete(Keys::tbl_key(bucket, levels, name));
     co_return;
 }
@@ -174,6 +191,7 @@ Task<void> DuoMetaCatalogStore::delete_table(std::string_view bucket, const Leve
 Task<std::optional<Versioned<CommitRecord>>> DuoMetaCatalogStore::get_commit(std::string_view bucket,
                                                                              std::string_view table_id,
                                                                              std::string_view commit_id) {
+    co_await hop();
     std::string key = Keys::commit_key(bucket, table_id, commit_id);
     auto v = decode<CommitRecord>(meta_.kv_get(key), key, commit_from_json);
     if (v && (v->value.table_id != table_id || v->value.commit_id != commit_id))
@@ -183,11 +201,13 @@ Task<std::optional<Versioned<CommitRecord>>> DuoMetaCatalogStore::get_commit(std
 
 Task<void> DuoMetaCatalogStore::put_commit(std::string_view bucket, std::string_view table_id, const CommitRecord& r,
                                            storage::PutCondition cond) {
+    co_await hop();
     meta_.kv_put(Keys::commit_key(bucket, table_id, r.commit_id), to_json(r).dump(), cond);
     co_return;
 }
 
 Task<std::vector<CommitRecord>> DuoMetaCatalogStore::list_commits(std::string_view bucket, std::string_view table_id) {
+    co_await hop();
     std::vector<CommitRecord> out;
     for (auto& it : scan_all(Keys::commit_dir(bucket, table_id))) {
         std::optional<CommitRecord> r;
@@ -206,6 +226,7 @@ Task<std::vector<CommitRecord>> DuoMetaCatalogStore::list_commits(std::string_vi
 
 Task<void> DuoMetaCatalogStore::delete_commit(std::string_view bucket, std::string_view table_id,
                                               std::string_view commit_id) {
+    co_await hop();
     meta_.kv_delete(Keys::commit_key(bucket, table_id, commit_id));
     co_return;
 }
@@ -214,6 +235,7 @@ Task<void> DuoMetaCatalogStore::delete_commit(std::string_view bucket, std::stri
 
 Task<std::optional<Versioned<RenameIntent>>> DuoMetaCatalogStore::get_rename(std::string_view bucket,
                                                                              std::string_view id) {
+    co_await hop();
     std::string key = Keys::rename_key(bucket, id);
     auto v = decode<RenameIntent>(meta_.kv_get(key), key, rename_from_json);
     if (v && v->value.rename_id != id)
@@ -222,6 +244,7 @@ Task<std::optional<Versioned<RenameIntent>>> DuoMetaCatalogStore::get_rename(std
 }
 
 Task<std::vector<RenameIntent>> DuoMetaCatalogStore::list_renames(std::string_view bucket) {
+    co_await hop();
     std::vector<RenameIntent> out;
     for (auto& it : scan_all(Keys::rename_dir(bucket))) {
         std::optional<RenameIntent> r;
@@ -240,10 +263,12 @@ Task<std::vector<RenameIntent>> DuoMetaCatalogStore::list_renames(std::string_vi
 
 Task<std::string> DuoMetaCatalogStore::put_rename(std::string_view bucket, const RenameIntent& r,
                                                   storage::PutCondition cond) {
+    co_await hop();
     co_return meta_.kv_put(Keys::rename_key(bucket, r.rename_id), to_json(r).dump(), cond);
 }
 
 Task<void> DuoMetaCatalogStore::delete_rename(std::string_view bucket, std::string_view id) {
+    co_await hop();
     meta_.kv_delete(Keys::rename_key(bucket, id));
     co_return;
 }
@@ -253,6 +278,7 @@ Task<void> DuoMetaCatalogStore::delete_rename(std::string_view bucket, std::stri
 Task<std::optional<MaintenanceConfig>> DuoMetaCatalogStore::get_maintenance_config(std::string_view bucket,
                                                                                    const Levels& levels,
                                                                                    std::string_view name) {
+    co_await hop();
     std::string key = Keys::maint_key(bucket, levels, name);
     auto v = decode<MaintenanceConfig>(meta_.kv_get(key), key, maintenance_from_json);
     if (!v) co_return std::nullopt;
@@ -261,12 +287,14 @@ Task<std::optional<MaintenanceConfig>> DuoMetaCatalogStore::get_maintenance_conf
 
 Task<void> DuoMetaCatalogStore::put_maintenance_config(std::string_view bucket, const Levels& levels,
                                                        std::string_view name, const MaintenanceConfig& c) {
+    co_await hop();
     meta_.kv_put(Keys::maint_key(bucket, levels, name), to_json(c).dump(), {});
     co_return;
 }
 
 Task<void> DuoMetaCatalogStore::delete_maintenance_config(std::string_view bucket, const Levels& levels,
                                                           std::string_view name) {
+    co_await hop();
     meta_.kv_delete(Keys::maint_key(bucket, levels, name));
     co_return;
 }
@@ -275,6 +303,7 @@ Task<void> DuoMetaCatalogStore::delete_maintenance_config(std::string_view bucke
 
 Task<std::optional<Versioned<ViewEntry>>> DuoMetaCatalogStore::get_view(std::string_view bucket, const Levels& levels,
                                                                         std::string_view name) {
+    co_await hop();
     std::string key = Keys::view_key(bucket, levels, name);
     auto v = decode<ViewEntry>(meta_.kv_get(key), key, view_from_json);
     if (v && (v->value.levels != levels || v->value.name != name))
@@ -284,15 +313,18 @@ Task<std::optional<Versioned<ViewEntry>>> DuoMetaCatalogStore::get_view(std::str
 
 Task<ListPage<std::string>> DuoMetaCatalogStore::list_views(std::string_view bucket, const Levels& levels,
                                                             PageCursor cursor) {
+    co_await hop();
     co_return list_json_names(Keys::view_dir(bucket, levels), cursor);
 }
 
 Task<std::string> DuoMetaCatalogStore::put_view(std::string_view bucket, const Levels& levels, std::string_view name,
                                                 const ViewEntry& e, storage::PutCondition cond) {
+    co_await hop();
     co_return meta_.kv_put(Keys::view_key(bucket, levels, name), to_json(e).dump(), cond);
 }
 
 Task<void> DuoMetaCatalogStore::delete_view(std::string_view bucket, const Levels& levels, std::string_view name) {
+    co_await hop();
     meta_.kv_delete(Keys::view_key(bucket, levels, name));
     co_return;
 }
@@ -302,6 +334,7 @@ Task<void> DuoMetaCatalogStore::delete_view(std::string_view bucket, const Level
 Task<std::string> DuoMetaCatalogStore::commit_atomic(std::string_view bucket, const Levels& levels,
                                                      std::string_view name, const TableEntry& next,
                                                      storage::PutCondition table_cond, const CommitRecord& committed) {
+    co_await hop();
     std::vector<KvPut> puts;
     puts.push_back({Keys::tbl_key(bucket, levels, name), to_json(next).dump(), table_cond});
     storage::PutCondition fresh;
@@ -315,12 +348,14 @@ Task<std::string> DuoMetaCatalogStore::commit_atomic(std::string_view bucket, co
 // ---------- raw export / import, bucket state ----------
 
 Task<std::vector<RawEntry>> DuoMetaCatalogStore::export_raw(std::string_view bucket) {
+    co_await hop();
     std::vector<RawEntry> out;
     for (auto& it : scan_all(Keys::bucket_root(bucket))) out.push_back({it.key, std::move(it.value)});
     co_return out;
 }
 
 Task<void> DuoMetaCatalogStore::import_raw(std::string_view bucket, const RawEntry& e) {
+    co_await hop();
     if (e.key.rfind(Keys::bucket_root(bucket), 0) != 0)
         throw S3Error(S3ErrorCode::InvalidRequest,
                       "catalog key " + e.key + " does not belong to bucket " + std::string(bucket));
@@ -329,11 +364,13 @@ Task<void> DuoMetaCatalogStore::import_raw(std::string_view bucket, const RawEnt
 }
 
 Task<void> DuoMetaCatalogStore::delete_bucket_state(std::string_view bucket) {
+    co_await hop();
     for (auto& it : scan_all(Keys::bucket_root(bucket))) meta_.kv_delete(it.key);
     co_return;
 }
 
 Task<bool> DuoMetaCatalogStore::bucket_state_empty(std::string_view bucket) {
+    co_await hop();
     std::string root = Keys::bucket_root(bucket) + "ns/";
     for (auto& it : scan_all(root)) {
         std::string rel = it.key.substr(root.size());

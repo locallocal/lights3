@@ -3616,6 +3616,106 @@
           "refId": "B"
         }
       ]
+    },
+    {
+      "type": "timeseries",
+      "id": 70,
+      "title": "Maintenance bytes deleted",
+      "description": "Expired metadata, orphans and purged tables, as deleted by maintenance runs (design \u00a79); zero while maintenance.delete_enabled is off",
+      "gridPos": {
+        "x": 12,
+        "y": 246,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "expr": "sum (rate(lights3_tables_maintenance_deleted_bytes_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "deleted / s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 71,
+      "title": "Commit records awaiting finalization",
+      "description": "Records a diagnosis found STAGED while the pointer had already moved: POST .../catalog/recovery writes them COMMITTED (design \u00a75.4). Only tables this process diagnosed are counted",
+      "gridPos": {
+        "x": 0,
+        "y": 254,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "expr": "sum (lights3_tables_finalization_gaps{instance=~\"$instance\"})",
+          "legendFormat": "gaps",
+          "refId": "A"
+        }
+      ]
     }
   ]
 }

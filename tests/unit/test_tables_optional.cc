@@ -7,6 +7,7 @@
 #include "core/config.h"
 #include "storage/memory/memory_backend.h"
 #include "tables/catalog.h"
+#include "tables/fsck.h"
 #include "tables/iceberg/metadata.h"
 #include "tables/iceberg/view_metadata.h"
 #include "tables/maintenance.h"
@@ -193,6 +194,96 @@ void view_lifecycle(Env& env) {
 
 }  // namespace
 
+namespace {
+
+storage::BucketRouter router_of(const std::shared_ptr<storage::MemoryBackend>& backend) {
+    std::map<std::string, std::shared_ptr<storage::IStorageBackend>> bmap{{"mem", backend}};
+    BucketsConfig bcfg;
+    bcfg.default_backend = "mem";
+    return storage::BucketRouter::build(bcfg, std::move(bmap));
+}
+
+std::map<std::string, int> finding_kinds(const ReconcileReport& rep) {
+    std::map<std::string, int> kinds;
+    for (auto& f : rep.findings) ++kinds[f.kind];
+    return kinds;
+}
+
+}  // namespace
+
+// fsck walks view entries too (design §16 ⑥): a missing metadata object, an entry that does
+// not parse, and the two-live-names window a crashed rename leaves (views have no
+// intent to replay, so the report is the only way to find it)
+TEST(tables_fsck_covers_views) {
+    Env env;
+    sync_wait(env.catalog->create_view("tbk", ns({"n"}), env.view_req("v")));
+    auto w = sync_wait(env.catalog->create_view("tbk", ns({"n"}), env.view_req("w")));
+    auto rep = sync_wait(reconcile_catalog(env.backend, router_of(env.backend)));
+    CHECK_EQ(rep.views, uint64_t(2));
+    CHECK_EQ(rep.tables, uint64_t(0));
+    CHECK(rep.findings.empty());
+    CHECK_EQ(rep.to_json()["views"].get<uint64_t>(), uint64_t(2));
+    // a rename that crashed after writing the destination: one uuid, two live names
+    auto src = sync_wait(env.store->get_view("tbk", ns({"n"}), "v"));
+    ViewEntry dup = src->value;
+    dup.name = "v2";
+    storage::PutCondition fresh;
+    fresh.if_none_match = true;
+    sync_wait(env.store->put_view("tbk", ns({"n"}), "v2", dup, fresh));
+    // a view whose metadata object is gone
+    sync_wait(env.backend->delete_object("tbk", w.entry.metadata_location));
+    // an entry that does not parse
+    {
+        storage::ObjectMeta meta;
+        http::StringBodyReader r(R"({"nope":1})");
+        sync_wait(
+            env.backend->put_object(".sys", ObjectCatalogStore::view_key("tbk", ns({"n"}), "bad"), std::move(meta), r));
+    }
+    rep = sync_wait(reconcile_catalog(env.backend, router_of(env.backend)));
+    auto kinds = finding_kinds(rep);
+    CHECK_EQ(kinds["tables.duplicate_view"], 1);
+    CHECK_EQ(kinds["tables.dangling_pointer"], 1);
+    CHECK_EQ(kinds["tables.malformed_entry"], 1);
+    for (auto& f : rep.findings)
+        if (f.kind == "tables.duplicate_view") {
+            CHECK(f.detail.find("n.v") != std::string::npos);
+            CHECK(f.detail.find("n.v2") != std::string::npos);
+        }
+    // dropping the stale name closes the window; tombstones are not live entries
+    sync_wait(env.catalog->drop_view("tbk", ns({"n"}), "v2"));
+    rep = sync_wait(reconcile_catalog(env.backend, router_of(env.backend)));
+    CHECK_EQ(finding_kinds(rep)["tables.duplicate_view"], 0);
+}
+
+// A view's consistency story is "the pointer names an object that exists"; diagnostics
+// reports that plus the versions the pointer no longer names (design §16 ⑥)
+TEST(tables_view_diagnostics) {
+    Env env;
+    auto v = sync_wait(env.catalog->create_view("tbk", ns({"n"}), env.view_req("v")));
+    auto d = sync_wait(env.catalog->diagnose_view("tbk", ns({"n"}), "v"));
+    CHECK(d.metadata_present);
+    CHECK_EQ(d.entry.view_uuid, v.entry.view_uuid);
+    CHECK_EQ(d.etag, v.etag);
+    CHECK(d.unreferenced_metadata.empty());
+    // a replace leaves the previous version file behind
+    json updates = json::array({
+        json::parse(R"({"action":"set-properties","updates":{"comment":"d"}})"),
+    });
+    auto r = sync_wait(env.catalog->replace_view("tbk", ns({"n"}), "v", json::array(), updates));
+    d = sync_wait(env.catalog->diagnose_view("tbk", ns({"n"}), "v"));
+    CHECK(d.metadata_present);
+    CHECK(d.unreferenced_metadata == (std::vector<std::string>{v.entry.metadata_location}));
+    // what a crashed replace looks like from the outside: the pointer's target is gone
+    sync_wait(env.backend->delete_object("tbk", r.entry.metadata_location));
+    d = sync_wait(env.catalog->diagnose_view("tbk", ns({"n"}), "v"));
+    CHECK(!d.metadata_present);
+    json j = d.to_json("tbk");
+    CHECK_EQ(j["metadata-present"].get<bool>(), false);
+    CHECK_EQ(j["view"]["metadata_location"].get<std::string>().rfind("s3://tbk/.lights3-table/", 0), size_t(0));
+    CHECK_EQ(j["unreferenced-metadata"].size(), size_t(1));
+    CHECK_EQ(status_of([&] { sync_wait(env.catalog->diagnose_view("tbk", ns({"n"}), "nope")); }), 404);
+}
+
 TEST(tables_catalog_store_suite_object) {
     auto backend = std::make_shared<storage::MemoryBackend>();
     catalog_store_suite::run([backend] { return std::make_shared<ObjectCatalogStore>(backend); });
@@ -366,9 +457,14 @@ struct RocksMetaHolder {
 
 }  // namespace
 
+// With a pool, every KV call hops onto a pool thread (design §12): the suite runs the
+// whole store surface through that path, so a missing co_await or a resumption on the
+// wrong thread shows up here
 TEST(tables_catalog_store_suite_duostore_rocksdb) {
     RocksMetaHolder h;
-    catalog_store_suite::run([&] { return std::make_shared<DuoMetaCatalogStore>(*h.meta); });
+    auto pool = std::make_shared<ThreadPool>(2);
+    catalog_store_suite::run([&] { return std::make_shared<DuoMetaCatalogStore>(*h.meta, pool); });
+    pool->join();
 }
 
 TEST(tables_views_lifecycle_duostore_backing) {

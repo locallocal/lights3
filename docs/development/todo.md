@@ -4,8 +4,7 @@
 分期保留项已按 [archive/backlog-sequence.md](../archive/backlog-sequence.md) 于
 2026-09-06 全部完成，两份文件随之归档，源码注释里的 `backlog §N` /
 `backlog-sequence ①…⑩` 指归档文件的对应章节）。本文**只列尚未做的事**：
-外部依赖的收尾、代码已落地但本机无法验证的项、S3 Tables 收尾项、长期项与
-明确不做清单。做完一项就从本文删除，实现细节写进对应设计文档，不保留划线
+外部依赖的收尾、代码已落地但本机无法验证的项、长期项与明确不做清单。做完一项就从本文删除，实现细节写进对应设计文档，不保留划线
 历史。每条标 **价值**（高/中/低）与 **难度**（低/中/高）。
 
 ## 1. 外部依赖的收尾
@@ -25,16 +24,7 @@
 | mint 兼容基线 | roadmap §6.1，[testing.md §6](testing.md) | 有 docker 的机器跑 `ctest -R mint -V`，把每套件 PASS/FAIL/NA 计数记入 testing.md §6 |
 | S3 Tables 的 Spark / Trino 人工验证 | [s3-tables-design.md §13](../architecture/s3-tables-design.md) | 本机只有 PyIceberg / DuckDB 冒烟通过（testing.md §6），无 Spark / Trino：按 §13 模板配 `rest.sigv4-enabled` 走一遍建表 / append / `rewrite_data_files`（Spark）与 SIGV4 读写（Trino），结果记 testing.md §6；顺带把 Spark 写出的 manifest（负块计数）作为固件入 `tests/fixtures/tables/`（现有固件全部由 PyIceberg 生成） |
 
-## 3. S3 Tables 收尾项（[s3-tables-design.md](../architecture/s3-tables-design.md) ①–⑥ 已实现，以下是实现记录里留下的缺口）
-
-| 条目 | 出处 | 现状与入口 | 价值 | 难度 |
-| --- | --- | --- | --- | --- |
-| view 的诊断与 fsck 对账 | [s3-tables-design.md §16 ⑥](../architecture/s3-tables-design.md) | `rename_view` 是"先写目标、再把源改墓碑"两步且无 intent，中间崩溃留下源与目标同时 Active 的双份；`reconcile_catalog`（`tables/fsck.cc`）与 `catalog/diagnostics` 都不看 `view/` 目录。入口：fsck 对 view 条目做 `tables.malformed_entry` 与"同一 view uuid 出现两次"两项发现，diagnostics 对 view 至少核对 metadata 指针存在 | 中 | 低 |
-| gzip 压缩的 metadata.json | [s3-tables-design.md §16 ①](../architecture/s3-tables-design.md)（① 留给 ③） | `.metadata.json.gz` 仍回 406 `compressed metadata files are not supported`（③ 引入的 zlib 只用于 Avro deflate 块）；Spark `write.metadata.compression-codec=gzip` 写出的表无法 register / LoadTable。入口：`Catalog` 读 metadata 处在 `LIGHTS3_TABLES_ZLIB` 下 inflate（仍受 50 MiB 上限），写侧保持不压缩 | 中 | 低 |
-| 设计 §13 两个指标未加 | [s3-tables-design.md §13](../architecture/s3-tables-design.md) | `lights3_tables_maintenance_deleted_bytes_total`（run 作业 `stats` 里已有 `deleted_bytes`）与 `lights3_tables_finalization_gaps` gauge（diagnostics 结果里已有计数）没接 `MetricsScope`；告警组 `lights3.tables` 只用 commits / requests / validation。入口：`maintenance.cc` 的 run 收尾与 `diagnostics.cc` 的汇总各加一处，`gen_dashboard.py` 加面板 | 低 | 低 |
-| `DuoMetaCatalogStore` 的 KV 调用同步阻塞 | [s3-tables-design.md §16 ⑥](../architecture/s3-tables-design.md) | redis / tikv 引擎的网络往返在调用线程（HTTP 工作线程）上执行；目录写路径量小且按表串行，暂可接受。入口：与 `DuoStoreBackend` 一致，经 `pool->schedule()` 挪到池线程，或给 `IMetaStore` 加异步 KV 面 | 低 | 中 |
-
-## 4. 长期 / 架构级（先想清目标场景再动）
+## 3. 长期 / 架构级（先想清目标场景再动）
 
 | 条目 | 说明 |
 | --- | --- |
@@ -45,7 +35,7 @@
 | 客户端断连独立取消源 | 刻意取舍：长 handler 靠 `request_timeout` 兜底，驱动在下一次 socket 操作时发现断连（[http-adapter.md §2.3](../architecture/http-adapter.md)） |
 | Iceberg 多表事务 `/transactions/commit` | [s3-tables-design.md §15](../architecture/s3-tables-design.md) 原写"duostore-meta 后备落地后再议"，⑥ 已落地：`kv_put_batch` 一批可写多张表的指针 + 记录，原子性条件已满足；缺的是端点本身、跨表 requirements 的组合校验、对象后备（做不到）下的拒绝方式（406）与引擎侧开关的对接（DuckDB 模板里的 `DISABLE_MULTI_TABLE_COMMIT`）。先确认有引擎真的需要再动 |
 
-## 5. 明确不做
+## 4. 明确不做
 
 | 条目 | 理由 |
 | --- | --- |
@@ -58,7 +48,7 @@
 | CivetWeb 等新 HTTP 驱动 | 四驱动已覆盖设计空间（[http-adapter.md §3.4](../architecture/http-adapter.md)） |
 | GitHub Actions CI | 项目已明确移除、不使用；自动化投入放在本地脚本矩阵（`scripts/check-all.sh`，[testing.md §8](testing.md)） |
 
-## 6. 维护约定
+## 5. 维护约定
 
 - 新条目须给出**出处 / 入口 / 价值 / 难度**；做完即删，实现写进对应设计文档。
 - 源码注释继续用 `roadmap §N`、`backlog §N`、`backlog-sequence ①…⑩` 引用归档文件的

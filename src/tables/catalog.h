@@ -76,6 +76,15 @@ public:
     storage::IStorageBackend& bucket_backend(std::string_view bucket) { return router_.resolve(bucket); }
     const std::shared_ptr<TableBucketStore>& bucket_store() const { return buckets_; }
 
+    // ---- maintenance / recovery observability (design §13) ----
+    // Bytes a maintenance run or a purge actually deleted; called by maintenance.cc,
+    // which has no MetricsScope of its own (it works through the Catalog)
+    void note_maintenance_deleted(uint64_t bytes);
+    // Commit records that need finalization, as of the last diagnosis of this table.
+    // The gauge is the sum over every table diagnosed by this process: a non-zero
+    // value means POST …/catalog/recovery has work to do (design §5.4)
+    void note_finalization_gaps(std::string_view bucket, std::string_view table_id, size_t gaps);
+
     // ---- table buckets (root only; the caller checks) ----
     Task<TableBucketEntry> enable_bucket(std::string_view bucket);
     Task<void> disable_bucket(std::string_view bucket);
@@ -147,6 +156,7 @@ public:
 
     // ---- diagnostics and recovery (design §5.4, step ③ §6–§7) ----
     Task<TableDiagnostics> diagnose(std::string_view bucket, const Levels& levels, std::string_view name);
+    Task<ViewDiagnostics> diagnose_view(std::string_view bucket, const Levels& levels, std::string_view name);
     Task<RecoveryReport> recover(std::string_view bucket, const Levels& levels, std::string_view name, bool prune);
     // drive every pending rename intent of the bucket (writers do this on entry; exposed
     // for the CLI and tests). Returns the number driven
@@ -190,6 +200,7 @@ private:
     static constexpr unsigned kRenameRecoveryEvery = 32;
     iceberg::DeepCheckOptions deep_options() const;
     std::string metadata_dir(const TableBucketEntry& tb, const Levels& levels, std::string_view name) const;
+    std::string view_metadata_dir(const TableBucketEntry& tb, const Levels& levels, std::string_view name) const;
     // a name is either a table or a view in its namespace (step ⑥ §1)
     Task<void> require_name_free(std::string_view bucket, const Levels& levels, std::string_view name, bool for_view);
     Task<Versioned<ViewEntry>> require_view(std::string_view bucket, const Levels& levels, std::string_view name);
@@ -209,7 +220,14 @@ private:
     MetricsScope metrics_;
     std::shared_ptr<MetricCounter> commits_ok_, commits_conflict_, commits_error_;
     std::shared_ptr<MetricCounter> validation_files_, validation_skipped_;
+    std::shared_ptr<MetricCounter> maintenance_deleted_bytes_;
+    std::shared_ptr<MetricGauge> finalization_gaps_;
     std::shared_ptr<MetricHistogram> commit_seconds_;
+
+    // bucket/table_id → gaps at its last diagnosis; the gauge is their sum (one small
+    // entry per diagnosed table, and admin-plane diagnosis is rare)
+    std::mutex gaps_mu_;
+    std::map<std::string, size_t> gaps_;
 
     std::mutex locks_mu_;
     std::map<std::string, std::shared_ptr<TableLock>> locks_;

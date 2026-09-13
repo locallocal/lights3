@@ -103,6 +103,7 @@ struct RunReport {
     int deleted_metadata = 0;
     int deleted_orphans = 0;
     int skipped = 0;
+    uint64_t deleted_bytes = 0;
     bool delete_enabled = false;
     // generation after the expiry commit (0 = no commit)
     uint64_t generation = 0;

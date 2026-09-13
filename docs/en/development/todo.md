@@ -6,8 +6,8 @@ its ten deferred items of §1 were all completed by 2026-09-06 in the order of
 like the other archived ledgers; `backlog §N` / `backlog-sequence ①…⑩` in source
 comments refer to their sections). This document lists **only what is not
 done**: follow-ups that wait on an external party, code that is in place but
-could not be verified on the development box, S3 Tables loose ends, long-term
-items, and the explicit not-planned list.
+could not be verified on the development box, long-term items, and the explicit
+not-planned list.
 Delete an item when it is done and write the implementation into the relevant
 design document -- no struck-through history here. Each entry carries
 **value** (high/medium/low) and **difficulty** (low/medium/high).
@@ -29,16 +29,7 @@ design document -- no struck-through history here. Each entry carries
 | mint compatibility baseline | roadmap §6.1, [testing.md §6](testing.md) | A machine with docker: `ctest -R mint -V`, record the per-suite PASS/FAIL/NA counts in testing.md §6 |
 | S3 Tables manual verification with Spark / Trino | [s3-tables-design.md §13](../architecture/s3-tables-design.md) | Only the PyIceberg / DuckDB smoke passed here (testing.md §6); no Spark / Trino on this box: configure `rest.sigv4-enabled` from the §13 templates, walk through create / append / `rewrite_data_files` (Spark) and SIGV4 read-write (Trino), record the result in testing.md §6; also add a Spark-written manifest (negative block counts) to `tests/fixtures/tables/` (every fixture there is PyIceberg-generated) |
 
-## 3. S3 Tables loose ends ([s3-tables-design.md](../architecture/s3-tables-design.md) ①–⑥ are implemented; these are the gaps the implementation notes left behind)
-
-| Item | Source | State and entry point | Value | Difficulty |
-| --- | --- | --- | --- | --- |
-| Diagnostics and fsck reconciliation for views | [s3-tables-design.md §16 ⑥](../architecture/s3-tables-design.md) | `rename_view` is a two-step "write the destination, then tombstone the source" without an intent, so a crash in between leaves both entries Active; neither `reconcile_catalog` (`tables/fsck.cc`) nor `catalog/diagnostics` looks at the `view/` directory. Entry: fsck findings `tables.malformed_entry` for view entries and "the same view uuid twice", diagnostics at least checks that the view's metadata pointer exists | medium | low |
-| gzip-compressed metadata.json | [s3-tables-design.md §16 ①](../architecture/s3-tables-design.md) (① deferred it to ③) | `.metadata.json.gz` still answers 406 `compressed metadata files are not supported` (the zlib that ③ introduced only inflates Avro deflate blocks); tables written by Spark with `write.metadata.compression-codec=gzip` cannot be registered or loaded. Entry: inflate in the `Catalog` metadata read under `LIGHTS3_TABLES_ZLIB` (the 50 MiB cap still applies), keep writing uncompressed | medium | low |
-| Two metrics of design §13 not wired | [s3-tables-design.md §13](../architecture/s3-tables-design.md) | `lights3_tables_maintenance_deleted_bytes_total` (the run job's `stats` already carries `deleted_bytes`) and the `lights3_tables_finalization_gaps` gauge (the diagnostics result already counts them) are not on the `MetricsScope`; the `lights3.tables` alert group only uses commits / requests / validation. Entry: one line at the end of run in `maintenance.cc` and in the summary of `diagnostics.cc`, plus a panel in `gen_dashboard.py` | low | low |
-| `DuoMetaCatalogStore` KV calls block the caller | [s3-tables-design.md §16 ⑥](../architecture/s3-tables-design.md) | The redis / tikv network round trips run on the calling (HTTP worker) thread; the catalog write path is small and serialized per table, so acceptable for now. Entry: hop to a pool thread via `pool->schedule()` as `DuoStoreBackend` does, or add an asynchronous KV facade to `IMetaStore` | low | medium |
-
-## 4. Long-term / architectural (settle the target scenario first)
+## 3. Long-term / architectural (settle the target scenario first)
 
 | Item | Notes |
 | --- | --- |
@@ -49,7 +40,7 @@ design document -- no struck-through history here. Each entry carries
 | Independent cancellation source on client disconnect | A deliberate trade-off: long handlers are bounded by `request_timeout`, drivers notice the disconnect at the next socket operation ([http-adapter.md §2.3](../architecture/http-adapter.md)) |
 | Iceberg multi-table transactions `/transactions/commit` | [s3-tables-design.md §15](../architecture/s3-tables-design.md) said "revisit once the duostore-meta backing exists"; ⑥ delivered it: one `kv_put_batch` can write the pointers + records of several tables, so atomicity is available. Missing: the endpoint itself, combined validation of requirements across tables, the refusal on the object backing (406, which cannot do it) and the engine-side switches (`DISABLE_MULTI_TABLE_COMMIT` in the DuckDB template). Confirm an engine actually needs it before starting |
 
-## 5. Explicitly not planned
+## 4. Explicitly not planned
 
 | Item | Reason |
 | --- | --- |
@@ -62,7 +53,7 @@ design document -- no struck-through history here. Each entry carries
 | CivetWeb or other new HTTP drivers | The four drivers cover the design space ([http-adapter.md §3.4](../architecture/http-adapter.md)) |
 | GitHub Actions CI | Deliberately removed; automation investment goes into the local script matrix (`scripts/check-all.sh`, [testing.md §8](testing.md)) |
 
-## 6. Maintenance rules
+## 5. Maintenance rules
 
 - A new entry states its **source / entry point / value / difficulty**; delete
   it when done and write the implementation into the design document.

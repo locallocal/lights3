@@ -5,6 +5,7 @@
 #include <future>
 #include <nlohmann/json.hpp>
 #include <set>
+#include <sstream>
 #include <thread>
 
 #include "app/admin_jobs.h"
@@ -33,7 +34,7 @@ struct Env {
     std::shared_ptr<Catalog> catalog;
     TablesConfig cfg;
 
-    explicit Env(int metadata_log_keep = 100) {
+    explicit Env(int metadata_log_keep = 100, MetricsScope ms = MetricsScope{}) : metrics(std::move(ms)) {
         cfg.enabled = true;
         cfg.metadata_log_keep = metadata_log_keep;
         std::map<std::string, std::shared_ptr<storage::IStorageBackend>> bmap{{"mem", backend}};
@@ -42,7 +43,7 @@ struct Env {
         auto router = storage::BucketRouter::build(bcfg, std::move(bmap));
         buckets = sync_wait(TableBucketStore::load(backend));
         store = std::make_shared<ObjectCatalogStore>(backend);
-        catalog = std::make_shared<Catalog>(store, buckets, router, nullptr, cfg, MetricsScope{});
+        catalog = std::make_shared<Catalog>(store, buckets, router, nullptr, cfg, metrics);
         sync_wait(backend->create_bucket("tbk"));
         sync_wait(catalog->enable_bucket("tbk"));
         sync_wait(catalog->create_namespace("tbk", ns({"n"}), {}));
@@ -106,6 +107,7 @@ struct Env {
                          std::to_string(snap) + "}")});
         return sync_wait(catalog->commit_table("tbk", ns({"n"}), name, c, {}));
     }
+    MetricsScope metrics;
     PlannerOptions opts(int retain = 2, int window = 900) {
         PlannerOptions o;
         o.retain_recent = retain;
@@ -335,6 +337,53 @@ TEST(tables_maintenance_run_gates) {
     CHECK_EQ(rep.deleted_metadata, 0);
     CHECK_EQ(rep.skipped, 1);
     CHECK(env.exists(dir + "00000-old2.metadata.json"));
+}
+
+namespace {
+
+// The value of a metric family in the registry's exposition (sum over its children)
+double metric_value(MetricsRegistry& reg, const std::string& name) {
+    std::istringstream in(reg.render());
+    double total = 0;
+    for (std::string line; std::getline(in, line);) {
+        if (line.empty() || line[0] == '#') continue;
+        size_t end = line.find_first_of("{ ");
+        if (end == std::string::npos || line.substr(0, end) != name) continue;
+        size_t sp = line.rfind(' ');
+        if (sp != std::string::npos) total += std::stod(line.substr(sp + 1));
+    }
+    return total;
+}
+
+}  // namespace
+
+// The counter of design §13: whatever a run or a purge actually removed, in bytes
+TEST(tables_maintenance_deleted_bytes_metric) {
+    auto reg = std::make_shared<MetricsRegistry>();
+    Env env(100, MetricsScope(reg, {{"feature", "tables"}}));
+    env.create();
+    env.commit(1, "n/t/metadata/ml-1.avro");
+    env.commit(2, "n/t/metadata/ml-2.avro", 1);
+    // an orphan of a known size, old enough for the safety window
+    env.put("n/t/data/stray.parquet", std::string(512, 'z'));
+    env.age_all(".lights3-table/n/t/metadata/");
+    env.age_all("n/t/data/");
+    MaintenancePlan p = env.plan(env.opts(1));
+    RunOptions ro;
+    ro.delete_enabled = true;
+    RunReport rep = sync_wait(run_table(*env.catalog, p, ro, now_unix()));
+    CHECK(rep.deleted_metadata + rep.deleted_orphans > 0);
+    CHECK(rep.deleted_bytes >= 512);
+    CHECK_EQ(metric_value(*reg, "lights3_tables_maintenance_deleted_bytes_total"),
+             static_cast<double>(rep.deleted_bytes));
+    CHECK_EQ(rep.to_json()["deleted_bytes"].get<uint64_t>(), rep.deleted_bytes);
+    // a purge adds its own bytes to the same counter
+    double before = metric_value(*reg, "lights3_tables_maintenance_deleted_bytes_total");
+    sync_wait(env.catalog->drop_table("tbk", ns({"n"}), "t"));
+    PurgeReport pr = sync_wait(purge_table(*env.catalog, "tbk", ns({"n"}), "t", ro));
+    CHECK(pr.deleted_bytes > 0);
+    CHECK_EQ(metric_value(*reg, "lights3_tables_maintenance_deleted_bytes_total"),
+             before + static_cast<double>(pr.deleted_bytes));
 }
 
 TEST(tables_maintenance_purge) {

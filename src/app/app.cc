@@ -124,7 +124,7 @@ void Application::start_server() {
             auto raw = backends_.find(cfg_.buckets.default_backend);
             auto* duo = raw == backends_.end() ? nullptr : dynamic_cast<storage::DuoStoreBackend*>(raw->second.get());
             if (!duo) throw std::runtime_error("tables.catalog_backing duostore needs a duostore default backend");
-            cat_store = std::make_shared<tables::DuoMetaCatalogStore>(duo->meta());
+            cat_store = std::make_shared<tables::DuoMetaCatalogStore>(duo->meta(), pool_);
             LOG_INFO("tables: catalog state on the duostore meta engine of '{}' (transactional commits)",
                      cfg_.buckets.default_backend);
 #else

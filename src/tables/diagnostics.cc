@@ -83,6 +83,16 @@ Task<Classified> classify(ITableCatalogStore& store, std::string_view bucket, co
     co_return out;
 }
 
+Task<bool> object_exists(storage::IStorageBackend& backend, std::string_view bucket, std::string_view key) {
+    try {
+        co_await backend.head_object(bucket, key);
+    } catch (const S3Error& e) {
+        if (is_missing(e)) co_return false;
+        throw;
+    }
+    co_return true;
+}
+
 Task<std::string> read_text(storage::IStorageBackend& backend, std::string_view bucket, std::string_view key,
                             size_t max) {
     storage::ObjectStream stream;
@@ -213,6 +223,7 @@ Task<RecoveryReport> recover_table(ITableCatalogStore& store, std::string_view b
                                    std::string_view name, bool prune) {
     Classified c = co_await classify(store, bucket, levels, name);
     RecoveryReport rep;
+    rep.table_id = c.entry.table_id;
     for (auto& d : c.commits) {
         switch (d.state) {
             case CommitState::FinalizationRequired: {
@@ -238,6 +249,44 @@ Task<RecoveryReport> recover_table(ITableCatalogStore& store, std::string_view b
         }
     }
     co_return rep;
+}
+
+// ---------- views (design §6.3) ----------
+
+json ViewDiagnostics::to_json(std::string_view bucket) const {
+    json j;
+    json e = tables::to_json(entry);
+    e["metadata_location"] = key_to_location(bucket, entry.metadata_location);
+    e["etag"] = etag;
+    j["view"] = e;
+    j["metadata-present"] = metadata_present;
+    j["unreferenced-metadata"] = json::array();
+    for (auto& k : unreferenced_metadata) j["unreferenced-metadata"].push_back(key_to_location(bucket, k));
+    return j;
+}
+
+Task<ViewDiagnostics> diagnose_view(ITableCatalogStore& store, storage::IStorageBackend& bucket_backend,
+                                    std::string_view bucket, const Levels& levels, std::string_view name,
+                                    std::string_view metadata_dir) {
+    auto cur = co_await store.get_view(bucket, levels, name);
+    if (!cur) throw not_found_view("view " + ns_display(levels) + "." + std::string(name) + " does not exist");
+    ViewDiagnostics out;
+    out.entry = cur->value;
+    out.etag = cur->etag;
+    out.metadata_present = co_await object_exists(bucket_backend, bucket, out.entry.metadata_location);
+    // A view's metadata is a chain of numbered files with only the newest referenced;
+    // the version-log inside names version ids, not files, so everything else in the
+    // directory is history (or debris from a crashed replace)
+    storage::ListOptions opt;
+    opt.prefix = std::string(metadata_dir);
+    for (;;) {
+        auto page = co_await bucket_backend.list_objects(bucket, opt);
+        for (auto& o : page.objects)
+            if (o.key != out.entry.metadata_location) out.unreferenced_metadata.push_back(o.key);
+        if (!page.is_truncated) break;
+        opt.start_after = page.next_token;
+    }
+    co_return out;
 }
 
 // ---------- rename driver (design §5.6) ----------

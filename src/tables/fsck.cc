@@ -1,5 +1,6 @@
 #include "tables/fsck.h"
 
+#include <map>
 #include <set>
 
 #include "core/log.h"
@@ -66,14 +67,15 @@ struct TableRef {
     std::string name;
 };
 
-// "tables-catalog/<bucket>/ns/a/b/tbl/t.json" → {a,b}, t
-std::optional<TableRef> table_ref(const std::string& key, const std::string& bucket) {
+// "tables-catalog/<bucket>/ns/a/b/<dir>/t.json" → {a,b}, t. dir is "/tbl/" or "/view/",
+// so the same walk classifies both entity kinds under one listing
+std::optional<TableRef> entry_ref(const std::string& key, const std::string& bucket, std::string_view dir) {
     std::string root = ObjectCatalogStore::bucket_root(bucket) + "ns/";
     if (key.rfind(root, 0) != 0) return std::nullopt;
     std::string rel = key.substr(root.size());
-    auto tbl = rel.find("/tbl/");
+    auto tbl = rel.find(dir);
     if (tbl == std::string::npos) return std::nullopt;
-    std::string file = rel.substr(tbl + 5);
+    std::string file = rel.substr(tbl + dir.size());
     if (file.size() < 5 || file.substr(file.size() - 5) != ".json" || file.find('/') != std::string::npos)
         return std::nullopt;
     TableRef r;
@@ -96,6 +98,7 @@ json ReconcileReport::to_json() const {
     json j;
     j["table_buckets"] = table_buckets;
     j["tables"] = tables;
+    j["views"] = views;
     j["intents"] = intents;
     j["findings"] = json::array();
     for (auto& f : findings) j["findings"].push_back({{"kind", f.kind}, {"bucket", f.bucket}, {"detail", f.detail}});
@@ -138,9 +141,36 @@ Task<ReconcileReport> reconcile_catalog(std::shared_ptr<storage::IStorageBackend
             note("tables.malformed_entry", bucket, std::string("rename intents unreadable: ") + e.message);
         }
         for (auto& i : intents) intent_ids.insert(i.rename_id);
+        // view uuid → the first live name carrying it, for the duplicate check below
+        std::map<std::string, std::string> view_uuids;
         for (auto& key : co_await sys_keys(*sys_backend, ObjectCatalogStore::bucket_root(bucket) + "ns/")) {
-            auto ref = table_ref(key, bucket);
-            if (!ref) continue;
+            auto ref = entry_ref(key, bucket, "/tbl/");
+            if (!ref) {
+                // views (design §6.3): the entry, its metadata pointer, and the
+                // two-live-names window a crashed rename leaves behind
+                auto vref = entry_ref(key, bucket, "/view/");
+                if (!vref) continue;
+                ++rep.views;
+                std::optional<Versioned<ViewEntry>> v;
+                try {
+                    v = co_await store.get_view(bucket, vref->levels, vref->name);
+                } catch (const S3Error& err) {
+                    note("tables.malformed_entry", bucket, key + ": " + err.message);
+                    continue;
+                }
+                if (!v || v->value.state == TableState::Deleted) continue;
+                std::string vident = ns_display(vref->levels) + "." + vref->name;
+                if (!co_await object_exists(backend, bucket, v->value.metadata_location))
+                    note(
+                        "tables.dangling_pointer", bucket,
+                        "view " + vident + " points at missing " + key_to_location(bucket, v->value.metadata_location));
+                auto [slot, fresh] = view_uuids.emplace(v->value.view_uuid, vident);
+                if (!fresh)
+                    note("tables.duplicate_view", bucket,
+                         "view uuid " + v->value.view_uuid + " is live under both " + slot->second + " and " + vident +
+                             ": a rename crashed before the source was tombstoned; drop the stale name");
+                continue;
+            }
             ++rep.tables;
             std::optional<Versioned<TableEntry>> e;
             try {

@@ -35,7 +35,7 @@ std::shared_ptr<lights3::tables::ITableCatalogStore> open_store(lights3::Applica
 #ifdef LIGHTS3_DUOSTORE
         auto* duo = dynamic_cast<storage::DuoStoreBackend*>(it->second.get());
         if (!duo) throw std::runtime_error("tables: catalog_backing duostore needs a duostore default backend");
-        return std::make_shared<tables::DuoMetaCatalogStore>(duo->meta());
+        return std::make_shared<tables::DuoMetaCatalogStore>(duo->meta(), app.pool());
 #else
         throw std::runtime_error("tables: catalog_backing duostore needs a build with duostore");
 #endif

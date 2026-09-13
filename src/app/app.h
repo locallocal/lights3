@@ -87,6 +87,8 @@ public:
     // file that fails validation changes nothing
     ConfigReloadReport reload_config();
     const std::map<std::string, std::shared_ptr<storage::IStorageBackend>>& backends() const { return backends_; }
+    // blocking-IO pool (stage 1); the tables CLI hands it to the catalog store
+    const std::shared_ptr<ThreadPool>& pool() const { return pool_; }
     // The assembled L2 service (null before start_server): tests drive dispatch
     // directly instead of running the listener
     const std::shared_ptr<s3::S3Service>& service() const { return service_; }

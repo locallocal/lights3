@@ -193,11 +193,16 @@ Dispatches on the actual type of `<backend>`:
   markers in `.sys/tables/` and the catalog state in `.sys/tables-catalog/<bucket>/` are
   checked against the table buckets themselves: `tables.orphan_state` (the bucket behind a
   marker or catalog state does not exist / is not enabled), `tables.dangling_pointer` (a
-  table pointer names a metadata object that does not exist), `tables.stale_renaming` (a
-  table is RENAMING but its intent is gone), `tables.inconsistent_rename` (the intent's
-  phase disagrees with the source / destination entries), `tables.malformed_entry`.
-  Details land in `stats.tables` of the outcome, one finding each; repair goes through
-  `POST …/tables/{t}/catalog/recovery`, fsck itself changes no object. The online
+  table **or view** pointer names a metadata object that does not exist),
+  `tables.stale_renaming` (a table is RENAMING but its intent is gone),
+  `tables.inconsistent_rename` (the intent's phase disagrees with the source /
+  destination entries), `tables.duplicate_view` (one view uuid live under two names: a
+  view rename crashed after writing the destination and before tombstoning the source,
+  and views have no intent to replay, so this report is the only way to find it — drop
+  the stale name), `tables.malformed_entry`. Details land in `stats.tables` of the
+  outcome (`table_buckets` / `tables` / `views` / `intents` counts plus findings), one
+  finding each; repair goes through `POST …/tables/{t}/catalog/recovery`, fsck itself
+  changes no object. The online
   `POST /-/admin/fsck/<default backend>` carries the same check.
 
 Exit codes: `0` clean; `1` when integrity findings exist (duostore's

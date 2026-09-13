@@ -84,6 +84,9 @@ constexpr RestApi::Route kRoutes[] = {
      "DiagnoseTable", false, &RestApi::diagnose_table},
     {"POST", "namespaces/{ns}/tables/{t}/catalog/recovery", Action::Write, RestApi::KeyKind::Table, false,
      "RecoverTable", false, &RestApi::recover_table},
+    // views have no commit log; diagnostics is the pointer check plus the leftovers
+    {"GET", "namespaces/{ns}/views/{t}/catalog/diagnostics", Action::Read, RestApi::KeyKind::Table, false,
+     "DiagnoseView", false, &RestApi::diagnose_view},
     // maintenance (design §9, step ④): settings, plan / run jobs, job status
     {"GET", "namespaces/{ns}/tables/{t}/maintenance/config", Action::Read, RestApi::KeyKind::Table, false,
      "GetMaintenanceConfig", false, &RestApi::get_maintenance_config},
@@ -968,6 +971,11 @@ Task<http::HttpResponse> RestApi::report_metrics(http::HttpRequest& req, Hooks& 
 
 Task<http::HttpResponse> RestApi::diagnose_table(http::HttpRequest&, Hooks&, const Match& m) {
     auto d = co_await catalog_->diagnose(m.bucket, m.ns, m.table);
+    co_return json_response(200, d.to_json(m.bucket));
+}
+
+Task<http::HttpResponse> RestApi::diagnose_view(http::HttpRequest&, Hooks&, const Match& m) {
+    auto d = co_await catalog_->diagnose_view(m.bucket, m.ns, m.table);
     co_return json_response(200, d.to_json(m.bucket));
 }
 

@@ -1,8 +1,8 @@
-// TikvMetaStore dedicated unit tests (docs/storage/duostore-meta-tikv-design.md §10): meta consistency suite,
-// backend suite over the injected combination, prefix isolation, multiple gateways sharing meta, write-skew guard
-// materialization (Op::Lock semantics smoke test), swap_extents CAS, concurrent conflict convergence, close guard.
-// Obtaining a real cluster: runs only if the env var LIGHTS3_TEST_PD_ADDR is set (comma-separated PD addresses pointing
-// at a tiup playground / existing test cluster), otherwise SKIP explicitly (not a failure, same mechanism as
+// TikvMetaStore dedicated unit tests (docs/architecture/storage/duostore-meta-tikv-design.md §10): meta consistency
+// suite, backend suite over the injected combination, prefix isolation, multiple gateways sharing meta, write-skew
+// guard materialization (Op::Lock semantics smoke test), swap_extents CAS, concurrent conflict convergence, close
+// guard. Obtaining a real cluster: runs only if the env var LIGHTS3_TEST_PD_ADDR is set (comma-separated PD addresses
+// pointing at a tiup playground / existing test cluster), otherwise SKIP explicitly (not a failure, same mechanism as
 // test_duostore_rados.cc). Isolation: a unique tikv_prefix per test case -- the cluster is reusable and multiple
 // test suites do not pollute each other (version garbage is handled by the cluster GC safepoint, §7.3).
 #if defined(LIGHTS3_DUOSTORE) && defined(LIGHTS3_DUOSTORE_TIKV_META)
@@ -98,7 +98,8 @@ using meta_store_suite::make_rec;
 
 }  // namespace
 
-// Same meta semantics baseline (suite shared with RocksMetaStore, docs/storage/duostore-meta-tikv-design.md §10)
+// Same meta semantics baseline (suite shared with RocksMetaStore,
+// docs/architecture/storage/duostore-meta-tikv-design.md §10)
 TEST(duostore_tikv_meta_store_suite) {
     TIKV_OR_SKIP();
     std::string prefix = unique_prefix();
@@ -695,7 +696,7 @@ TEST(duostore_tikv_multi_gateway_listings_shared) {
     multi_gateway_suite::listings_are_shared(tikv_shared_meta(unique_prefix()), DuoMetaKind::kTikv);
 }
 
-// ---------- two-gateway S3 Tables (docs/s3-tables-design.md §5.5) ----------
+// ---------- two-gateway S3 Tables (docs/architecture/s3-tables-design.md §5.5) ----------
 // The catalog state is .sys objects on the shared meta; the fixtures and metadata files
 // go through the shared data engine, so both catalog stacks see everything
 #ifdef LIGHTS3_TABLES
@@ -707,7 +708,7 @@ TEST(duostore_tikv_tables_multi_gateway) {
 }
 #endif
 
-// ---------- S3 Tables catalog on the KV facade (docs/s3-tables-design.md §12) ----------
+// ---------- S3 Tables catalog on the KV facade (docs/architecture/s3-tables-design.md §12) ----------
 #ifdef LIGHTS3_TABLES
 TEST(duostore_tikv_tables_catalog_store) {
     TIKV_OR_SKIP();

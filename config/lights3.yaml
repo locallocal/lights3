@@ -1,17 +1,17 @@
-# LightS3 sample config (docs/architecture.md §5)
+# LightS3 sample config (docs/architecture/overview.md §5)
 # What takes effect by default is the uncommented localfs entry under backends at the
 # bottom; every other backend is given as commented-out full parameter sets (values are
 # the defaults, except those marked "required") — uncomment to switch.
 # Note: the built-in YAML parser is simplified (no tab indentation/flow style/anchors, src/core/config.cc).
 # Size units: B/KiB/MiB/GiB (KB/MB/GB/K/M/G are synonyms); duration units: s/m/h/d.
-# Hot reload (docs/config-reload.md): `kill -HUP <pid>` or `lights3-ctl reload` re-reads this file;
+# Hot reload (docs/usage/config-reload.md): `kill -HUP <pid>` or `lights3-ctl reload` re-reads this file;
 # log.level, request/stall timeouts, max_inflight_requests, min_part_size, ratelimit.*,
 # buckets.rules and TLS certificate contents take effect live, everything else needs a restart.
 http:
   driver: builtin          # builtin | beast | httplib (must be compiled in via the matching CMake option)
   bind: 0.0.0.0
   port: 9000
-  # Separate admin listener (docs/http-adapter.md §2.1): when set, /-/metrics and
+  # Separate admin listener (docs/architecture/http-adapter.md §2.1): when set, /-/metrics and
   # /-/admin/* are served ONLY here (the data-plane port answers 404 for them;
   # /-/healthz and /-/readyz stay on both). Point lights3-ctl --endpoint and the
   # Prometheus scrape at it. Not hot-reloadable. Omit = every face on `port`.
@@ -20,7 +20,7 @@ http:
   io_threads: 4            # beast=IO thread count / httplib=thread pool / seastar=shard count;
                            # builtin (thread-per-connection) ignores it and WARNs when set explicitly
   max_header_size: 16KiB
-  # ---------- Timeout family (roadmap §4.2, docs/http-adapter.md §2.2) ----------
+  # ---------- Timeout family (roadmap §4.2, docs/architecture/http-adapter.md §2.2) ----------
   idle_timeout: 60s          # keep-alive: waiting for the next request on an idle connection
   # header_timeout: 30s      # a new connection's request line + headers (slowloris bound)
   # body_timeout: 60s        # inactivity bound on one request-body read (slow uploads)
@@ -31,11 +31,11 @@ http:
   # relax it when fronted by toolchains that don't honor this rule, or when this
   # instance is merely a proxy for another lights3
   min_part_size: 5MiB
-  # ---------- TLS (roadmap §4.1, docs/tls.md) ----------
+  # ---------- TLS (roadmap §4.1, docs/usage/tls.md) ----------
   # HTTPS is enabled only when both are given; every driver supports it (seastar
-  # through seastar::tls, see docs/tls.md §4). SigV4 UNSIGNED-PAYLOAD integrity
+  # through seastar::tls, see docs/usage/tls.md §4). SigV4 UNSIGNED-PAYLOAD integrity
   # relies on transport-layer encryption; strongly recommended for public
-  # deployments (or terminate TLS at a fronting proxy, docs/tls.md §6)
+  # deployments (or terminate TLS at a fronting proxy, docs/usage/tls.md §6)
   # tls_cert: /etc/lights3/server.crt   # PEM certificate chain (leaf first)
   # tls_key: /etc/lights3/server.key    # PEM private key
   # tls_min_version: "1.2"              # 1.2 | 1.3
@@ -63,7 +63,7 @@ runtime:
   io_threads: 16           # blocking IO thread pool size
   max_inflight_requests: 1024
 
-# ---------- Per-client rate limits (roadmap §4.2, docs/http-adapter.md §2.3) ----------
+# ---------- Per-client rate limits (roadmap §4.2, docs/architecture/http-adapter.md §2.3) ----------
 # Token bucket + concurrency cap per source IP (before signature verification) and per
 # access key (after it). 0 = off. Over the limit: 503 SlowDown + Retry-After: 1
 # ratelimit:
@@ -80,7 +80,7 @@ auth:
     - access_key: AKIDEXAMPLE
       secret_key: ${LIGHTS3_SECRET_1}   # env var reference; if empty, all requests are rejected
   region: us-east-1
-  # ---------- Credential management phase 2 (docs/credential-management.md §10) ----------
+  # ---------- Credential management phase 2 (docs/architecture/credential-management.md §10) ----------
   # At-rest encryption of dynamic credential SKs is not configured here: set the env var
   # LIGHTS3_MASTER_KEY (64 hex chars, e.g. `openssl rand -hex 32`) to enable it;
   # existing plaintext objects are upgraded automatically at startup.
@@ -90,12 +90,12 @@ auth:
   # credentials_file_reload: 30s               # file mtime polling period; 0s = load at startup only
   # sync_interval: 0s                          # with a shared multi-instance backend, periodic incremental
   #                                            # reload of .sys (pick up additions/revocations); 0s = off (single-instance default)
-  # tls_identity: off                          # off | subject-cn | san-uri (docs/tls.md §2.1): map a verified client
+  # tls_identity: off                          # off | subject-cn | san-uri (docs/usage/tls.md §2.1): map a verified client
   #                                            # certificate (needs http.tls_client_auth optional|require) to the credential
   #                                            # bound in .sys/tls-identities (lights3-ctl cred bind-cert); unsigned requests then
   #                                            # run as that credential, signed ones must agree with its tenant
 
-# ---------- Static website hosting (docs/static-website.md) ----------
+# ---------- Static website hosting (docs/usage/static-website.md) ----------
 # Buckets listed here accept anonymous GET/HEAD object reads (no listing, no
 # subresources, response-* overrides refused). Exact names only, no globs.
 # Entries here are static: immutable via the API and they win over same-name
@@ -121,20 +121,32 @@ auth:
 # lifecycle:
 #   scan_interval: 1h            # 0s = enforcement off (the API still stores rules)
 
-# ---------- S3 Tables / Iceberg REST catalog (docs/s3-tables-design.md, step ①) ----------
+# ---------- S3 Tables / Iceberg REST catalog (docs/architecture/s3-tables-design.md, step ①) ----------
 # Off by default. When on, /iceberg/v1 answers the Iceberg REST catalog, a bucket
 # enabled with `PUT /iceberg/v1/buckets/<bucket>` (root) becomes a table bucket, and
 # its `.lights3-table/` prefix is read-only through the S3 API. Every key is restart-only
 # tables:
 #   enabled: true
 #   path_prefix: /iceberg          # the REST prefix (+ /v1); reserves the bucket name "iceberg"
+#   compat_prefix: ""              # optional alias of the same routes, e.g. /_iceberg; empty = off
+#   catalog_backing: object        # object = .sys objects of the default backend; duostore = its meta engine (default backend must be duostore)
+#   accept_s3tables_signing: true  # catalog paths also accept SigV4 credential scope service "s3tables"
 #   reserved_prefix: .lights3-table/
 #   metadata_max_size: 50MiB
 #   request_max_size: 1MiB
 #   metadata_log_keep: 100
 #   max_page_size: 1000
+#   validate_concurrency: 16       # parallel HEADs during snapshot / manifest validation
+#   credential_vending: false      # honour X-Iceberg-Access-Delegation: vended-credentials (STS session narrowed to the table prefix)
+#   credential_ttl: 900s           # vended session lifetime, 60s..1h
+#   maintenance:
+#     scan_interval: 0s            # periodic plan+run over every table bucket; 0s = manual only
+#     safety_window: 15m           # never delete files modified more recently than this
+#     retain_recent_metadata_files: 10
+#     delete_enabled: false        # false = run only commits snapshot expiry, deletes nothing
+#     tombstone_ttl: 24h           # dropped-table tombstones are cleaned after this; 0s = keep
 
-# ---------- Usage accounting / quotas (roadmap §3.9, docs/multi-tenancy.md §2/§7) ----------
+# ---------- Usage accounting / quotas (roadmap §3.9, docs/architecture/multi-tenancy.md §2/§7) ----------
 # Per-bucket object/byte counters kept by the gateway (updated on every write,
 # persisted to .sys/usage/, recounted by a periodic full listing). Bucket quotas
 # (?quota / lights3-ctl quota) and tenant quotas (lights3-ctl tenant) are enforced on them.
@@ -144,7 +156,7 @@ auth:
 #   reconcile_interval: 1d      # full recount of every bucket; 0s = on demand only (lights3-ctl usage --rescan)
 #   reconcile: true             # multi-gateway: true on ONE instance only (bootstrap + periodic recounts)
 
-# ---------- Audit log (roadmap §3.9 ④, docs/multi-tenancy.md §5) ----------
+# ---------- Audit log (roadmap §3.9 ④, docs/architecture/multi-tenancy.md §5) ----------
 # JSON lines in a dedicated rotating file: credential/tenant/quota lifecycle,
 # STS sessions, bucket create/delete, quota rejections; data_plane adds one
 # record per S3 request. Empty path = off.
@@ -155,26 +167,26 @@ auth:
 #   max_files: 10               # rotated files kept
 
 backends:
-  # ---------- localfs / xlocalfs: local filesystem (docs/storage/storage-backend.md) ----------
+  # ---------- localfs / xlocalfs: local filesystem (docs/architecture/storage/storage-backend.md) ----------
   - name: localdata
     type: localfs                      # localfs | xlocalfs (io_uring data plane) | memory
     root: ./data/objects
     staging: ./data/staging            # must be on the same filesystem as root (rename atomicity);
                                        # default <root>/.lights3-staging
     # queue_depth: 256                 # xlocalfs only: io_uring SQ depth
-    # -- roadmap §3.5 (docs/storage/localfs.md §2/§3/§6/§12; values are defaults) --
+    # -- roadmap §3.5 (docs/architecture/storage/localfs.md §2/§3/§6/§12; values are defaults) --
     # require_xattr: false             # true = refuse to start (and to write) on a filesystem without user xattrs
     # sidecar: sync                    # sync | async (sidecar written after the response) | lazy (none while the xattr succeeds)
     # list_meta_concurrency: 8         # pool workers sharing one listing page's stat+getxattr
     # list_cache_entries: 1M           # per-directory sorted-entry cache budget (entries; 0 = off)
     # list_cache_min_dir_entries: 256  # directories smaller than this are never cached
     # sidecar_scan_interval: 1d        # orphan-sidecar sweep period; 0s = off
-    # -- roadmap §3.8 object metadata cache (docs/storage/localfs.md §5.1) --
+    # -- roadmap §3.8 object metadata cache (docs/architecture/storage/localfs.md §5.1) --
     # meta_cache_entries: 64K          # cached object records (0 = off); a hit spares the xattr/sidecar read
     # meta_cache_ttl: 0s               # entry expiry; 0s = never (write paths invalidate exactly)
     # meta_cache_validate: true        # HEAD re-checks the inode stamp with one stat; false = trust until invalidated/expired
 
-  # ---------- duostore: metadata KV + chunk/pack data engine (docs/storage/duostore-design.md) ----------
+  # ---------- duostore: metadata KV + chunk/pack data engine (docs/architecture/storage/duostore-design.md) ----------
   # meta engine, pick one of four: rocksdb (default) | redis | sqlite | tikv;
   # data engine, pick one of two: fs (default) | rados.
   # redis/sqlite/tikv/rados must be compiled in via the matching CMake options
@@ -184,24 +196,24 @@ backends:
   #   type: duostore
   #   root: ./data/duostore            # required; meta/ chunks/ packs/ all live under it
   #   verify_chunk_crc: false          # read-path chunk CRC verification (shared by both data engines)
-  #   # -- Background GC and orphan scan (all effective; docs/storage/duostore-design.md §9) --
+  #   # -- Background GC and orphan scan (all effective; docs/architecture/storage/duostore-design.md §9) --
   #   gc_interval: 300s                # reclaim period; 0s = disable background GC
   #   gc_enabled: true                 # false = non-designated instance in a multi-gateway setup: exactly one gateway runs GC,
-  #                                    # the orphan scan and mpu_ttl cleanup (docs/archive/multi-gateway-multipart-design.md, docs/deployment.md §5)
+  #                                    # the orphan scan and mpu_ttl cleanup (docs/archive/multi-gateway-multipart-design.md, docs/usage/deployment.md §5)
   #   gc_grace: 300s                   # delayed-deletion grace (defense in depth against concurrent reads)
-  #   read_lease: 5s                   # multi-gateway read / write lease publish period (docs/storage/duostore-core.md §8.5): mandatory
+  #   read_lease: 5s                   # multi-gateway read / write lease publish period (docs/architecture/storage/duostore-core.md §8.5): mandatory
   #                                    # when several gateways share redis/tikv meta + rados data, 0s = off (then gc_grace must exceed
   #                                    # the longest expected GET and upload); no effect on rocksdb/sqlite
   #   orphan_scan_interval: 1d
-  #   # -- roadmap §3.8 object metadata cache (docs/storage/duostore-core.md §7.1) --
+  #   # -- roadmap §3.8 object metadata cache (docs/architecture/storage/duostore-core.md §7.1) --
   #   meta_cache_entries: 64K          # cached ObjectRec budget; default 64K on rocksdb/sqlite, 0 on redis/tikv
   #   meta_cache_ttl: 0s               # required (0 < ttl < gc_grace) when enabling the cache on redis/tikv;
-  #                                    # redis pushes peers' commits over pub/sub (docs/storage/duostore-meta-redis-design.md §3.6),
+  #                                    # redis pushes peers' commits over pub/sub (docs/architecture/storage/duostore-meta-redis-design.md §3.6),
   #                                    # so the TTL only bounds lost messages there; tikv relies on the TTL alone
   #   meta_cache_feed: true            # subscribe the cache to that feed (redis); false = TTL-only staleness
   #   mpu_ttl: 7d                      # cleanup deadline for incomplete multipart uploads; 0 = off
   #
-  #   # -- meta = rocksdb (default, docs/storage/duostore-design.md) --
+  #   # -- meta = rocksdb (default, docs/architecture/storage/duostore-design.md) --
   #   meta: rocksdb
   #   meta_path: ./data/duostore/meta  # default <root>/meta (can point to an SSD separately)
   #   rocksdb_block_cache: 64MiB
@@ -210,7 +222,7 @@ backends:
   #   rocksdb_max_background_jobs: 2   # total flush/compaction background threads (>=1)
   #   meta_sync: true                  # fsync WAL on every commit (shared by rocksdb/sqlite)
   #
-  #   # -- meta = redis (docs/storage/duostore-meta-redis-design.md §8) --
+  #   # -- meta = redis (docs/architecture/storage/duostore-meta-redis-design.md §8) --
   #   # meta: redis
   #   # redis_uri: redis://127.0.0.1:6379  # required; unix:///path/redis.sock also supported
   #   # redis_prefix: "duo:"               # key prefix (multi-instance/test isolation)
@@ -219,15 +231,15 @@ backends:
   #   # redis_wait_replicas: 0             # replicas to WAIT for after commit [0,256] (0=no wait;
   #                                        # with Sentinel primaries/replicas this narrows the failover lost-write window, insufficient replicas only WARN)
   #
-  #   # -- meta = sqlite (docs/storage/duostore-meta-sqlite-design.md §8) --
+  #   # -- meta = sqlite (docs/architecture/storage/duostore-meta-sqlite-design.md §8) --
   #   # meta: sqlite
   #   # sqlite_path: ./data/duostore/meta.sqlite3   # default <root>/meta.sqlite3
   #   # sqlite_cache: 64MiB                # process-level page cache total budget (>= 1MiB)
   #   # sqlite_wal_archive: /backup/duo-meta  # meta backup chain dir for `duostore backup --incremental`
-  #                                        # (WAL segments archived there; empty = full backups only, docs/cli.md §2.2.1)
+  #                                        # (WAL segments archived there; empty = full backups only, docs/usage/cli.md §2.2.1)
   #   # meta_sync: true                    # maps to PRAGMA synchronous FULL/NORMAL
   #
-  #   # -- meta = tikv (docs/storage/duostore-meta-tikv-design.md §9) --
+  #   # -- meta = tikv (docs/architecture/storage/duostore-meta-tikv-design.md §9) --
   #   # meta: tikv
   #   # pd_endpoints: "127.0.0.1:2379"     # required; comma-separated multiple PDs
   #   # tikv_prefix: "duo:"                # key prefix (multi-instance/test isolation)
@@ -239,7 +251,7 @@ backends:
   #   # tikv_gc_retention: 10m             # safepoint retention window (now − retention, must be positive)
   #   # tikv_backoff_ms: 0                 # sidecar-path backoff budget (0 = client-c library default)
   #
-  #   # -- data = fs (default): chunk/pack local engine (docs/storage/duostore-design.md) --
+  #   # -- data = fs (default): chunk/pack local engine (docs/architecture/storage/duostore-design.md) --
   #   data: fs
   #   chunk_size: 8MiB
   #   pack_threshold: 128KiB           # objects <= this go into packs; 0 = off (everything via chunks)
@@ -247,7 +259,7 @@ backends:
   #   pack_writers: 4                  # concurrent active packs (1-64)
   #   pack_gc_ratio: 0.5               # live ratio below this triggers compaction (effective in P4)
   #
-  #   # -- data = rados (docs/storage/duostore-data-rados-design.md §10) --
+  #   # -- data = rados (docs/architecture/storage/duostore-data-rados-design.md §10) --
   #   # data: rados
   #   # rados_pool: lights3                # required
   #   # rados_conf: /etc/ceph/ceph.conf
@@ -258,7 +270,7 @@ backends:
   #   # rados_connect_timeout: 5s
   #   # rados_op_timeout: 0s               # 0 = no op timeout
 
-  # ---------- cloudproxy: forward to a remote S3 (docs/storage/cloudproxy-design.md) ----------
+  # ---------- cloudproxy: forward to a remote S3 (docs/architecture/storage/cloudproxy-design.md) ----------
   # Requires LIGHTS3_CLOUDPROXY=ON (default on).
   # - name: cloudpx
   #   type: cloudproxy
@@ -289,7 +301,7 @@ backends:
   #   io_threads: 8                      # backend-dedicated thread pool (generic key, available to all backends;
   #                                      # default shares runtime.io_threads' pool)
 
-  # ---------- tiered: local cache + cloud sink (docs/storage/tiered-design.md) ----------
+  # ---------- tiered: local cache + cloud sink (docs/architecture/storage/tiered-design.md) ----------
   # local/cloud reference other backends in this list by name; local must be localfs/xlocalfs or duostore.
   # - name: tierdata
   #   type: tiered
@@ -307,7 +319,7 @@ backends:
   #   gc_retry_cap: 1h                   # backoff cap
   #   reconcile_interval: 0s             # index/cloud reconciliation period; 0s = off (§9)
   #   reconcile_orphans: rebuild         # rebuild = recreate index entries | delete = remove cloud orphans
-  #   # -- roadmap §3.6 (docs/storage/tiered-design.md §4.3/§5.1/§6.3/§9) --
+  #   # -- roadmap §3.6 (docs/architecture/storage/tiered-design.md §4.3/§5.1/§6.3/§9) --
   #   full_scan_interval: 1d             # full enumeration safety net; rounds in between consume the time wheel; 0s = every round full
   #   evict_size_weight: 0               # eviction score size weighting (log2 of MiB); 0 = ignore size
   #   evict_frequency_weight: 0          # eviction score access-count weighting; 0 = pure LRU
@@ -322,14 +334,14 @@ backends:
 
 buckets:
   default_backend: localdata
-  rules: []                # glob-matched in declaration order (docs/storage/storage-backend.md §2)
+  rules: []                # glob-matched in declaration order (docs/architecture/storage/storage-backend.md §2)
   # rules:
   #   - match: "archive-*"               # fnmatch glob
   #     backend: tierdata
 
 log:
   level: info                          # debug | info | warn | error (hot-reloadable)
-  # -- roadmap §5.2 (docs/s3-protocol.md §7) --
+  # -- roadmap §5.2 (docs/architecture/s3-protocol.md §7) --
   # format: text                       # text = one readable line | json = one JSON object per line (Loki/ELK)
   # file: /var/log/lights3/lights3.log # empty = stderr; otherwise a size-rotated file
   # max_size: 64MiB                    # rotate above this size

@@ -1,8 +1,7 @@
-// cloudproxy unit tests (docs/storage/cloudproxy-design.md §10): in-process dual-stack bootstrap, no httplib mocking --
-// the test starts lights3's own HTTP server + S3Service + MemoryBackend as the "remote",
-// and points CloudProxyBackend at it to run the conformance suite; also covers interop between our own
-// sign() and local verify(). Dedicated cases use a bare handler server to construct
-// error-mapping/retry/cancel/validation paths.
+// cloudproxy unit tests (docs/architecture/storage/cloudproxy-design.md §10): in-process dual-stack bootstrap, no
+// httplib mocking -- the test starts lights3's own HTTP server + S3Service + MemoryBackend as the "remote", and points
+// CloudProxyBackend at it to run the conformance suite; also covers interop between our own sign() and local verify().
+// Dedicated cases use a bare handler server to construct error-mapping/retry/cancel/validation paths.
 #ifdef LIGHTS3_CLOUDPROXY
 
 #include <atomic>
@@ -132,7 +131,7 @@ TEST(cloudproxy_backend_suite) {
     run_backend_suite(b, /*checksum_roundtrip=*/false);
 }
 
-// bucket_prefix mapping and list_buckets filtering (docs/storage/cloudproxy-design.md §4.2/§4.3)
+// bucket_prefix mapping and list_buckets filtering (docs/architecture/storage/cloudproxy-design.md §4.2/§4.3)
 TEST(cloudproxy_bucket_prefix_mapping) {
     RemoteStack remote;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -152,7 +151,7 @@ TEST(cloudproxy_bucket_prefix_mapping) {
     sync_wait(b.delete_bucket("mapped"));
 }
 
-// Error-mapping matrix (docs/storage/cloudproxy-design.md §5.1)
+// Error-mapping matrix (docs/architecture/storage/cloudproxy-design.md §5.1)
 TEST(cloudproxy_error_mapping) {
     using s3::S3ErrorCode;
     std::atomic<int> mode{0};
@@ -198,7 +197,7 @@ TEST(cloudproxy_error_mapping) {
     CHECK_THROWS_S3(sync_wait(b.get_object("bkt", "k", std::nullopt)), S3ErrorCode::InvalidPart);
 }
 
-// The HEAD 403 exception for bucket_exists: treated as existing (docs/storage/cloudproxy-design.md §4.3)
+// The HEAD 403 exception for bucket_exists: treated as existing (docs/architecture/storage/cloudproxy-design.md §4.3)
 TEST(cloudproxy_head_bucket_403_means_exists) {
     HandlerServer remote(
         [&](http::HttpRequest) -> Task<http::HttpResponse> { co_return xml_error(403, "AccessDenied"); });
@@ -207,7 +206,7 @@ TEST(cloudproxy_head_bucket_403_means_exists) {
     CHECK(sync_wait(b.bucket_exists("bkt")));
 }
 
-// Exponential-backoff retry of idempotent requests on 5xx (docs/storage/cloudproxy-design.md §5.2)
+// Exponential-backoff retry of idempotent requests on 5xx (docs/architecture/storage/cloudproxy-design.md §5.2)
 TEST(cloudproxy_retry_on_5xx) {
     std::atomic<int> hits{0};
     HandlerServer remote([&](http::HttpRequest) -> Task<http::HttpResponse> {
@@ -229,8 +228,8 @@ TEST(cloudproxy_retry_on_5xx) {
     CHECK_THROWS_S3(sync_wait(b2.head_object("bkt", "k")), s3::S3ErrorCode::SlowDown);
 }
 
-// Remote unreachable: InternalError after retries are exhausted, rather than hanging (docs/storage/cloudproxy-design.md
-// §9.6)
+// Remote unreachable: InternalError after retries are exhausted, rather than hanging
+// (docs/architecture/storage/cloudproxy-design.md §9.6)
 TEST(cloudproxy_unreachable_endpoint) {
     auto pool = std::make_shared<ThreadPool>(2);
     // Port 1: almost certainly connection refused
@@ -241,7 +240,7 @@ TEST(cloudproxy_unreachable_endpoint) {
 }
 
 // GET cancelled midway: the reader is destroyed early -> the remote stream is aborted, the connection does not rot
-// (docs/storage/cloudproxy-design.md §3.1)
+// (docs/architecture/storage/cloudproxy-design.md §3.1)
 TEST(cloudproxy_get_cancel_mid_stream) {
     RemoteStack remote;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -269,7 +268,8 @@ TEST(cloudproxy_get_cancel_mid_stream) {
     sync_wait(b.delete_bucket("big"));
 }
 
-// End-to-end ETag verification: the remote returns a wrong ETag -> InternalError (docs/storage/cloudproxy-design.md §6)
+// End-to-end ETag verification: the remote returns a wrong ETag -> InternalError
+// (docs/architecture/storage/cloudproxy-design.md §6)
 TEST(cloudproxy_etag_verify_failure) {
     HandlerServer remote([&](http::HttpRequest req) -> Task<http::HttpResponse> {
         if (req.body) {
@@ -295,7 +295,8 @@ TEST(cloudproxy_etag_verify_failure) {
     CHECK_EQ(r.etag, "00000000000000000000000000000000");
 }
 
-// S3's peculiar "200 OK but the body is <Error>" (the famous complete pitfall, docs/storage/cloudproxy-design.md §4.4)
+// S3's peculiar "200 OK but the body is <Error>" (the famous complete pitfall,
+// docs/architecture/storage/cloudproxy-design.md §4.4)
 TEST(cloudproxy_complete_200_with_error_body) {
     HandlerServer remote([&](http::HttpRequest req) -> Task<http::HttpResponse> {
         if (req.body) {
@@ -312,7 +313,7 @@ TEST(cloudproxy_complete_200_with_error_body) {
 }
 
 // Pass-through of the three Range forms + degradation when the remote ignores Range and returns 200
-// (docs/storage/cloudproxy-design.md §3.3)
+// (docs/architecture/storage/cloudproxy-design.md §3.3)
 TEST(cloudproxy_range_forms) {
     RemoteStack remote;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -343,7 +344,7 @@ TEST(cloudproxy_range_forms) {
 }
 
 // Pagination boundary: the group-tail token must not swallow a literal key equal to the "prefix upper bound"
-// (docs/storage/cloudproxy-design.md §4.2)
+// (docs/architecture/storage/cloudproxy-design.md §4.2)
 TEST(cloudproxy_list_pagination_boundary_key) {
     RemoteStack remote;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -371,8 +372,8 @@ TEST(cloudproxy_list_pagination_boundary_key) {
     CHECK_EQ(keys[0], "a0");
 }
 
-// Non-conforming remote responses must error, never silently truncate (docs/storage/cloudproxy-design.md §3.3 /
-// backend.h size contract)
+// Non-conforming remote responses must error, never silently truncate (docs/architecture/storage/cloudproxy-design.md
+// §3.3 / backend.h size contract)
 TEST(cloudproxy_rejects_nonconforming_remote_responses) {
     std::atomic<int> mode{0};
     HandlerServer remote([&](http::HttpRequest) -> Task<http::HttpResponse> {
@@ -396,7 +397,7 @@ TEST(cloudproxy_rejects_nonconforming_remote_responses) {
 }
 
 // Config load-time validation: prefix placement rules / numeric ranges / queue_cap parsing
-// (docs/storage/cloudproxy-design.md §4.3/§7)
+// (docs/architecture/storage/cloudproxy-design.md §4.3/§7)
 TEST(cloudproxy_config_load_validation) {
     auto expect_reject = [](std::map<std::string, std::string> params) {
         params.emplace("endpoint", "http://127.0.0.1:1");
@@ -425,7 +426,7 @@ TEST(cloudproxy_config_load_validation) {
     // defaults
     CHECK(ok.force_path_style && !ok.control_in_pump);
 
-    // P4 remainder (docs/storage/cloudproxy-design.md §2.3/§7): both keys parse, vhost no longer errors
+    // P4 remainder (docs/architecture/storage/cloudproxy-design.md §2.3/§7): both keys parse, vhost no longer errors
     auto ok2 = CloudProxyConfig::from_params(
         "t", {{"endpoint", "http://127.0.0.1:1"}, {"force_path_style", "false"}, {"control_in_pump", "true"}});
     CHECK(!ok2.force_path_style);
@@ -433,8 +434,8 @@ TEST(cloudproxy_config_load_validation) {
     expect_reject({{"control_in_pump", "not-a-bool"}});
 }
 
-// virtual-hosted style (docs/storage/cloudproxy-design.md §7): connections always target the endpoint, only
-// Host/signature and path vary by bucket; the remote accepts vhost via base_domain, and passing the full suite =
+// virtual-hosted style (docs/architecture/storage/cloudproxy-design.md §7): connections always target the endpoint,
+// only Host/signature and path vary by bucket; the remote accepts vhost via base_domain, and passing the full suite =
 // addressing/signing/pagination/multipart are all self-consistent under vhost
 TEST(cloudproxy_virtual_hosted_style) {
     // remote vhost domain = <bucket>.127.0.0.1
@@ -447,7 +448,7 @@ TEST(cloudproxy_virtual_hosted_style) {
     run_backend_suite(b, /*checksum_roundtrip=*/false);
 }
 
-// control_in_pump=true (docs/storage/cloudproxy-design.md §2.3): the control plane uses a one-shot private
+// control_in_pump=true (docs/architecture/storage/cloudproxy-design.md §2.3): the control plane uses a one-shot private
 // thread, semantically identical to the pool-thread path (the full suite passes); then the two modes are compared
 // on HEAD latency, printing benchmark numbers (the data source for the default-value argument, no assertions -- local
 // loopback is only an order-of-magnitude reference)

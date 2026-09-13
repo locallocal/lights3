@@ -1,9 +1,9 @@
-// RedisMetaStore dedicated unit tests (docs/storage/duostore-meta-redis-design.md §9): meta consistency suite,
-// backend suite over the injected combination, prefix isolation, NOSCRIPT self-healing, swap_extents CAS, multiple
-// gateways sharing meta (+ the multi-gateway multipart suite), concurrent CAS convergence. Obtaining a real redis:
-// probe for redis-server in PATH and start a private instance on a unix socket (--save '' --appendonly no); if none is
-// found, SKIP explicitly (not a failure). LIGHTS3_TEST_REDIS_URI can override with an external instance (isolation
-// relies on a random per-case key prefix).
+// RedisMetaStore dedicated unit tests (docs/architecture/storage/duostore-meta-redis-design.md §9): meta consistency
+// suite, backend suite over the injected combination, prefix isolation, NOSCRIPT self-healing, swap_extents CAS,
+// multiple gateways sharing meta (+ the multi-gateway multipart suite), concurrent CAS convergence. Obtaining a real
+// redis: probe for redis-server in PATH and start a private instance on a unix socket (--save '' --appendonly no); if
+// none is found, SKIP explicitly (not a failure). LIGHTS3_TEST_REDIS_URI can override with an external instance
+// (isolation relies on a random per-case key prefix).
 #if defined(LIGHTS3_DUOSTORE) && defined(LIGHTS3_DUOSTORE_REDIS_META)
 
 #include <hiredis.h>
@@ -200,7 +200,8 @@ using meta_store_suite::make_rec;
 
 }  // namespace
 
-// Same meta semantics baseline (suite shared with RocksMetaStore, docs/storage/duostore-meta-redis-design.md §9.1)
+// Same meta semantics baseline (suite shared with RocksMetaStore,
+// docs/architecture/storage/duostore-meta-redis-design.md §9.1)
 TEST(duostore_redis_meta_store_suite) {
     REDIS_OR_SKIP();
     std::string prefix = unique_prefix();
@@ -635,7 +636,7 @@ TEST(duostore_redis_meta_cache_bounded_staleness) {
     CHECK(!DuoStoreConfig::from_params("p", on).meta_cache_feed);
 }
 
-// backlog-sequence ⑤ (docs/storage/duostore-meta-redis-design.md §3.6): with the cache on, a peer's
+// backlog-sequence ⑤ (docs/architecture/storage/duostore-meta-redis-design.md §3.6): with the cache on, a peer's
 // commit publishes on <prefix>inv and the local record drops within a message's
 // latency instead of at the TTL; a lost feed clears the cache on reconnect
 TEST(duostore_redis_cache_invalidation_feed) {
@@ -900,7 +901,7 @@ TEST(duostore_redis_multi_gateway_listings_shared) {
     multi_gateway_suite::listings_are_shared(redis_shared_meta(unique_prefix()), DuoMetaKind::kRedis);
 }
 
-// ---------- two-gateway S3 Tables (docs/s3-tables-design.md §5.5) ----------
+// ---------- two-gateway S3 Tables (docs/architecture/s3-tables-design.md §5.5) ----------
 // The catalog state is .sys objects on the shared meta; the fixtures and metadata files
 // go through the shared data engine, so both catalog stacks see everything
 #ifdef LIGHTS3_TABLES
@@ -912,7 +913,7 @@ TEST(duostore_redis_tables_multi_gateway) {
 }
 #endif
 
-// ---------- S3 Tables catalog on the KV facade (docs/s3-tables-design.md §12) ----------
+// ---------- S3 Tables catalog on the KV facade (docs/architecture/s3-tables-design.md §12) ----------
 #ifdef LIGHTS3_TABLES
 TEST(duostore_redis_tables_catalog_store) {
     REDIS_OR_SKIP();

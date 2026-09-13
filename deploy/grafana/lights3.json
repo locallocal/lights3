@@ -948,7 +948,7 @@
       "type": "timeseries",
       "id": 19,
       "title": "Keep-alive reuse (requests per connection)",
-      "description": "httplib runs upstream's accept loop and reports 0 accepted (docs/http-adapter.md \u00a72.2)",
+      "description": "httplib runs upstream's accept loop and reports 0 accepted (docs/architecture/http-adapter.md \u00a72.2)",
       "gridPos": {
         "x": 12,
         "y": 47,
@@ -2744,7 +2744,7 @@
       "type": "timeseries",
       "id": 53,
       "title": "Demotion / promotion / eviction",
-      "description": "Sustained eviction = the local tier sits above space_high_watermark (no local-usage gauge is exported)",
+      "description": "Sustained eviction = the local tier sits above space_high_watermark (see the Local tier capacity panel for the gauges)",
       "gridPos": {
         "x": 12,
         "y": 180,

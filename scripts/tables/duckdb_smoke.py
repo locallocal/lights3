@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DuckDB smoke against a live lights3 gateway (docs/s3-tables-design.md §13): attach the
+"""DuckDB smoke against a live lights3 gateway (docs/architecture/s3-tables-design.md §13): attach the
 catalog through DuckDB's iceberg extension with SigV4, list namespaces / tables, scan a
 table PyIceberg wrote (run pyiceberg_smoke.py with LIGHTS3_SMOKE_KEEP=1 first, or point at any table).
 

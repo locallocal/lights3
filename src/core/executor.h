@@ -1,4 +1,4 @@
-// L4: delivery abstraction for coroutine continuations (see docs/concurrency.md §3)
+// L4: delivery abstraction for coroutine continuations (see docs/architecture/concurrency.md §3)
 #pragma once
 
 #include <condition_variable>

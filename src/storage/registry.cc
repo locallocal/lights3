@@ -41,7 +41,7 @@ LocalFsOptions fs_backend_opts(const BackendConfig& cfg) {
     if (cfg.params.count("mpu_ttl")) o.mpu_ttl_sec = parse_duration_sec(cfg.params.at("mpu_ttl"));
     if (cfg.params.count("mpu_scan_interval"))
         o.mpu_scan_interval_sec = parse_duration_sec(cfg.params.at("mpu_scan_interval"));
-    // roadmap §3.5 knobs (docs/storage/localfs.md)
+    // roadmap §3.5 knobs (docs/architecture/storage/localfs.md)
     if (cfg.params.count("require_xattr")) o.require_xattr = parse_bool(cfg.params.at("require_xattr"));
     if (cfg.params.count("sidecar")) o.sidecar = fsutil::parse_sidecar_mode(cfg.params.at("sidecar"));
     auto small_int = [&](const char* k, int lo, int hi) {
@@ -60,7 +60,7 @@ LocalFsOptions fs_backend_opts(const BackendConfig& cfg) {
         o.list_cache_min_dir_entries = size_t(small_int("list_cache_min_dir_entries", 1, 1 << 30));
     if (cfg.params.count("sidecar_scan_interval"))
         o.sidecar_scan_interval_sec = parse_duration_sec(cfg.params.at("sidecar_scan_interval"));
-    // Object metadata cache (roadmap §3.8; docs/storage/localfs.md §5.1)
+    // Object metadata cache (roadmap §3.8; docs/architecture/storage/localfs.md §5.1)
     if (cfg.params.count("meta_cache_entries")) o.meta_cache_entries = parse_size(cfg.params.at("meta_cache_entries"));
     if (cfg.params.count("meta_cache_ttl")) o.meta_cache_ttl_sec = parse_duration_sec(cfg.params.at("meta_cache_ttl"));
     if (cfg.params.count("meta_cache_validate"))
@@ -68,7 +68,7 @@ LocalFsOptions fs_backend_opts(const BackendConfig& cfg) {
     return o;
 }
 
-// Per-backend dedicated IO pool (fulfilling the reservation in docs/concurrency.md §3.1):
+// Per-backend dedicated IO pool (fulfilling the reservation in docs/architecture/concurrency.md §3.1):
 // a backend whose params carry io_threads (>=1) gets its own ThreadPool -- slow cloud
 // requests filling the shared pool would starve the local-disk path; isolating pools per
 // backend keeps them from dragging each other down. Default is the shared global pool (the
@@ -209,7 +209,7 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
     const std::vector<BackendConfig>& configs, std::shared_ptr<ThreadPool> pool,
     std::shared_ptr<MetricsRegistry> metrics, const std::map<std::string, std::shared_ptr<IStorageBackend>>* existing) {
     ensure_registered();
-    // Two-phase build (docs/storage/tiered-design.md §2): construct all leaf backends first, then
+    // Two-phase build (docs/architecture/storage/tiered-design.md §2): construct all leaf backends first, then
     // construct composite backends iteratively by dependency
     std::map<std::string, std::shared_ptr<IStorageBackend>> out;
     std::vector<const BackendConfig*> deferred;

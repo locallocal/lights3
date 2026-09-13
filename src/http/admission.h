@@ -1,4 +1,4 @@
-// L1/L2 boundary: dispatch-entry admission control assembly (docs/concurrency.md §6)
+// L1/L2 boundary: dispatch-entry admission control assembly (docs/architecture/concurrency.md §6)
 //
 // This used to be inlined in the main.cc assembly layer — the whole
 // lifetime-sensitive path (queueing, tying the Permit into the streaming

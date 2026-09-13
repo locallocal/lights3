@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate the Iceberg manifest-list / manifest Avro fixtures under tests/fixtures/tables
-(docs/s3-tables-design.md §13) with PyIceberg's own writers, and
+(docs/architecture/s3-tables-design.md §13) with PyIceberg's own writers, and
 dump what PyIceberg reads back as <name>.json so the C++ reader can be checked against it.
 
     PYTHONPATH=<dir with pyiceberg+pyarrow> python3 scripts/tables/gen_fixtures.py

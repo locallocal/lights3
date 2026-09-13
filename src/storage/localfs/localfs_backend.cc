@@ -219,7 +219,7 @@ void LocalFsBackend::require_bucket(std::string_view bucket) const {
 
 ObjectMeta LocalFsBackend::load_meta(const fs::path& data_path, std::string key) const {
     // Tier awareness (a stub's size comes from the sidecar) is handled in the shared
-    // implementation (docs/storage/tiered-design.md §4.1)
+    // implementation (docs/architecture/storage/tiered-design.md §4.1)
     return fsutil::load_object_meta(data_path, std::move(key));
 }
 
@@ -433,7 +433,7 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
         }
         // Stubbed between open and reading the sidecar: the fd points at a 0-length new
         // inode and cannot deliver the size the sidecar claims -- report it so tiered
-        // retries via the cloud (docs/storage/tiered-design.md §7.3 conflict matrix)
+        // retries via the cloud (docs/architecture/storage/tiered-design.md §7.3 conflict matrix)
         if (tier.tier != fsutil::Tier::kLocal && out.meta.size > 0 &&
             static_cast<uint64_t>(st.st_size) != out.meta.size)
             throw fsutil::StubRace(std::string(key));
@@ -1062,7 +1062,7 @@ Task<void> LocalFsBackend::set_object_tagging(std::string_view bucket, std::stri
     fsutil::rewrite_object_meta(p, meta, tier, staging_ / "put", opt_.sidecar, &xattr_);
 }
 
-// ---------- multipart (docs/storage/storage-backend.md §3.2) ----------
+// ---------- multipart (docs/architecture/storage/storage-backend.md §3.2) ----------
 // Layout: <staging>/mpu/<upload_id>/{manifest, part.NNNNN, part.NNNNN.md5}
 // A part fsyncs its data first, then writes .md5: the presence of .md5 means the part data
 // is durable (complete trusts .md5 without recomputing the checksum, and that trust

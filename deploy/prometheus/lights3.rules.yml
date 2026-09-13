@@ -1,5 +1,5 @@
-# Prometheus recording + alerting rules for lights3 (roadmap §5.5, docs/monitoring.md §3).
-# Every metric name below is emitted by GET /-/metrics (docs/s3-protocol.md §7);
+# Prometheus recording + alerting rules for lights3 (roadmap §5.5, docs/usage/monitoring.md §3).
+# Every metric name below is emitted by GET /-/metrics (docs/architecture/s3-protocol.md §7);
 # tests/monitoring/check_assets.py cross-checks them against the source catalog.
 # Thresholds are starting points for a single gateway — tune `for` and the
 # ratios to the deployment's traffic shape.
@@ -89,7 +89,7 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: "shared thread pool backlogged on {{ $labels.instance }}"
-          description: "The shared pool has been over its queue threshold for 5m; the pool wait histogram shifting right is the criterion for dedicated per-backend pools (docs/concurrency.md §3.1)."
+          description: "The shared pool has been over its queue threshold for 5m; the pool wait histogram shifting right is the criterion for dedicated per-backend pools (docs/architecture/concurrency.md §3.1)."
       - alert: Lights3TimerLag
         expr: lights3_timer_lag_seconds > 5
         for: 5m
@@ -125,7 +125,7 @@ groups:
         labels: {severity: info}
         annotations:
           summary: "TLS handshakes failing on {{ $labels.instance }}"
-          description: "Plaintext clients on the TLS port, an unsupported TLS version/cipher, or clients failing mTLS (docs/tls.md)."
+          description: "Plaintext clients on the TLS port, an unsupported TLS version/cipher, or clients failing mTLS (docs/usage/tls.md)."
       - alert: Lights3RateLimitRejections
         expr: rate(lights3_ratelimit_rejections_total[5m]) > 10
         for: 10m
@@ -195,14 +195,14 @@ groups:
         labels: {severity: critical}
         annotations:
           summary: "duostore {{ $labels.backend }} detected corrupt data"
-          description: "A CRC mismatch on read or a corrupt pack record during GC/compaction. Run `lights3 fsck` / `lights3 duostore scan` (docs/cli.md) and inspect the disk."
+          description: "A CRC mismatch on read or a corrupt pack record during GC/compaction. Run `lights3 fsck` / `lights3 duostore scan` (docs/usage/cli.md) and inspect the disk."
       - alert: Lights3DuostorePacksQuarantined
         expr: lights3_duostore_packs_quarantined > 0
         for: 10m
         labels: {severity: warning}
         annotations:
           summary: "{{ $value }} quarantined packs on duostore {{ $labels.backend }}"
-          description: "Packs set aside by the scrubber; live data in them is unreadable until resolved (docs/storage/duostore-design.md)."
+          description: "Packs set aside by the scrubber; live data in them is unreadable until resolved (docs/architecture/storage/duostore-design.md)."
       - alert: Lights3DuostoreCompactionDeferred
         expr: lights3_duostore_gc_compact_deferred > 0
         for: 6h
@@ -228,7 +228,7 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: "TiKV GC safepoint updates failing on {{ $labels.backend }}"
-          description: "PD safepoint updates fail; TiKV GC may reclaim versions the meta store still needs (docs/storage/duostore-meta-tikv-design.md)."
+          description: "PD safepoint updates fail; TiKV GC may reclaim versions the meta store still needs (docs/architecture/storage/duostore-meta-tikv-design.md)."
       - alert: Lights3DuostoreRadosErrors
         expr: rate(lights3_duostore_rados_op_errors_total[5m]) > 0.1
         for: 5m
@@ -259,28 +259,28 @@ groups:
         labels: {severity: critical}
         annotations:
           summary: "tiered {{ $labels.backend }} quarantine has {{ $labels.kind }} entries"
-          description: "refs_missing = a stub references a cloud copy that is gone (data-loss signal); foreign = unexpected cloud objects. Resolve with `lights3 tier quarantine` (docs/cli.md)."
+          description: "refs_missing = a stub references a cloud copy that is gone (data-loss signal); foreign = unexpected cloud objects. Resolve with `lights3 tier quarantine` (docs/usage/cli.md)."
       - alert: Lights3TieredEvictionPressure
         expr: rate(lights3_tiered_evicted_bytes_total[15m]) > 0 and increase(lights3_tiered_scan_rounds_total[15m]) > 0
         for: 1h
         labels: {severity: info}
         annotations:
           summary: "tiered {{ $labels.backend }} evicting continuously (space watermark)"
-          description: "The local tier sits above space_high_watermark for an hour: every scan evicts. Grow the local disk, lower cold_after, or raise the watermark (docs/storage/tiered-design.md). lights3_tiered_local_used_bytes vs _high_watermark_bytes shows how far above."
+          description: "The local tier sits above space_high_watermark for an hour: every scan evicts. Grow the local disk, lower cold_after, or raise the watermark (docs/architecture/storage/tiered-design.md). lights3_tiered_local_used_bytes vs _high_watermark_bytes shows how far above."
       - alert: Lights3TieredLocalAboveHighWatermark
         expr: lights3_tiered_local_used_bytes >= lights3_tiered_local_high_watermark_bytes
         for: 30m
         labels: {severity: warning}
         annotations:
           summary: "tiered {{ $labels.backend }} local filesystem above space_high_watermark for 30m"
-          description: "Eviction is not bringing the local filesystem back under the watermark ({{ $value | humanize1024 }}B used). Other data on the same filesystem, a stalled scan, or too little cold data to evict — check lights3_tiered_evicted_bytes_total and the scan rounds (docs/storage/tiered-design.md)."
+          description: "Eviction is not bringing the local filesystem back under the watermark ({{ $value | humanize1024 }}B used). Other data on the same filesystem, a stalled scan, or too little cold data to evict — check lights3_tiered_evicted_bytes_total and the scan rounds (docs/architecture/storage/tiered-design.md)."
       - alert: Lights3TieredQuotaNearlyFull
         expr: lights3_tiered_local_quota_bytes > 0 and lights3_tiered_local_cached_bytes > 0.9 * lights3_tiered_local_quota_bytes
         for: 15m
         labels: {severity: info}
         annotations:
           summary: "tiered {{ $labels.backend }} booked local data above 90% of quota_bytes"
-          description: "The logical quota is close to full; the quota scan evicts above space_high_watermark × quota_bytes. Raise quota_bytes or lower cold_after (docs/storage/tiered-design.md)."
+          description: "The logical quota is close to full; the quota scan evicts above space_high_watermark × quota_bytes. Raise quota_bytes or lower cold_after (docs/architecture/storage/tiered-design.md)."
       - alert: Lights3TieredCloudReadHeavy
         expr: |
           sum by (instance, backend) (rate(lights3_tiered_get_source_total{source="cloud"}[15m]))
@@ -312,7 +312,7 @@ groups:
         labels: {severity: critical}
         annotations:
           summary: "cloudproxy {{ $labels.backend }} ETag mismatch on upload"
-          description: "The remote's ETag differed from the locally computed digest: data corrupted in transit or a remote that rewrites bodies (docs/storage/cloudproxy-design.md §6)."
+          description: "The remote's ETag differed from the locally computed digest: data corrupted in transit or a remote that rewrites bodies (docs/architecture/storage/cloudproxy-design.md §6)."
       - alert: Lights3CloudproxyPoolWait
         expr: histogram_quantile(0.99, sum by (instance, backend, le) (rate(lights3_cloudproxy_pool_wait_seconds_bucket[5m]))) > 1
         for: 10m
@@ -335,7 +335,7 @@ groups:
         labels: {severity: info}
         annotations:
           summary: "usage reconciliation has not run for 2 days on {{ $labels.instance }}"
-          description: "usage.reconcile_interval elapsed twice without a full recount; counters may drift from the incremental path (docs/multi-tenancy.md §2)."
+          description: "usage.reconcile_interval elapsed twice without a full recount; counters may drift from the incremental path (docs/architecture/multi-tenancy.md §2)."
 
   - name: lights3.tables
     rules:
@@ -345,19 +345,19 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: "S3 Tables: more than half of the commits on {{ $labels.instance }} lose the CAS"
-          description: "Writers keep colliding on the same tables (or a stale-token client retries blindly). Sustained conflict ratios mean the workload needs fewer concurrent writers per table (docs/s3-tables-design.md §5.2)."
+          description: "Writers keep colliding on the same tables (or a stale-token client retries blindly). Sustained conflict ratios mean the workload needs fewer concurrent writers per table (docs/architecture/s3-tables-design.md §5.2)."
       - alert: Lights3TablesCommitErrors
         expr: increase(lights3_tables_commits_total{result="error"}[10m]) > 0
         labels: {severity: critical}
         annotations:
           summary: "S3 Tables: commit ended in CommitStateUnknown on {{ $labels.instance }}"
-          description: "The pointer CAS threw something other than a precondition failure: the storage backend failed mid-commit. Run GET .../catalog/diagnostics on the affected tables; a FinalizationRequired record is repaired by POST .../catalog/recovery (docs/s3-tables-design.md §5.4)."
+          description: "The pointer CAS threw something other than a precondition failure: the storage backend failed mid-commit. Run GET .../catalog/diagnostics on the affected tables; a FinalizationRequired record is repaired by POST .../catalog/recovery (docs/architecture/s3-tables-design.md §5.4)."
       - alert: Lights3TablesValidationSkipped
         expr: increase(lights3_tables_validation_skipped_total[1h]) > 0
         labels: {severity: info}
         annotations:
           summary: "S3 Tables: snapshots committed without deep validation on {{ $labels.instance }}"
-          description: "A manifest used an Avro codec this build cannot read (snappy / zstd, or deflate without zlib); the commit was accepted with lights3.snapshot-validation = skipped-codec. Build with zlib or make writers use deflate / null (docs/s3-tables-design.md §7.4)."
+          description: "A manifest used an Avro codec this build cannot read (snappy / zstd, or deflate without zlib); the commit was accepted with lights3.snapshot-validation = skipped-codec. Build with zlib or make writers use deflate / null (docs/architecture/s3-tables-design.md §7.4)."
       - alert: Lights3TablesCommitP99
         expr: histogram_quantile(0.99, sum by (instance, le) (rate(lights3_tables_commit_seconds_bucket[5m]))) > 5
         for: 10m

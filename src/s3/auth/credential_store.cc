@@ -25,7 +25,7 @@ namespace {
 
 using nlohmann::json;
 
-// ---------- CSPRNG generation (docs/credential-management.md §6) ----------
+// ---------- CSPRNG generation (docs/architecture/credential-management.md §6) ----------
 
 void fill_random(uint8_t* buf, size_t n) {
     // getentropy caps a single call at 256 bytes; at most 30 bytes here
@@ -58,7 +58,7 @@ std::string random_secret_key() {
     return sk;
 }
 
-// ---------- policy JSON conventions (docs/credential-management.md §10.4) ----------
+// ---------- policy JSON conventions (docs/architecture/credential-management.md §10.4) ----------
 
 CredentialPolicy policy_from_json_obj(const json& j) {
     if (!j.is_object()) throw S3Error(S3ErrorCode::InvalidRequest, "policy must be a JSON object.");
@@ -121,7 +121,7 @@ json policy_to_json_obj(const CredentialPolicy& p) {
     return j;
 }
 
-// ---------- On-disk format (docs/credential-management.md §4.2 / §10.1) ----------
+// ---------- On-disk format (docs/architecture/credential-management.md §4.2 / §10.1) ----------
 
 std::string object_key(std::string_view ak) { return std::string(kCredPrefix) + std::string(ak); }
 
@@ -237,7 +237,7 @@ Task<std::string> read_all(http::BodyReader& body, size_t max_size = 64 * 1024) 
     co_return out;
 }
 
-// ---------- credentials_file parsing (docs/credential-management.md §10.2) ----------
+// ---------- credentials_file parsing (docs/architecture/credential-management.md §10.2) ----------
 // {"credentials": [{"access_key","secret_key","comment"?,"policy"?}]}
 // Failure throws runtime_error (fail-fast at startup; on hot reload the caller warns and keeps the old table)
 
@@ -384,7 +384,7 @@ CredentialPolicy parse_policy_json(const std::string& text) {
 
 std::string policy_to_json(const CredentialPolicy& p) { return policy_to_json_obj(p).dump(); }
 
-// ---------- Loading (docs/credential-management.md §5.1 / §10) ----------
+// ---------- Loading (docs/architecture/credential-management.md §5.1 / §10) ----------
 
 Task<std::shared_ptr<CredentialStore>> CredentialStore::load(std::shared_ptr<storage::IStorageBackend> backend,
                                                              const AuthConfig& cfg) {
@@ -461,7 +461,7 @@ Task<std::shared_ptr<CredentialStore>> CredentialStore::load(std::shared_ptr<sto
         LOG_INFO("loaded {} credential(s) from {}", n, cfg.credentials_file);
     }
 
-    // Static table: on same AK, static wins (docs/credential-management.md §5.1)
+    // Static table: on same AK, static wins (docs/architecture/credential-management.md §5.1)
     for (auto& c : cfg.credentials) {
         CredentialInfo info;
         info.access_key = c.access_key;

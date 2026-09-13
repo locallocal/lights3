@@ -472,7 +472,7 @@ RedisMetaStore::RedisMetaStore(RedisMetaOptions opt) : opt_(std::move(opt)) {
         if (probe->type == REDIS_REPLY_ARRAY && probe->elements == 2 && reply_str(probe->element[1]) != "yes")
             LOG_WARN(
                 "duostore redis meta: appendonly=no -- a crash may roll back data; "
-                "deployment requires AOF (docs/storage/duostore-meta-redis-design.md §6)");
+                "deployment requires AOF (docs/architecture/storage/duostore-meta-redis-design.md §6)");
     } else {
         LOG_INFO("duostore redis meta: CONFIG GET unavailable, skipping AOF probe");
     }
@@ -900,7 +900,7 @@ std::vector<BucketInfo> RedisMetaStore::list_buckets() {
     return out;
 }
 
-// ---------- KV facade (docs/s3-tables-design.md §12) ----------
+// ---------- KV facade (docs/architecture/s3-tables-design.md §12) ----------
 // Value in HASH tc, its etag in HASH tce (the guarded commit compares the sha1 of a
 // field's value, so the etag lives in a field of its own), the key in the lex ZSET tcz
 // for ordered scans. A conditional put is one guarded EVALSHA: expect_absent /

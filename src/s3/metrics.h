@@ -1,4 +1,4 @@
-// L2: request metrics (docs/s3-protocol.md §7), emitted by GET /-/metrics in Prometheus text format
+// L2: request metrics (docs/architecture/s3-protocol.md §7), emitted by GET /-/metrics in Prometheus text format
 #pragma once
 
 #include <array>
@@ -43,7 +43,7 @@ struct AdmissionStats {
     uint64_t stalls_out = 0;
 };
 
-// Static-website plane events (roadmap §5.3, docs/static-website.md)
+// Static-website plane events (roadmap §5.3, docs/usage/static-website.md)
 enum class WebsiteEvent {
     // request admitted on the anonymous plane
     AnonRead = 0,

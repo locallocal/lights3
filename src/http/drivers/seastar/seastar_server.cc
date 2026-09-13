@@ -1,4 +1,4 @@
-// L1: seastar driver — shard-per-core asynchronous model (docs/http-adapter.md §3.3).
+// L1: seastar driver — shard-per-core asynchronous model (docs/architecture/http-adapter.md §3.3).
 //
 // Key difference from the other drivers: the seastar reactor can only start
 // once per process, so the engine is a process-level singleton (brought up by
@@ -314,7 +314,8 @@ struct SeaConn {
 
 // Body-read state belongs to the session coroutine frame (after the handler's
 // reader is destroyed, the connection still needs to drain).
-// Contract (docs/http-adapter.md §4): normal EOF returns 0; client disconnect / bad chunked propagate as exceptions.
+// Contract (docs/architecture/http-adapter.md §4): normal EOF returns 0; client disconnect / bad chunked propagate as
+// exceptions.
 struct BodyState {
     SeaConn* conn = nullptr;
     unsigned shard = 0;
@@ -340,7 +341,7 @@ struct BodyState {
         co_await ResumeOnShard{shard};
         if (error) fail("read after connection error");
         // Deferred 100-continue: the client is told to send only once the handler decides it wants the body
-        // (docs/http-adapter.md §3.1)
+        // (docs/architecture/http-adapter.md §3.1)
         if (need_continue) {
             need_continue = false;
             try {
@@ -500,7 +501,7 @@ Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, 
         co_return false;
     }
 
-    // Streaming response: pulled in http.io_chunk_size chunks (docs/architecture.md
+    // Streaming response: pulled in http.io_chunk_size chunks (docs/architecture/overview.md
     // request lifecycle), one read ahead of the socket (roadmap §4.3 ①/②)
     driver::StreamPrefetch pf(*resp.stream_body, io_chunk);
     uint64_t written = 0;
@@ -806,7 +807,7 @@ ss::future<> accept_loop(std::shared_ptr<ServerCore> core, std::shared_ptr<Shard
     st->listener.reset();
     // Released here, on the owning shard: reloadable credentials tear down their
     // fsnotify watcher through the reactor, which must not happen from the thread
-    // that later drops the last ServerCore reference (docs/tls.md §4)
+    // that later drops the last ServerCore reference (docs/usage/tls.md §4)
     st->tls_creds = {};
 }
 
@@ -865,7 +866,7 @@ ss::future<> stop_watcher(std::shared_ptr<ServerCore> core, ss::readable_eventfd
 // the caller's lambda object staying alive (a coroutine lambda's captures
 // dangle once the lambda object is destroyed, and the alien/smp posting
 // closures do not outlive the first suspension)
-// TLS credentials for one shard (roadmap §4.1, docs/tls.md §4): the shared
+// TLS credentials for one shard (roadmap §4.1, docs/usage/tls.md §4): the shared
 // config surface mapped onto seastar::tls. Versions/client auth map onto both
 // backends (a GnuTLS priority string plus the OpenSSL-only setters, each a no-op
 // on the other backend); cipher strings only reach the OpenSSL backend. With a
@@ -974,7 +975,7 @@ uint16_t probe_free_port(const std::string& addr) {
 class SeastarServer final : public IHttpServer {
 public:
     explicit SeastarServer(const HttpConfig& cfg) : cfg_(cfg) {
-        // TLS (roadmap §4.1) goes through seastar::tls (docs/tls.md §4). The
+        // TLS (roadmap §4.1) goes through seastar::tls (docs/usage/tls.md §4). The
         // credentials are built inside the reactor at listen(); what can be
         // checked without it is checked here so misconfiguration fails at startup
         if (!cfg.tls_cert.empty()) {
@@ -991,7 +992,7 @@ public:
                 LOG_WARN(
                     "seastar driver: tls_ciphers/tls_ciphersuites only apply to a "
                     "seastar built with the OpenSSL backend (GnuTLS uses its own priority "
-                    "string, docs/tls.md §4)");
+                    "string, docs/usage/tls.md §4)");
         }
     }
 

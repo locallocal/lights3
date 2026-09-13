@@ -1,4 +1,4 @@
-// Iceberg REST surface through the full S3Service dispatch (docs/s3-tables-design.md §6, §8.1,
+// Iceberg REST surface through the full S3Service dispatch (docs/architecture/s3-tables-design.md §6, §8.1,
 // §13): endpoints, error model, guard, config drift
 #include <chrono>
 #include <filesystem>

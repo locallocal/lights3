@@ -1,5 +1,5 @@
 // L3 decorator: per-backend operation timing and error counting (roadmap §5.1,
-// docs/s3-protocol.md §7). Wraps a backend behind the bucket router so every
+// docs/architecture/s3-protocol.md §7). Wraps a backend behind the bucket router so every
 // data-plane call is measured once, uniformly for all six implementations:
 //   - lights3_backend_op_seconds{backend,op} histogram (+ _count/_sum),
 //     lights3_backend_errors_total{backend,op} — an error is anything that is not

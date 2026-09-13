@@ -58,7 +58,7 @@ int check_config(const std::string& path) {
     }
 #endif
     // S3 Tables on a single-gateway default backend with multi-gateway signals
-    // (docs/s3-tables-design.md §5.5): the same line startup logs
+    // (docs/architecture/s3-tables-design.md §5.5): the same line startup logs
     if (auto w = lights3::tables_deployment_warning(cfg)) fprintf(stderr, "config warning: %s\n", w->c_str());
     printf("config %s: %s\n", path.c_str(), problems ? "REJECTED" : "ok");
     printf("  http      driver=%s bind=%s:%u tls=%s metrics_access=%s\n", cfg.http.driver.c_str(),

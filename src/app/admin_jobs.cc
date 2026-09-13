@@ -116,7 +116,7 @@ FsckOutcome run_scrub(storage::IStorageBackend& backend, uint64_t max_bytes_per_
 
 namespace {
 
-// The rounds are the ones the timers run (docs/cli.md §2.4): the stats they
+// The rounds are the ones the timers run (docs/usage/cli.md §2.4): the stats they
 // return are flattened field by field so the JSON mirrors the *Stats structs
 JobOutcome run_tier_job(JobOp op, storage::TieredBackend& t) {
     JobOutcome out;

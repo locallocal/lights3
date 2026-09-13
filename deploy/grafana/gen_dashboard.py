@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generates deploy/grafana/lights3.json (roadmap §5.5, docs/monitoring.md §4).
+"""Generates deploy/grafana/lights3.json (roadmap §5.5, docs/usage/monitoring.md §4).
 
 The dashboard is kept as generated JSON so it imports into Grafana directly;
 this script is the source of truth for its panels. Regenerate after editing:
@@ -152,7 +152,7 @@ timeseries("Connections", [(f'sum(lights3_http_connections_active{{{INST}}})', "
 timeseries("Keep-alive reuse (requests per connection)",
            [(f'sum(rate(lights3_http_requests_total{{{INST}}}[$__rate_interval])) / clamp_min(sum(rate(lights3_http_connections_total{{{INST},result="accepted"}}[$__rate_interval])), 1e-9)', "requests / accepted"),
             (f'sum(rate(lights3_http_keepalive_closes_total{{{INST}}}[$__rate_interval]))', "budget closes/s")],
-           description="httplib runs upstream's accept loop and reports 0 accepted (docs/http-adapter.md §2.2)")
+           description="httplib runs upstream's accept loop and reports 0 accepted (docs/architecture/http-adapter.md §2.2)")
 timeseries("Timeouts by phase", [(f'sum by (phase) (rate(lights3_http_timeouts_total{{{INST}}}[$__rate_interval]))', "{{phase}}")], unit="reqps")
 timeseries("Malformed requests / TLS handshakes",
            [(f'sum(rate(lights3_http_parse_errors_total{{{INST}}}[$__rate_interval]))', "parse errors/s"),
@@ -232,7 +232,7 @@ timeseries("Reads by source", [(f'sum by (backend, source) (rate(lights3_tiered_
 timeseries("Demotion / promotion / eviction", [(f'sum by (backend) (rate(lights3_tiered_demoted_objects_total{{{INST},{BK}}}[$__rate_interval]))', "demoted/s {{backend}}"),
                                                 (f'sum by (backend) (rate(lights3_tiered_promoted_objects_total{{{INST},{BK}}}[$__rate_interval]))', "promoted/s {{backend}}"),
                                                 (f'sum by (backend) (rate(lights3_tiered_evicted_bytes_total{{{INST},{BK}}}[$__rate_interval]))', "evicted B/s {{backend}}")],
-           description="Sustained eviction = the local tier sits above space_high_watermark (no local-usage gauge is exported)")
+           description="Sustained eviction = the local tier sits above space_high_watermark (see the Local tier capacity panel for the gauges)")
 timeseries("Local tier capacity", [(f'lights3_tiered_local_used_bytes{{{INST},{BK}}}', "fs used {{backend}}"),
                                    (f'lights3_tiered_local_high_watermark_bytes{{{INST},{BK}}}', "high watermark {{backend}}"),
                                    (f'lights3_tiered_local_cached_bytes{{{INST},{BK}}}', "booked local data {{backend}}"),

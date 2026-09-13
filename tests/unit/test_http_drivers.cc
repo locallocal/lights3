@@ -1,5 +1,5 @@
-// Driver consistency tests (docs/http-adapter.md §4): every compiled driver runs the same set of contract cases.
-// A raw TCP client speaks HTTP/1.1 directly, verifying driver behavior rather than L2 semantics.
+// Driver consistency tests (docs/architecture/http-adapter.md §4): every compiled driver runs the same set of contract
+// cases. A raw TCP client speaks HTTP/1.1 directly, verifying driver behavior rather than L2 semantics.
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <openssl/ssl.h>
@@ -1499,7 +1499,7 @@ TEST(http_driver_request_and_parse_error_counters) {
 }
 
 TEST(http_driver_tls_seastar_rejects_sni) {
-    // seastar's credentials carry one certificate per listener (docs/tls.md §4): a
+    // seastar's credentials carry one certificate per listener (docs/usage/tls.md §4): a
     // tls_sni list must fail at construction rather than serve the wrong certificate
     TlsCertFiles certs;
     for (auto& d : HttpServerFactory::drivers()) {

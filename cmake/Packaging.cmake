@@ -1,4 +1,4 @@
-# Install tree + CPack packages (roadmap §6.3, docs/deployment.md).
+# Install tree + CPack packages (roadmap §6.3, docs/usage/deployment.md).
 #
 #   cmake --install build [--prefix /usr/local]   # binaries, lights3ctl, unit, sample config
 #   cpack --config build/CPackConfig.cmake -G DEB  # or RPM; `cmake --build build --target package`

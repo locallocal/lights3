@@ -1,6 +1,6 @@
 // lights3-ctl `reload` — asks the server to re-read its configuration file and prints
 // the report: what was applied at runtime and what still needs a restart
-// (docs/config-reload.md). Root credential only; same effect as SIGHUP, but with
+// (docs/usage/config-reload.md). Root credential only; same effect as SIGHUP, but with
 // the outcome returned instead of only logged.
 #include "tools/lights3_ctl_reload.h"
 

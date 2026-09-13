@@ -134,14 +134,15 @@ void run_tier_quarantine_purge(const Cmd& c) {
 }
 
 Cmd make_tier_quarantine() {
-    auto cmd = make_group("quarantine", "lights3 tier quarantine list tierdata",
-                          "lights3 tier quarantine <list|forget|purge> <backend> [<bucket> <key>] [--config=<path>]",
-                          "Reconciliation quarantine ledger (docs/storage/tiered-design.md §9): findings that "
-                          "repeat every round (stub whose cloud copy is gone; foreign cloud object without "
-                          "lights3 headers) are recorded once and stop re-alerting. list shows them; forget "
-                          "drops an entry without touching data; purge deletes the dead local stub of a "
-                          "refs_missing finding after re-verifying the cloud copy is still gone.",
-                          "tiered quarantine ledger (list/forget/purge)");
+    auto cmd = make_group(
+        "quarantine", "lights3 tier quarantine list tierdata",
+        "lights3 tier quarantine <list|forget|purge> <backend> [<bucket> <key>] [--config=<path>]",
+        "Reconciliation quarantine ledger (docs/architecture/storage/tiered-design.md §9): findings that "
+        "repeat every round (stub whose cloud copy is gone; foreign cloud object without "
+        "lights3 headers) are recorded once and stop re-alerting. list shows them; forget "
+        "drops an entry without touching data; purge deletes the dead local stub of a "
+        "refs_missing finding after re-verifying the cloud copy is still gone.",
+        "tiered quarantine ledger (list/forget/purge)");
     cmd->add_subcommand(make_backend_leaf(
         "list", "lights3 tier quarantine list tierdata", "lights3 tier quarantine list <backend> [--config=<path>]",
         "Print every quarantined finding with its first/last sighting and repeat count.", "list quarantined findings",
@@ -164,12 +165,13 @@ Cmd make_tier_quarantine() {
 }  // namespace
 
 Cmd make_tier() {
-    auto cmd = make_group("tier", "lights3 tier scan tierdata --config=config/lights3.yaml",
-                          "lights3 tier <scan|gc|reconcile|quarantine> <backend> [--config=<path>]",
-                          "Tiered-storage background tasks on demand (docs/storage/tiered-design.md §9): the "
-                          "same rounds the timers run, for operators who cannot wait for the next tick. "
-                          "Runs with the backends built but no server listening, then exits.",
-                          "tiered background tasks (scan/gc/reconcile) + quarantine ledger");
+    auto cmd = make_group(
+        "tier", "lights3 tier scan tierdata --config=config/lights3.yaml",
+        "lights3 tier <scan|gc|reconcile|quarantine> <backend> [--config=<path>]",
+        "Tiered-storage background tasks on demand (docs/architecture/storage/tiered-design.md §9): the "
+        "same rounds the timers run, for operators who cannot wait for the next tick. "
+        "Runs with the backends built but no server listening, then exits.",
+        "tiered background tasks (scan/gc/reconcile) + quarantine ledger");
     cmd->add_subcommand(make_backend_leaf("scan", "lights3 tier scan tierdata",
                                           "lights3 tier scan <backend> [--config=<path>]",
                                           "Run one scan round now: coldness detection + space-watermark reclamation + "

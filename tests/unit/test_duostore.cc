@@ -1,10 +1,10 @@
-// Dedicated DuoStore unit tests (docs/storage/duostore-design.md §14): codec roundtrip and run boundaries,
+// Dedicated DuoStore unit tests (docs/architecture/storage/duostore-design.md §14): codec roundtrip and run boundaries,
 // cross-chunk read/write, bitrot detection, GC phase one (P3), pack aggregation (P2: routing / chunked
 // buffering / rotation sealing / record format / crc / abandonment on restart / whole-empty-pack deletion).
 // Meta-semantics cases (GC accounting, monotonic id segments, pack liveness accounting, etc.) have been
-// interfaced out as meta_store_suite (docs/storage/duostore-meta-redis-design.md §9); RocksMetaStore always runs here,
-// redis/sqlite/tikv run conditionally in their own test files.
-// Compaction / crash-injection specials added with P4.
+// interfaced out as meta_store_suite (docs/architecture/storage/duostore-meta-redis-design.md §9); RocksMetaStore
+// always runs here, redis/sqlite/tikv run conditionally in their own test files. Compaction / crash-injection specials
+// added with P4.
 #ifdef LIGHTS3_DUOSTORE
 
 #include <sys/wait.h>
@@ -99,8 +99,8 @@ TEST(duostore_extent_run_roundtrip) {
     std::vector<Extent> packs = {{Extent::Kind::kPack, 7, 4096, 100, 42}, {Extent::Kind::kPack, 7, 8192, 50, 43}};
     CHECK(codec::decode_extents(codec::encode_extents(packs)) == packs);
 
-    // kRados merges isomorphically to kChunk (docs/storage/duostore-data-rados-design.md §3.1): consecutive ids
-    // compress into a single run; adjacent extents of different kinds do not merge
+    // kRados merges isomorphically to kChunk (docs/architecture/storage/duostore-data-rados-design.md §3.1):
+    // consecutive ids compress into a single run; adjacent extents of different kinds do not merge
     std::vector<Extent> rados;
     for (uint64_t i = 0; i < 4; ++i)
         rados.push_back({Extent::Kind::kRados, 500 + i, 0, uint64_t(i == 3 ? 100 : 8192), uint32_t(i)});
@@ -1324,9 +1324,9 @@ TEST(duostore_config_deployment_warning) {
     CHECK_EQ(std::string(c.data_kind_name()), std::string("rados"));
 }
 
-// Single-instance execution gating for multiple gateways (C4, docs/storage/duostore-data-rados-design.md §8.3):
-// gc_enabled=false only stops the scheduling of the background worker/orphan scan; the manual hooks (test/ops channel)
-// are not gated
+// Single-instance execution gating for multiple gateways (C4, docs/architecture/storage/duostore-data-rados-design.md
+// §8.3): gc_enabled=false only stops the scheduling of the background worker/orphan scan; the manual hooks (test/ops
+// channel) are not gated
 TEST(duostore_config_gc_enabled_gates_background_only) {
     std::map<std::string, std::string> p{{"root", "/tmp/duo-cfg"}, {"gc_enabled", "false"}};
     auto c = DuoStoreConfig::from_params("t", p);

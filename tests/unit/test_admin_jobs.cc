@@ -1,6 +1,6 @@
 // app/admin_jobs.h: the maintenance jobs of a live gateway -- the offline scrub
 // (backlog-sequence ③) plus the duostore / tier background rounds and the
-// quarantine ledgers (docs/cli.md §3.12): type dispatch, one job per backend
+// quarantine ledgers (docs/usage/cli.md §3.12): type dispatch, one job per backend
 // whatever the op, polling document, outcome after completion, and the
 // server-side handlers' path / method / error mapping through fake hooks
 #include <chrono>
@@ -488,7 +488,7 @@ TEST(service_admin_fsck_endpoint) {
     CHECK_EQ(call("GET", "/-/admin/tier/tier/quarantine", "", &p).status, 403);
 }
 
-// ---------- S3 Tables catalog reconciliation on fsck (docs/s3-tables-design.md §14 ③) ----------
+// ---------- S3 Tables catalog reconciliation on fsck (docs/architecture/s3-tables-design.md §14 ③) ----------
 
 TEST(admin_jobs_fsck_extension_merges_into_the_scrub) {
     TmpDirF tmp;

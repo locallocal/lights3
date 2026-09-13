@@ -7,7 +7,7 @@
 // covers the no-length case. On mismatch the exception is thrown before the last chunk is delivered downstream,
 // working with backend.h's contract that "if body.read throws, the backend must not commit".
 //
-// Digests declared as aws-chunked **trailers** (x-amz-trailer, docs/s3-protocol.md §3.3) are verified
+// Digests declared as aws-chunked **trailers** (x-amz-trailer, docs/architecture/s3-protocol.md §3.3) are verified
 // inside ChunkedSigV4BodyReader instead -- the expected value only arrives after the payload -- reusing
 // StreamingDigest and the checksum_spec table below.
 #pragma once

@@ -37,7 +37,7 @@ void validate_bucket_name(std::string_view b, bool allow_reserved) {
     auto fail = [&] {
         throw S3Error(S3ErrorCode::InvalidBucketName, "The specified bucket is not valid.", std::string(b));
     };
-    // Internal reserved bucket (docs/credential-management.md §4.1, credential
+    // Internal reserved bucket (docs/architecture/credential-management.md §4.1, credential
     // persistence): only callers that explicitly pass allow_reserved (CredentialStore) may
     // use it. Previously this was unconditionally admitted, i.e. the backend layer offered
     // no protection at all for the reserved name and relied entirely on L2's '.'-prefix
@@ -121,7 +121,7 @@ void validate_fs_object_key(std::string_view k) {
         std::string_view seg = body.substr(start, end - start);
         if (seg.empty()) throw S3Error(S3ErrorCode::InvalidArgument, "Object key contains an empty path segment.");
         // A single segment beyond the file-name limit (255B) cannot land on disk
-        // (docs/storage/storage-backend.md §3.1)
+        // (docs/architecture/storage/storage-backend.md §3.1)
         if (seg.size() > 255)
             throw S3Error(S3ErrorCode::KeyTooLongError, "A single path segment of the key exceeds 255 bytes.");
         if (end == body.size()) break;

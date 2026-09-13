@@ -1,4 +1,4 @@
-// L3: SQLite implementation of IMetaStore (docs/storage/duostore-meta-sqlite-design.md).
+// L3: SQLite implementation of IMetaStore (docs/architecture/storage/duostore-meta-sqlite-design.md).
 // Commit-class operations = a single SQL transaction (BEGIN IMMEDIATE + RAII guard,
 // §3.2); compound invariants are read-checked-written inside the transaction's
 // isolation domain, with zero window. One in-process std::mutex serializes writers
@@ -32,7 +32,7 @@ struct SqliteMetaOptions {
     int pool_size = 8;
     // busy handler wait (§5.2; not in YAML, tests may shorten)
     int busy_timeout_ms = 5000;
-    // Backup chain directory (backlog-sequence ⑧, docs/storage/duostore-meta-sqlite.md
+    // Backup chain directory (backlog-sequence ⑧, docs/architecture/storage/duostore-meta-sqlite.md
     // §10): when set and a full backup has started a chain there, auto-checkpoints
     // are off and the WAL is archived as one segment per `backup --incremental`
     // (and once more at close), so every commit reaches the chain. Empty = off
@@ -90,7 +90,7 @@ public:
     // transaction materialized. Borrows this store — destroy before close()
     std::unique_ptr<IMetaReadView> snapshot() override;
 
-    // KV facade (table tc; docs/s3-tables-design.md §12)
+    // KV facade (table tc; docs/architecture/s3-tables-design.md §12)
     std::optional<KvItem> kv_get(std::string_view key) override;
     std::string kv_put(std::string_view key, std::string_view value, PutCondition cond) override;
     bool kv_delete(std::string_view key) override;

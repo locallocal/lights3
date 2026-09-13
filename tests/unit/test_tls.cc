@@ -1,6 +1,6 @@
 // roadmap §4.1: TLS on every OpenSSL-backed driver (builtin/beast/httplib) —
 // knobs (min version, cipher suites, client auth), SNI multi-certificate,
-// certificate hot reload, config validation (docs/tls.md)
+// certificate hot reload, config validation (docs/usage/tls.md)
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <openssl/err.h>
@@ -43,7 +43,7 @@ Task<HttpResponse> echo_handler(HttpRequest req) {
 
 // with_seastar: the seastar driver (GnuTLS/OpenSSL through seastar::tls) joins the
 // cases whose knobs it implements — versions and client auth; SNI, cipher strings
-// and the polling reload are OpenSSL-holder features (docs/tls.md §4)
+// and the polling reload are OpenSSL-holder features (docs/usage/tls.md §4)
 std::vector<std::string> tls_drivers(bool with_seastar = false) {
     std::vector<std::string> out;
     for (auto& d : HttpServerFactory::drivers())

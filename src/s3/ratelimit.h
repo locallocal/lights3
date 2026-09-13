@@ -1,4 +1,4 @@
-// L2: per-client rate limiting (roadmap §4.2, docs/http-adapter.md §2.3). One
+// L2: per-client rate limiting (roadmap §4.2, docs/architecture/http-adapter.md §2.3). One
 // RateLimiter per key space — source IP (decided before signature verification,
 // so a flood never reaches the HMAC) and access key (after it). Each key gets a
 // token bucket (sustained rps, burst capacity) plus a concurrency cap; the table

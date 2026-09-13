@@ -1,5 +1,5 @@
 // Shared helpers for the JSON admin plane (/-/admin/*): response shaping, bounded
-// body reads, and the error rendering contract (docs/credential-management.md §2 —
+// body reads, and the error rendering contract (docs/architecture/credential-management.md §2 —
 // admin errors are JSON bodies with the S3 wire code, never the XML path)
 #pragma once
 

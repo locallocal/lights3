@@ -1,5 +1,5 @@
 // lights3-ctl `website` command group — Get/Put/DeleteBucketWebsite against the
-// ?website subresource (docs/static-website.md phase ③). Requires the root
+// ?website subresource (docs/usage/static-website.md phase ③). Requires the root
 // (static) credential, same as `cred`; responses print the server's XML verbatim.
 #include "tools/lights3_ctl_website.h"
 
@@ -52,7 +52,7 @@ std::shared_ptr<ccmd::command> make_set() {
         "lights3-ctl website set <bucket> [options]",
         "Enable/replace a bucket's website configuration: the bucket becomes anonymously "
         "readable (GET/HEAD objects only) with index/error document semantics "
-        "(docs/static-website.md). Buckets configured statically in the server config "
+        "(docs/usage/static-website.md). Buckets configured statically in the server config "
         "are refused (405).",
         "set a bucket's website configuration.", [](const std::shared_ptr<ccmd::command>& c) {
             std::string bucket;
@@ -110,7 +110,7 @@ std::shared_ptr<ccmd::command> make_website() {
     auto cmd = std::make_shared<ccmd::command>(
         "website", "lights3-ctl website set my-site --error-key=error.html", "lights3-ctl website <command> [options]",
         "Manage per-bucket static website configuration via the ?website subresource "
-        "(docs/static-website.md; requires the root static credential, like `cred`). "
+        "(docs/usage/static-website.md; requires the root static credential, like `cred`). "
         "Credentials come from each subcommand's --ak=/--sk= or from env "
         "LIGHTS3_ADMIN_AK/LIGHTS3_ADMIN_SK; options must follow the leaf subcommand as "
         "--name=value.",

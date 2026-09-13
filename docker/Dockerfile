@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# LightS3 container image (roadmap §6.3, docs/deployment.md §4). The build
+# LightS3 container image (roadmap §6.3, docs/usage/deployment.md §4). The build
 # context is the repository root (run from there; .dockerignore lives next to it):
 #
 #   docker build -f docker/Dockerfile -t lights3 .                # builtin/beast/httplib drivers,
@@ -87,7 +87,7 @@ ENTRYPOINT ["lights3-entrypoint"]
 CMD []
 
 # -------------------------------------------------------------------- e2e ----
-# Test runner for `docker compose --profile e2e run --rm e2e` (docs/deployment.md §4.3):
+# Test runner for `docker compose --profile e2e run --rm e2e` (docs/usage/deployment.md §4.3):
 # the redis / tikv / rados e2e paths that stay SKIP on a developer box
 FROM builder AS e2e
 ARG DEBIAN_FRONTEND=noninteractive

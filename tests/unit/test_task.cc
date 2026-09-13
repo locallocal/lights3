@@ -128,7 +128,7 @@ TEST(pump_executor_value_and_exception) {
     CHECK(caught);
 }
 
-// ---------- Started<T> (roadmap §4.3 ①, docs/concurrency.md §2.3) ----------
+// ---------- Started<T> (roadmap §4.3 ①, docs/architecture/concurrency.md §2.3) ----------
 
 TEST(started_collect_by_wait) {
     ThreadPool pool(2);

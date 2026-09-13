@@ -7,7 +7,7 @@ PyIceberg, DuckDB, Spark or Trino can use any bucket as a lakehouse catalog.
 Design documents live in [docs/](docs/README.md) (Chinese originals, English
 translations under [docs/en/](docs/en/README.md)); the current implementation
 follows the architecture described in
-[docs/en/architecture.md](docs/en/architecture.md).
+[docs/en/architecture/overview.md](docs/en/architecture/overview.md).
 
 *中文介绍见 [docs/README.zh-CN.md](docs/README.zh-CN.md)。*
 
@@ -105,12 +105,14 @@ builds: `./build.sh --asan` / `--tsan` / `--ubsan` / `--coverage` / `--fuzz`
 (libFuzzer, clang). `scripts/check-all.sh` runs the incremental build + ctest
 matrix over every build directory present; `scripts/coverage.sh` reports line
 coverage; `scripts/bench_gate.sh` and `scripts/soak.sh` are the performance
-gate and the long-stability run — see [docs/en/testing.md](docs/en/testing.md).
+gate and the long-stability run — see [docs/en/development/testing.md](docs/en/development/testing.md).
 
 ctest also carries the fuzz corpus replays (`fuzz_regression_*`), the
 monitoring-asset check, a 3-second bench gate and a 30-second soak (labels
-`perf`/`soak`), and the MinIO mint compatibility suite (`s3cmd awscli` subset;
-needs docker and reports SKIP without it):
+`perf`/`soak`), the S3 Tables client smoke (`tables_smoke`; needs
+`LIGHTS3_TABLES_SMOKE=1` plus PyIceberg / DuckDB, SKIP otherwise), and the
+MinIO mint compatibility suite (`s3cmd awscli` subset; needs docker and
+reports SKIP without it):
 
 ```bash
 ctest --test-dir build -LE "perf|mint"      # the quick set
@@ -132,7 +134,7 @@ export LIGHTS3_MASTER_KEY=$(openssl rand -hex 32)
 ```
 
 The ops CLI `lights3-ctl` (credentials, bucket websites, table buckets, benchmarks)
-and the full `lights3` command tree are documented in [docs/en/cli.md](docs/en/cli.md).
+and the full `lights3` command tree are documented in [docs/en/usage/cli.md](docs/en/usage/cli.md).
 
 Access it with any S3 client (the examples below use curl's SigV4 support):
 
@@ -224,13 +226,13 @@ What the catalog provides:
 Verified clients: PyIceberg 0.12 and DuckDB 1.5 (ctest `tables_smoke`); Spark
 and Trino use the same REST settings (templates in the design doc, not yet
 verified here). Design and implementation notes:
-[docs/en/s3-tables-design.md](docs/en/s3-tables-design.md); commands:
-[docs/en/cli.md](docs/en/cli.md) §2.6 and §3.13; endpoint list:
-[docs/en/s3-protocol.md](docs/en/s3-protocol.md) §1.
+[docs/en/architecture/s3-tables-design.md](docs/en/architecture/s3-tables-design.md); commands:
+[docs/en/usage/cli.md](docs/en/usage/cli.md) §2.6 and §3.13; endpoint list:
+[docs/en/architecture/s3-protocol.md](docs/en/architecture/s3-protocol.md) §1.
 
 ## Install, package, containerize
 
-Three channels, all documented in [docs/en/deployment.md](docs/en/deployment.md):
+Three channels, all documented in [docs/en/usage/deployment.md](docs/en/usage/deployment.md):
 
 ```bash
 # 1. systemd service under /usr/local (build first)
@@ -268,7 +270,7 @@ lists the start / stop / restart / status / journal commands.
 - **HTTP drivers**: all four drivers are implemented, selected at runtime via
   `http.driver` and trimmed at compile time via CMake options; they share one
   driver-conformance test suite (the contract in
-  [docs/http-adapter.md](docs/http-adapter.md) §4):
+  [docs/architecture/http-adapter.md](docs/architecture/http-adapter.md) §4):
   - `builtin` — zero-dependency POSIX sockets, thread-per-connection;
   - `beast` — asynchronous Boost.Beast/Asio driver (the default performance
     path): N threads share one io_context, one per-connection session
@@ -288,7 +290,7 @@ lists the start / stop / restart / status / journal commands.
   bounded on both sides (`X-Amz-Expires` for the past, a 15-minute clock-skew
   limit against future-dated `X-Amz-Date`)
 - **Credential management**
-  ([docs/en/credential-management.md](docs/en/credential-management.md)):
+  ([docs/en/architecture/credential-management.md](docs/en/architecture/credential-management.md)):
   runtime generate/query/revoke of AK/SK via `/-/admin/credentials`, persisted
   in storage; three credential sources (static config = root, external
   credentials file, dynamic) — only static credentials may call the admin API;
@@ -299,10 +301,10 @@ lists the start / stop / restart / status / journal commands.
 - **Storage**: LocalFs (sidecar metadata, atomic writes via staging+rename),
   XLocalFs (io_uring data plane using raw syscalls, no liburing required),
   Memory (for tests), CloudProxy (self-signed SigV4 proxy to a remote S3,
-  [docs/storage/cloudproxy-design.md](docs/storage/cloudproxy-design.md)), Tiered (cold-data
-  tiering combinator, [docs/storage/tiered-design.md](docs/storage/tiered-design.md)),
+  [docs/architecture/storage/cloudproxy-design.md](docs/architecture/storage/cloudproxy-design.md)), Tiered (cold-data
+  tiering combinator, [docs/architecture/storage/tiered-design.md](docs/architecture/storage/tiered-design.md)),
   DuoStore (split metadata/data engine — meta: RocksDB/Redis/SQLite/TiKV,
-  data: local fs/RADOS, [docs/storage/duostore-design.md](docs/storage/duostore-design.md));
+  data: local fs/RADOS, [docs/architecture/storage/duostore-design.md](docs/architecture/storage/duostore-design.md));
   bucket-level glob routing
 - **S3 API**: ListBuckets, Create/Head/DeleteBucket, Put/Get/Head/DeleteObject
   (including Range and conditional requests), CopyObject, batch DeleteObjects,
@@ -312,7 +314,7 @@ lists the start / stop / restart / status / journal commands.
   source may live on a different backend than the destination); static website
   hosting for explicitly listed buckets (anonymous GET/HEAD with index/error
   documents, RedirectAllRequestsTo/RoutingRules, trailing-slash 302, per-bucket
-  anonymous rate limiting, [docs/en/static-website.md](docs/en/static-website.md));
+  anonymous rate limiting, [docs/en/usage/static-website.md](docs/en/usage/static-website.md));
   CORS (`?cors` + OPTIONS preflight + response header injection); object tagging
   (`?tagging` + `x-amz-tagging` + `x-amz-tagging-count`); lifecycle minimal
   subset (Expiration.Days + AbortIncompleteMultipartUpload with a periodic
@@ -322,50 +324,35 @@ lists the start / stop / restart / status / journal commands.
   AssumeRole session credentials (SigV4 `sts` scope, token-verified data-plane
   requests with TTL)
 - **Usage / quotas / multi-tenancy / audit**
-  ([docs/en/multi-tenancy.md](docs/en/multi-tenancy.md)): per-bucket usage
+  ([docs/en/architecture/multi-tenancy.md](docs/en/architecture/multi-tenancy.md)): per-bucket usage
   counters (incremental + periodic full recount, `/-/admin/usage`); `?quota`
   bucket quotas and aggregate tenant quotas (`QuotaExceeded` 403, multipart
   parts counted); tenant entities with bucket ownership (credential
   `tenant`/`role`, tenants see only their own buckets, tiered admin plane);
   JSON-lines audit log
 - **S3 Tables / Iceberg REST catalog**
-  ([docs/en/s3-tables-design.md](docs/en/s3-tables-design.md)): table buckets,
+  ([docs/en/architecture/s3-tables-design.md](docs/en/architecture/s3-tables-design.md)): table buckets,
   catalog state on `.sys` with conditional-write commits and idempotent replay,
   deep Avro validation, diagnostics / recovery, credential vending, maintenance
   jobs, views, multi-gateway operation, optional DuoStore-meta catalog backing
   (see the section above)
 
 Not supported by design (returns NotImplemented; see
-[docs/en/s3-protocol.md](docs/en/s3-protocol.md) §1): versioning, fine-grained
+[docs/en/architecture/s3-protocol.md](docs/en/architecture/s3-protocol.md) §1): versioning, fine-grained
 ACL (only "private" is accepted), bucket policy, lifecycle
 transitions/tag filters, SSE-C/KMS, Object Lock, and presigned POST.
 
 ## Documentation
 
-Design docs are written in Chinese under [docs/](docs/README.md); English
-translations live in [docs/en/](docs/en/README.md) and mirror the Chinese
-section numbering (source comments reference sections as `docs/<name>.md §N`).
+Documents are grouped by reader under [docs/](docs/README.md) (Chinese
+originals) and [docs/en/](docs/en/README.md) (English mirror with identical
+section numbering; source comments reference sections as
+`docs/<group>/<name>.md §N`). Both indexes carry one-line summaries of every
+document.
 
-| Document ([en](docs/en/README.md) · [中文](docs/README.md)) | Contents |
+| Group ([en](docs/en/README.md) · [中文](docs/README.md)) | Documents |
 | --- | --- |
-| [architecture](docs/en/architecture.md) | Overall architecture, layering, request lifecycle, code layout |
-| [config-reload](docs/en/config-reload.md) | Configuration hot reload: SIGHUP / admin API / `lights3-ctl reload` |
-| [tls](docs/en/tls.md) | HTTPS on all drivers, certificate hot reload, mTLS / ciphers / SNI, reverse-proxy termination |
-| [http-adapter](docs/en/http-adapter.md) | Pluggable HTTP layer: neutral request/response model, streaming bodies, driver notes |
-| [concurrency](docs/en/concurrency.md) | Task coroutines, Executor abstraction, thread pool, sync/async driver bridging |
-| [storage/storage-backend](docs/en/storage/storage-backend.md) | `IStorageBackend`, LocalFs/XLocalFs, bucket routing, new-backend guide |
-| [s3-protocol](docs/en/s3-protocol.md) | API scope, SigV4 (incl. presigned & clock skew), XML codec, errors, mint gate |
-| [credential-management](docs/en/credential-management.md) | AK/SK admin API, three credential sources, `.sys` persistence, at-rest encryption, policy |
-| [multi-tenancy](docs/en/multi-tenancy.md) | Usage accounting, bucket/tenant quotas, tenants and bucket ownership, tiered admin plane, audit log |
-| [s3-tables-design](docs/en/s3-tables-design.md) | S3 Tables: Iceberg REST catalog on `.sys`, CAS commit protocol, deep validation, diagnostics / recovery, credentials, maintenance, DuoStore-meta backing |
-| [object-read-write-flow](docs/en/object-read-write-flow.md) | End-to-end read/write paths, BodyReader chains, staging commit, fd-snapshot reads |
-| [storage/tiered-design](docs/en/storage/tiered-design.md) | Cold-data tiering to cloud, stub metadata, transparent read-back |
-| [storage/cloudproxy-design](docs/en/storage/cloudproxy-design.md) | Self-signed SigV4 proxy to remote S3, streaming pumps, retries |
-| [storage/duostore-design](docs/en/storage/duostore-design.md) | Split meta/data engine: RocksDB meta, chunk/pack, GC |
-| [storage/duostore-meta-redis-design](docs/en/storage/duostore-meta-redis-design.md) | Redis IMetaStore: hiredis + Lua guarded-commit |
-| [storage/duostore-meta-sqlite-design](docs/en/storage/duostore-meta-sqlite-design.md) | SQLite IMetaStore: embedded amalgamation, WAL, read pool |
-| [storage/duostore-data-rados-design](docs/en/storage/duostore-data-rados-design.md) | RADOS IDataStore: librados, chunk → rados objects |
-| [storage/duostore-meta-tikv-design](docs/en/storage/duostore-meta-tikv-design.md) | TiKV IMetaStore: client-c + 2PC sidecar |
-| [performance-baseline](docs/en/performance-baseline.md) | Driver × TLS bench matrix, before/after the data-plane optimizations |
-| [deployment](docs/en/deployment.md) | Version stamp, `cmake --install`, deb/rpm packages, Dockerfile + compose, rollback / uninstall |
-| [cli](docs/en/cli.md) | `lights3` / `lights3-ctl` command reference: startup, duostore dump/load/backup/restore, `tables export/import`, cred/website/bench/quota/tenant/usage/tables |
+| **Architecture** — what the system is made of and why | [overview](docs/en/architecture/overview.md), [http-adapter](docs/en/architecture/http-adapter.md), [concurrency](docs/en/architecture/concurrency.md), [coroutine-internals](docs/en/architecture/coroutine-internals.md), [object-read-write-flow](docs/en/architecture/object-read-write-flow.md), [s3-protocol](docs/en/architecture/s3-protocol.md), [credential-management](docs/en/architecture/credential-management.md), [multi-tenancy](docs/en/architecture/multi-tenancy.md), [s3-tables-design](docs/en/architecture/s3-tables-design.md), [storage/](docs/en/architecture/storage/README.md) (storage-backend, tiered, cloudproxy, duostore and its redis / sqlite / tikv meta and rados data engines; 13 implementation-level documents in Chinese) |
+| **Usage** — deploying, configuring, operating | [deployment](docs/en/usage/deployment.md), [cli](docs/en/usage/cli.md), [config-reload](docs/en/usage/config-reload.md), [tls](docs/en/usage/tls.md), [monitoring](docs/en/usage/monitoring.md), [static-website](docs/en/usage/static-website.md); every config key is documented in [config/lights3.yaml](config/lights3.yaml) |
+| **Development** — building, testing, contributing | [contributing](docs/en/development/contributing.md), [testing](docs/en/development/testing.md), [performance-baseline](docs/en/development/performance-baseline.md), [todo](docs/en/development/todo.md) |
+| **Archive** — closed ledgers, read-only | `docs/archive/` (roadmap, gaps, issues, backlog; the targets of `roadmap §N` / `backlog §N` in source comments) |

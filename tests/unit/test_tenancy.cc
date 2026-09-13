@@ -1,5 +1,5 @@
 // roadmap §3.9: usage accounting, bucket/tenant quotas, tenancy, audit log
-// (docs/multi-tenancy.md). Full-dispatch tests on the memory backend.
+// (docs/architecture/multi-tenancy.md). Full-dispatch tests on the memory backend.
 #include <unistd.h>
 
 #include <filesystem>

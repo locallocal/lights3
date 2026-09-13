@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# S3 Tables client smoke (docs/s3-tables-design.md §13):
+# S3 Tables client smoke (docs/architecture/s3-tables-design.md §13):
 # a gateway on a memory backend with tables enabled, then scripts/tables/pyiceberg_smoke.py
 # (table kept) and scripts/tables/duckdb_smoke.py against it. Opt-in: exit 77 (ctest SKIP)
 # unless LIGHTS3_TABLES_SMOKE=1 and the python packages import. duckdb is optional (a

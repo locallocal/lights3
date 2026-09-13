@@ -1,4 +1,4 @@
-// mTLS identity bindings (backlog-sequence ⑥, docs/tls.md §2.1, docs/multi-tenancy.md
+// mTLS identity bindings (backlog-sequence ⑥, docs/usage/tls.md §2.1, docs/architecture/multi-tenancy.md
 // §4.2): client-certificate subject -> credential, persisted as
 // .sys/tls-identities/<encoded subject> JSON objects through SysConfigStore
 // (write-through + tombstone sync, shared by every gateway on the backend).

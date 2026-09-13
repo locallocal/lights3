@@ -1,4 +1,4 @@
-// Two-gateway S3 Tables suite (docs/s3-tables-design.md §5.5): two
+// Two-gateway S3 Tables suite (docs/architecture/s3-tables-design.md §5.5): two
 // independent catalog stacks ("gateways" A and B, each its own TableBucketStore /
 // ObjectCatalogStore / Catalog) over two IStorageBackend handles that share one medium.
 // What converges across gateways is decided by the medium's PutCondition CAS alone:

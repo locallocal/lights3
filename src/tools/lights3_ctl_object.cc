@@ -1,7 +1,7 @@
 // lights3-ctl `object inspect` — where an object's bytes live inside the routed backend
 // (data path / pack, chunk or rados extents with offsets and CRCs / tier state /
 // metadata source), for troubleshooting without reading logs or hexdumps
-// (roadmap §6.2, docs/cli.md §3.10). Root credential only. Prints the server's
+// (roadmap §6.2, docs/usage/cli.md §3.10). Root credential only. Prints the server's
 // JSON verbatim, or a readable table with --output=text.
 #include "tools/lights3_ctl_object.h"
 

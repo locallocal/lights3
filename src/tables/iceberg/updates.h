@@ -1,4 +1,4 @@
-// CommitTable updates (docs/s3-tables-design.md §7.2): the server applies the update
+// CommitTable updates (docs/architecture/s3-tables-design.md §7.2): the server applies the update
 // list to the current metadata and returns the next one. Invalid → 400, unsupported
 // (format v3, encryption keys) → 406, conflicts (uuid mismatch, duplicate snapshot,
 // missing parent) → 409

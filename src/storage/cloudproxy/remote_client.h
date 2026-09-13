@@ -1,5 +1,5 @@
 // cloudproxy internal header: ClientPool (httplib::Client connection pool) + generic
-// signing pipeline + error mapping and retry (docs/storage/cloudproxy-design.md §2.2/§5/§8.1).
+// signing pipeline + error mapping and retry (docs/architecture/storage/cloudproxy-design.md §2.2/§5/§8.1).
 // Includes httplib; may only be included by src/storage/cloudproxy/*.cc, TUs internal
 // to lights3_core, and unit tests (tests/unit/test_cloudproxy.cc drives ClientPool
 // directly).
@@ -27,7 +27,7 @@
 
 namespace lights3::storage::cloudproxy {
 
-// SigV4's UNSIGNED-PAYLOAD literal (docs/storage/cloudproxy-design.md §3.2)
+// SigV4's UNSIGNED-PAYLOAD literal (docs/architecture/storage/cloudproxy-design.md §3.2)
 inline constexpr const char* kUnsignedPayload = "UNSIGNED-PAYLOAD";
 
 struct Endpoint {
@@ -36,7 +36,7 @@ struct Endpoint {
     // explicit, or defaulted per scheme
     int port = 0;
     // byte-identical to the Host header httplib actually sends
-    // (docs/storage/cloudproxy-design.md §2.2)
+    // (docs/architecture/storage/cloudproxy-design.md §2.2)
     std::string signed_host;
     // scheme://host:port, input to httplib's universal Client
     std::string base_url;
@@ -45,7 +45,7 @@ struct Endpoint {
     static Endpoint parse(const std::string& url);
 };
 
-// Addressing target (docs/storage/cloudproxy-design.md §7): path-style = "/bucket/..." + endpoint
+// Addressing target (docs/architecture/storage/cloudproxy-design.md §7): path-style = "/bucket/..." + endpoint
 // Host; virtual-hosted = "/..." + "<bucket>.<endpoint-host>" Host. In both styles the TCP
 // connection and SNI always point at the endpoint (ClientPool does not specialize); only
 // Host/signature and path vary
@@ -58,7 +58,7 @@ struct Target {
     std::string object_path(std::string_view encoded_key_path) const { return prefix + std::string(encoded_key_path); }
 };
 
-// Remote observability metrics (docs/storage/cloudproxy-design.md §8.2): with an empty scope all
+// Remote observability metrics (docs/architecture/storage/cloudproxy-design.md §8.2): with an empty scope all
 // are orphan instances and calls are harmless. Error counts are registered dynamically per
 // remote code (get-or-create); the code set is bounded: the wire-code vocabulary +
 // "http_<status>" + "transport"
@@ -80,7 +80,7 @@ private:
 };
 
 // Mutex-protected idle-deque connection pool; httplib::Client is not thread-safe, so
-// leases are exclusive (docs/storage/cloudproxy-design.md §8.1). Hygiene (roadmap §3.3): idle
+// leases are exclusive (docs/architecture/storage/cloudproxy-design.md §8.1). Hygiene (roadmap §3.3): idle
 // entries carry timestamps — a connection idle beyond pool_idle_timeout is never reused
 // (a NAT/remote that silently dropped it would surface as first-request retry spikes)
 // and a light TimerQueue reaper closes them during quiet periods; pool_max_lifetime
@@ -175,7 +175,7 @@ private:
     TimerQueue::Id reaper_ = 0;
 };
 
-// 404 context for error mapping (docs/storage/cloudproxy-design.md §5.1: on a 404 with an
+// 404 context for error mapping (docs/architecture/storage/cloudproxy-design.md §5.1: on a 404 with an
 // unparsable body, fill in semantics based on the operation)
 enum class ErrCtx { None, Key, Bucket, Upload };
 
@@ -198,11 +198,12 @@ struct RemoteContext {
             cred_chain = std::make_unique<CredentialProvider>(cfg.endpoint, cfg.imds_endpoint);
     }
 
-    // Addressing (docs/storage/cloudproxy-design.md §7): yields the path prefix and Host per force_path_style
+    // Addressing (docs/architecture/storage/cloudproxy-design.md §7): yields the path prefix and Host per
+    // force_path_style
     Target target(const std::string& remote_bucket) const;
 
     // Build a minimal HttpRequest solely for signing, then carry it over as
-    // httplib::Headers (docs/storage/cloudproxy-design.md §2.2). x-amz-* entries in extra
+    // httplib::Headers (docs/architecture/storage/cloudproxy-design.md §2.2). x-amz-* entries in extra
     // automatically enter SignedHeaders; Content-Type goes through the httplib parameter,
     // do not put it here. Empty host = endpoint Host; vhost requests pass Target::host
     httplib::Headers signed_headers(const std::string& method, const std::string& raw_path,
@@ -211,7 +212,7 @@ struct RemoteContext {
                                     const std::string& payload_hash, const std::string& host = "") const;
 
     // Remote error -> local S3Error (single-point implementation of the
-    // docs/storage/cloudproxy-design.md §5.1 mapping matrix)
+    // docs/architecture/storage/cloudproxy-design.md §5.1 mapping matrix)
     [[noreturn]] void throw_remote_error(int status, const std::string& body, ErrCtx ctx,
                                          std::string_view resource) const;
     [[noreturn]] void throw_transport_error(httplib::Error err) const;
@@ -224,7 +225,7 @@ struct RemoteContext {
                e == httplib::Error::SSLConnection || e == httplib::Error::Read || e == httplib::Error::Write;
     }
     // Connection-establishment-stage errors (the subset safely retryable for PUT-like ops,
-    // docs/storage/cloudproxy-design.md §5.2)
+    // docs/architecture/storage/cloudproxy-design.md §5.2)
     static bool connection_stage_error(httplib::Error e) {
         return e == httplib::Error::Connection || e == httplib::Error::ConnectionTimeout ||
                e == httplib::Error::SSLConnection;
@@ -289,7 +290,7 @@ private:
     std::chrono::steady_clock::time_point breaker_open_until_{};
 };
 
-// start-after value that skips an entire common-prefix group (docs/storage/cloudproxy-design.md
+// start-after value that skips an entire common-prefix group (docs/architecture/storage/cloudproxy-design.md
 // §4.2): the prefix is padded with 0xff up to the key length limit. Under exclusive
 // semantics every key inside the group is <= this value and gets skipped, while every
 // successor key outside the group is > it and none are missed. (The old "last char +1"

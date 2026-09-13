@@ -1,4 +1,4 @@
-// L3: DuoStore's RocksDB key/value codec and crc32c (docs/storage/duostore-design.md §4).
+// L3: DuoStore's RocksDB key/value codec and crc32c (docs/architecture/storage/duostore-design.md §4).
 // Key encoding: '\0'-separated (the shared validation layer already rejects keys
 // containing NUL, and bucket names are limited to [a-z0-9.-], §4.1);
 // value encoding: hand-written little-endian binary, first byte is the version (§4.2);

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validates the monitoring assets under deploy/ (roadmap §5.5, docs/monitoring.md §5).
+"""Validates the monitoring assets under deploy/ (roadmap §5.5, docs/usage/monitoring.md §5).
 
 Zero C++: the gateway's metric surface is the contract, the assets consume it.
 Checks, in order:

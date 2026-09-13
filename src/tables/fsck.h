@@ -1,4 +1,4 @@
-// Catalog reconciliation for `lights3 fsck` (docs/s3-tables-design.md §11,
+// Catalog reconciliation for `lights3 fsck` (docs/architecture/s3-tables-design.md §11,
 // §14 ③): the .sys catalog state of the default
 // backend against the table buckets it describes. Read-only; repairs go through
 // `POST …/catalog/recovery`. Findings:

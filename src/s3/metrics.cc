@@ -205,9 +205,9 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         os << "lights3_pool_backlogged " << st.backlogged << "\n";
         os << "# TYPE lights3_pool_completed_total counter\n";
         os << "lights3_pool_completed_total " << st.completed << "\n";
-        // Wait-duration histogram (docs/archive/gaps.md §7): docs/concurrency.md §3.1 defines "this histogram
-        // shifting right" as the sole criterion for enabling dedicated per-backend pools; it used to be collected but
-        // never emitted
+        // Wait-duration histogram (docs/archive/gaps.md §7): docs/architecture/concurrency.md §3.1 defines "this
+        // histogram shifting right" as the sole criterion for enabling dedicated per-backend pools; it used to be
+        // collected but never emitted
         os << "# TYPE lights3_pool_wait_seconds histogram\n";
         uint64_t wcum = 0;
         for (size_t i = 0; i < ThreadPool::kWaitBucketBounds.size(); ++i) {

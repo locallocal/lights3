@@ -381,7 +381,7 @@ Task<http::HttpResponse> RestApi::dispatch(http::HttpRequest& req, Hooks& hooks,
         // signing for s3tables) hash the payload into the canonical request but send no
         // x-amz-content-sha256 header, which the S3-plane verifier requires. Catalog
         // bodies are small and bounded: buffer, hash, and present the hash as the header
-        // so the signature check sees what the client signed (docs/s3-tables-design.md §6.2)
+        // so the signature check sees what the client signed (docs/architecture/s3-tables-design.md §6.2)
         if (req.body && !req.headers.has("x-amz-content-sha256") && !req.query_has("X-Amz-Algorithm")) {
             std::string text;
             std::byte buf[16 * 1024];

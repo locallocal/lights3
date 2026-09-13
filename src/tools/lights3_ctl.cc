@@ -36,7 +36,7 @@ int g_exit = 0;
 int main(int argc, char* argv[]) {
     auto root = std::make_shared<ccmd::command>(
         "lights3-ctl", "lights3-ctl cred list --endpoint=http://127.0.0.1:9000", "lights3-ctl <command> [options]",
-        "lights3 ops CLI (docs/credential-management.md). Credential management "
+        "lights3 ops CLI (docs/architecture/credential-management.md). Credential management "
         "lives under the `cred` command group, benchmarking under `bench`, bucket "
         "website configuration under `website`, online object verification under "
         "`fsck`, bucket quotas under `quota`, tenants under `tenant`, usage "

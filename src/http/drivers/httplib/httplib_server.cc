@@ -1,4 +1,4 @@
-// L1: cpp-httplib driver — synchronous model, thread-per-request (docs/http-adapter.md §3.2).
+// L1: cpp-httplib driver — synchronous model, thread-per-request (docs/architecture/http-adapter.md §3.2).
 // The request thread blocks in sync_wait(handler(req)) until the coroutine
 // completes; the home executor is inline. httplib's ContentReader is a push
 // model, inverted into a pull model by a pump thread through a bounded buffer
@@ -26,7 +26,7 @@ namespace {
 
 // The push-to-pull BlockQueue / QueueBodyReader have been extracted into a
 // shared component (http/pushpull.h, also used by the cloudproxy backend,
-// docs/storage/cloudproxy-design.md §3.1)
+// docs/architecture/storage/cloudproxy-design.md §3.1)
 
 // Connection-info pseudo-headers httplib injects into headers in process_request; not part of the HTTP message
 bool is_pseudo_header(const std::string& k) {
@@ -120,7 +120,7 @@ public:
             }
             apply_fallback(rs, driver::internal_error_response(what));
         });
-        // Expect: 100-continue (docs/http-adapter.md §3.1 requires deferred
+        // Expect: 100-continue (docs/architecture/http-adapter.md §3.1 requires deferred
         // reply). The upstream API offers only three outcomes: reply 100
         // immediately / reply 417 / close the connection with a final
         // response — "suppress the automatic reply and send 100 after the
@@ -209,7 +209,7 @@ public:
 
     void set_handler(Handler h) override { handler_ = std::move(h); }
     // Upstream owns the accept loop and the TLS handshake, so accept/active/TLS
-    // stay 0 here (documented in docs/http-adapter.md §2.2); requests and the
+    // stay 0 here (documented in docs/architecture/http-adapter.md §2.2); requests and the
     // parse failures this layer sees are counted (roadmap §5.3)
     ConnStats stats() const override { return counters_.snapshot(); }
 

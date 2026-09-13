@@ -359,8 +359,8 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name, const std::m
     if (auto* v = get("rocksdb_max_background_jobs"))
         c.rocksdb_max_background_jobs = parse_int_param(name, "rocksdb_max_background_jobs", *v);
 
-    // meta engine selection (docs/storage/duostore-meta-redis-design.md §8 /
-    // docs/storage/duostore-meta-sqlite-design.md §8)
+    // meta engine selection (docs/architecture/storage/duostore-meta-redis-design.md §8 /
+    // docs/architecture/storage/duostore-meta-sqlite-design.md §8)
     if (auto* v = get("meta")) {
         if (*v == "rocksdb") {
             c.meta_kind = DuoMetaKind::kRocksDb;
@@ -408,7 +408,7 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name, const std::m
             throw std::runtime_error("duostore backend '" + name + "': redis_wait_replicas must be in [0,256]");
     }
 
-    // sqlite meta (docs/storage/duostore-meta-sqlite-design.md §8): meta_sync carries over (local
+    // sqlite meta (docs/architecture/storage/duostore-meta-sqlite-design.md §8): meta_sync carries over (local
     // engine, the durability level belongs to this process, mapped to synchronous
     // FULL/NORMAL)
     if (auto* v = get("sqlite_path"); v && !v->empty())
@@ -419,12 +419,12 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name, const std::m
     if (auto* v = get("sqlite_wal_archive"); v && !v->empty()) c.sqlite_wal_archive = *v;
     if (c.meta_kind == DuoMetaKind::kSqlite) {
         // Process-wide total budget; must remain meaningful after splitting across connections
-        // (docs/storage/duostore-meta-sqlite-design.md §8)
+        // (docs/architecture/storage/duostore-meta-sqlite-design.md §8)
         if (c.sqlite_cache < (1ull << 20))
             throw std::runtime_error("duostore backend '" + name + "': sqlite_cache must be >= 1MiB");
     }
 
-    // tikv meta (docs/storage/duostore-meta-tikv-design.md §9): pd_endpoints comma-separated;
+    // tikv meta (docs/architecture/storage/duostore-meta-tikv-design.md §9): pd_endpoints comma-separated;
     // durability = raft majority, so meta_sync is meaningless (WARNed separately
     // below the ownership table)
     if (auto* v = get("pd_endpoints")) {
@@ -467,7 +467,7 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name, const std::m
                                      "': tikv_gc_interval must be >= 0 and tikv_gc_retention > 0");
     }
 
-    // data engine selection (docs/storage/duostore-data-rados-design.md §10, dual of the meta branch)
+    // data engine selection (docs/architecture/storage/duostore-data-rados-design.md §10, dual of the meta branch)
     if (auto* v = get("data")) {
         if (*v == "fs") {
             c.data_kind = DuoDataKind::kFs;
@@ -494,8 +494,8 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name, const std::m
     if (c.data_kind == DuoDataKind::kRados) {
         if (c.rados_pool.empty())
             throw std::runtime_error("duostore backend '" + name + "': data=rados needs rados_pool");
-        // Upper bound matches the osd_max_object_size default of 128MiB (docs/storage/duostore-data-rados-design.md
-        // §3.4)
+        // Upper bound matches the osd_max_object_size default of 128MiB
+        // (docs/architecture/storage/duostore-data-rados-design.md §3.4)
         if (c.rados_chunk_size < 4096 || c.rados_chunk_size > (128ull << 20))
             throw std::runtime_error("duostore backend '" + name + "': rados_chunk_size must be in [4KiB,128MiB]");
         if (c.rados_buffer_total < c.rados_chunk_size)
@@ -508,7 +508,7 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name, const std::m
 
     // data-engine-owned keys: present but not belonging to the selected engine →
     // WARN (same mechanism as the meta key ownership table below;
-    // docs/storage/duostore-data-rados-design.md §10 — under data=rados, chunk_size is superseded
+    // docs/architecture/storage/duostore-data-rados-design.md §10 — under data=rados, chunk_size is superseded
     // by rados_chunk_size and all pack_* are ignored; verify_chunk_crc is shared
     // by both engines)
     {
@@ -703,7 +703,7 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
         ro.op_timeout_sec = cfg_.rados_op_timeout_sec;
         ro.verify_chunk_crc = cfg_.verify_chunk_crc;
         ro.on_corruption = on_corruption;
-        // op latency/error metrics (C4, docs/storage/duostore-data-rados-design.md §10)
+        // op latency/error metrics (C4, docs/architecture/storage/duostore-data-rados-design.md §10)
         ro.metrics = metrics;
         // Write-side pins injected from the same source as the fs path
         // (docs/archive/gaps.md §1.2): the rados branch used to miss this entirely, and
@@ -2617,7 +2617,7 @@ Task<void> DuoStoreBackend::gc_tick() {
 
 void DuoStoreBackend::schedule_gc() {
     if (!cfg_.gc_enabled) {
-        // Multi-gateway non-designated instance (docs/storage/duostore-data-rados-design.md
+        // Multi-gateway non-designated instance (docs/architecture/storage/duostore-data-rados-design.md
         // §8.3); the manual hooks remain available. Reached once per timer at
         // construction (gc_tick never re-enters), and logs loudly so nobody
         // forgets which box is running GC

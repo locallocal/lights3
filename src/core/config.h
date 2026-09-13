@@ -42,7 +42,7 @@ struct YamlNode {
 YamlNode yaml_parse(const std::string& text);
 
 // ---------- Typed configuration ----------
-// Extra certificate served by SNI (roadmap §4.1, docs/tls.md §2.3): hosts is a
+// Extra certificate served by SNI (roadmap §4.1, docs/usage/tls.md §2.3): hosts is a
 // comma-separated list of exact names or "*.example.com" wildcards
 struct TlsSniEntry {
     std::string hosts;
@@ -65,7 +65,7 @@ struct HttpConfig {
     // Validated to [1KiB, 1MiB]: beast passes it into parser.header_limit(uint32_t),
     // where an unbounded value like 4GiB would truncate to 0 and reject every request
     size_t max_header_size = 16 * 1024;
-    // Timeout family (roadmap §4.2, docs/http-adapter.md §2.1). All validated to
+    // Timeout family (roadmap §4.2, docs/architecture/http-adapter.md §2.1). All validated to
     // [1s, 86400s]; 0 is rejected: drivers disagree on its meaning (builtin's
     // SO_RCVTIMEO 0 = never time out, beast's expires_after(0s) = expire
     // immediately), so "no timeout" is not a supported configuration
@@ -106,7 +106,7 @@ struct HttpConfig {
     // /-/metrics exposure (roadmap §5.3): anonymous (default, classic scrape) or
     // root (a statically configured credential must sign the GET). Hot-reloadable
     std::string metrics_access = "anonymous";
-    // non-empty enables virtual-host style (docs/s3-protocol.md §2)
+    // non-empty enables virtual-host style (docs/architecture/s3-protocol.md §2)
     std::string base_domain;
     // TLS (docs/archive/gaps.md §7): HTTPS is enabled when both cert and key are given.
     // SigV4's UNSIGNED-PAYLOAD integrity relies on transport-layer encryption, and
@@ -117,8 +117,8 @@ struct HttpConfig {
     std::string tls_cert;
     // path to PEM private key
     std::string tls_key;
-    // TLS knobs (roadmap §4.1, docs/tls.md): all four drivers honor them (seastar
-    // maps versions/client auth onto GnuTLS, see docs/tls.md §4)
+    // TLS knobs (roadmap §4.1, docs/usage/tls.md): all four drivers honor them (seastar
+    // maps versions/client auth onto GnuTLS, see docs/usage/tls.md §4)
     // PEM CA bundle for client certificates (mTLS); empty = none
     std::string tls_client_ca;
     // off | optional | require (the latter two need tls_client_ca)
@@ -160,7 +160,7 @@ struct RuntimeConfig {
     int max_inflight_requests = 1024;
 };
 
-// Per-client rate limits (roadmap §4.2, docs/http-adapter.md §2.3): token bucket +
+// Per-client rate limits (roadmap §4.2, docs/architecture/http-adapter.md §2.3): token bucket +
 // concurrency cap per source IP (decided before signature verification) and per
 // access key (after it). 0 = that limit off. Over the limit answers 503 SlowDown
 struct RateLimitConfig {
@@ -189,14 +189,14 @@ struct AuthConfig {
     std::vector<Credential> credentials;
     std::string region = "us-east-1";
     std::string service = "s3";
-    // Credential management phase 2 (docs/credential-management.md §10)
+    // Credential management phase 2 (docs/architecture/credential-management.md §10)
     // external credentials file (JSON, hot-reloaded); empty = disabled
     std::string credentials_file{};
     // file mtime polling period; 0 = load at startup only
     int credentials_file_reload_sec = 30;
     // multi-instance: periodic incremental reload of .sys; 0 = disabled
     int sync_interval_sec = 0;
-    // mTLS identity mapping (backlog-sequence ⑥, docs/tls.md §2.1): which field of a
+    // mTLS identity mapping (backlog-sequence ⑥, docs/usage/tls.md §2.1): which field of a
     // verified client certificate names the identity looked up in
     // .sys/tls-identities/. off = certificates stay transport admission only.
     // Needs http.tls_client_auth optional|require
@@ -218,7 +218,7 @@ struct BucketRule {
     std::string backend;
 };
 
-// Static website hosting (docs/static-website.md): buckets listed here accept
+// Static website hosting (docs/usage/static-website.md): buckets listed here accept
 // anonymous GET/HEAD object reads. Exact names only, no globs — a pattern typo
 // must not silently make extra buckets public.
 // RoutingRules entry (roadmap §2.3, AWS WebsiteConfiguration shape). Both condition
@@ -275,7 +275,7 @@ struct LifecycleConfig {
     int scan_interval_sec = 3600;
 };
 
-// S3 Tables / Iceberg REST catalog (docs/s3-tables-design.md §10): off by default,
+// S3 Tables / Iceberg REST catalog (docs/architecture/s3-tables-design.md §10): off by default,
 // every key is restart-only. path_prefix carries no "/v1" (appended by the router)
 struct TablesConfig {
     bool enabled = false;
@@ -292,7 +292,7 @@ struct TablesConfig {
     int validate_concurrency = 16;
     bool credential_vending = false;
     int credential_ttl_sec = 900;
-    // where the catalog state lives (docs/s3-tables-design.md §12): "object" = .sys objects
+    // where the catalog state lives (docs/architecture/s3-tables-design.md §12): "object" = .sys objects
     // of the default backend; "duostore" = the default backend's meta engine KV facade
     // (default backend must be duostore; one transaction per commit)
     std::string catalog_backing = "object";
@@ -314,7 +314,7 @@ struct BucketsConfig {
 
 // Bucket usage accounting (roadmap §3.9 ①): per-bucket object/byte counters kept at
 // L2, updated at every write commit, persisted to .sys/usage/<bucket> and reconciled
-// by a periodic full listing (docs/multi-tenancy.md §2)
+// by a periodic full listing (docs/architecture/multi-tenancy.md §2)
 struct UsageConfig {
     // false = no counters, no quota enforcement (skips the pre-write HEAD)
     bool enabled = true;
@@ -339,7 +339,7 @@ struct AuditConfig {
 };
 
 // Operational log (roadmap §5.2). Every knob but level / slow_request_threshold is
-// fixed at startup (the sink and the formatter are built once; docs/config-reload.md §4)
+// fixed at startup (the sink and the formatter are built once; docs/usage/config-reload.md §4)
 struct LogConfig {
     // debug | info | warn | error (hot-reloadable)
     std::string level = "info";
@@ -380,7 +380,7 @@ struct Config {
     static Config from_string(const std::string& yaml_text);
 };
 
-// Outcome of a configuration hot reload (roadmap §4.4, docs/config-reload.md):
+// Outcome of a configuration hot reload (roadmap §4.4, docs/usage/config-reload.md):
 // what was applied at runtime, what changed but needs a restart, or why the new
 // file was refused (the old configuration then stays in force, untouched)
 struct ConfigReloadReport {
@@ -393,7 +393,7 @@ struct ConfigReloadReport {
     std::vector<std::string> requires_restart;
 };
 
-// S3 Tables deployment sanity (docs/s3-tables-design.md §5.5):
+// S3 Tables deployment sanity (docs/architecture/s3-tables-design.md §5.5):
 // the catalog state lives in the default backend's .sys, so tables only converge
 // across gateways when that backend is shared (cloudproxy, duostore with redis / tikv
 // meta). tables.enabled on a single-gateway default backend together with any

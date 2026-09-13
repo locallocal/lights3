@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Aggregates gcov JSON documents (gcov --json-format --stdout, concatenated on
-stdin) into per-file line coverage for the tree under argv[1] (docs/testing.md §7).
+stdin) into per-file line coverage for the tree under argv[1] (docs/development/testing.md §7).
 
 gcov lists every instrumented line per function, so template instantiations and
 headers included from many translation units repeat lines: the union by

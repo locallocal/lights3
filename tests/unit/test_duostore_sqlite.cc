@@ -1,7 +1,7 @@
-// SqliteMetaStore dedicated unit tests (docs/storage/duostore-meta-sqlite-design.md §9): meta consistency suite,
-// backend suite over the injected combination, BLOB key ordering (non-UTF-8 bytes), reopen durability, single-file cold
-// backup, swap_extents CAS, file lineage validation. Zero external dependencies -- no probe/SKIP path like the Redis
-// version.
+// SqliteMetaStore dedicated unit tests (docs/architecture/storage/duostore-meta-sqlite-design.md §9): meta consistency
+// suite, backend suite over the injected combination, BLOB key ordering (non-UTF-8 bytes), reopen durability,
+// single-file cold backup, swap_extents CAS, file lineage validation. Zero external dependencies -- no probe/SKIP path
+// like the Redis version.
 #if defined(LIGHTS3_DUOSTORE) && defined(LIGHTS3_DUOSTORE_SQLITE_META)
 
 #include <signal.h>
@@ -831,7 +831,7 @@ TEST(duostore_sqlite_backend_backup_and_restore_pitr) {
     pool->join();
 }
 
-// ---------- S3 Tables catalog on the KV facade (docs/s3-tables-design.md §12) ----------
+// ---------- S3 Tables catalog on the KV facade (docs/architecture/s3-tables-design.md §12) ----------
 #ifdef LIGHTS3_TABLES
 TEST(duostore_sqlite_tables_catalog_store) {
     TmpDir tmp;

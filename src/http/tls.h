@@ -1,5 +1,5 @@
 // L1: server-side TLS shared by the OpenSSL-backed drivers (builtin / beast /
-// httplib; roadmap §4.1, docs/tls.md). One mechanism covers three roadmap items:
+// httplib; roadmap §4.1, docs/usage/tls.md). One mechanism covers three roadmap items:
 //   - certificate material (default cert + SNI extras + client CA) is an
 //     immutable snapshot (Material) selected per handshake by an OpenSSL
 //     certificate callback — so a new snapshot swapped into the Holder takes
@@ -10,7 +10,7 @@
 //     configure(). Drivers keep owning their SSL_CTX (asio::ssl::context,
 //     httplib::SSLServer) and only hand it here.
 // The seastar driver (GnuTLS through seastar::tls) implements the same config
-// surface on its own; see seastar_server.cc and docs/tls.md §4.
+// surface on its own; see seastar_server.cc and docs/usage/tls.md §4.
 #pragma once
 
 #include <chrono>

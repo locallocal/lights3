@@ -1,4 +1,4 @@
-// Iceberg table metadata model (docs/s3-tables-design.md §7): pure functions over
+// Iceberg table metadata model (docs/architecture/s3-tables-design.md §7): pure functions over
 // nlohmann::json, no IO. Every rejection is a RestError. nlohmann's object is key-ordered,
 // so dump() is already the canonical serialization used for replay comparison
 #pragma once

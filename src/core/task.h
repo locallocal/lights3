@@ -1,4 +1,4 @@
-// L4: lazy Task<T> coroutine primitive plus sync_wait / when_all / with_timeout (see docs/concurrency.md)
+// L4: lazy Task<T> coroutine primitive plus sync_wait / when_all / with_timeout (see docs/architecture/concurrency.md)
 #pragma once
 
 #include <atomic>
@@ -51,7 +51,7 @@ namespace detail {
 // optimization and not at -O0: a Debug / sanitizer build nested one C frame per
 // transfer, and a body-read loop whose reads complete synchronously (the builtin
 // driver's blocking socket reader feeding put_object, StreamPrefetch over an
-// in-memory body) overflowed the stack at a few MiB (docs/concurrency.md §2.4).
+// in-memory body) overflowed the stack at a few MiB (docs/architecture/concurrency.md §2.4).
 // Transfers therefore go through a per-thread loop instead: the first transfer
 // on a thread runs the loop right there (inside that await_suspend, which is
 // legal -- the coroutine is already suspended), every transfer made while the
@@ -110,11 +110,11 @@ inline void drive(std::coroutine_handle<> h) {
 struct PromiseBase {
     std::coroutine_handle<> continuation;
     SyncWaitEvent* event = nullptr;
-    // Home executor (docs/concurrency.md §3): when set, final_suspend posts the
+    // Home executor (docs/architecture/concurrency.md §3): when set, final_suspend posts the
     // continuation there instead of doing a symmetric transfer — protocol logic thus
     // returns to the HTTP execution context; child tasks inherit it on co_await
     IExecutor* cont_executor = nullptr;
-    // Cancellation token (docs/concurrency.md §5, docs/archive/gaps.md §3.1): inherited down
+    // Cancellation token (docs/architecture/concurrency.md §5, docs/archive/gaps.md §3.1): inherited down
     // the co_await chain just like cont_executor. Once the request entry point attaches
     // this request's token via Task::with_cancel(), every co_await pool_->schedule()
     // along the whole L2/L3 coroutine chain picks it up automatically — suspension
@@ -439,7 +439,7 @@ inline void sync_wait_pumping(PumpExecutor& ex, Task<void> t) {
     if (err) std::rethrow_exception(err);
 }
 
-// ---------- when_all: concurrently await a set of Tasks (docs/concurrency.md §2/§6) ----------
+// ---------- when_all: concurrently await a set of Tasks (docs/architecture/concurrency.md §2/§6) ----------
 
 namespace detail {
 
@@ -571,7 +571,7 @@ inline Task<void> when_all(std::vector<Task<void>> tasks) {
         if (e) std::rethrow_exception(e);
 }
 
-// ---------- Started<T>: an eagerly started task collected later (docs/concurrency.md §2.3) ----------
+// ---------- Started<T>: an eagerly started task collected later (docs/architecture/concurrency.md §2.3) ----------
 // The building block of the drivers' double-buffered response pipeline (roadmap
 // §4.3 ①): start the backend read of the *next* chunk, write the current one to
 // the socket, then collect. One in-flight child per Started; the collector is
@@ -713,7 +713,7 @@ private:
     bool collected_ = true;
 };
 
-// ---------- with_timeout: cooperative timeout (docs/concurrency.md §2/§5) ----------
+// ---------- with_timeout: cooperative timeout (docs/architecture/concurrency.md §2/§5) ----------
 // On expiry it only triggers src.request_cancel(); this function attaches
 // src.token() to task (and to the whole chain of child tasks it co_awaits), so a
 // timeout surfaces as OperationCancelled thrown from the nearest cancellable

@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS pack_stats(
 // SQL constants (§5.3): each connection keeps a resident prepared-statement cache
 // keyed by the literal's address; all parameters are bound via ?N — string
 // concatenation is forbidden (BLOB truncation source + injection surface)
-// S3 Tables catalog backing (KV facade, docs/s3-tables-design.md §12): created on
+// S3 Tables catalog backing (KV facade, docs/architecture/s3-tables-design.md §12): created on
 // every open so databases from before the facade get it too
 constexpr const char*
     kKvDdl = "CREATE TABLE IF NOT EXISTS tc(key BLOB PRIMARY KEY, val BLOB NOT NULL) WITHOUT ROWID, STRICT";
@@ -849,7 +849,7 @@ std::optional<ObjectMeta> SqliteMetaStore::head_object(std::string_view b, std::
     return codec::decode_object_meta(std::string(k), *v);
 }
 
-// ---------- KV facade (docs/s3-tables-design.md §12) ----------
+// ---------- KV facade (docs/architecture/s3-tables-design.md §12) ----------
 
 std::optional<KvItem> SqliteMetaStore::kv_get(std::string_view key) {
     Lease lease = read_conn();

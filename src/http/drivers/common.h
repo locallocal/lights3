@@ -332,7 +332,7 @@ inline std::string fallback_request_id() {
     return std::string(buf, 16);
 }
 
-// Contract 2 (docs/http-adapter.md §4): when an exception escapes the handler,
+// Contract 2 (docs/architecture/http-adapter.md §4): when an exception escapes the handler,
 // every driver uniformly returns 500 + S3 InternalError XML. The log is
 // written here rather than at the caller: the client only holds the request
 // id, and only a single place that writes both the id and the context makes

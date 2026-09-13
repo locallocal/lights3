@@ -1,4 +1,4 @@
-// Iceberg REST error model (docs/s3-tables-design.md §6.6): the catalog raises RestError
+// Iceberg REST error model (docs/architecture/s3-tables-design.md §6.6): the catalog raises RestError
 // internally and renders it as {"error":{"message","type","code"}} at the REST boundary
 // only. Storage-layer S3Errors are translated once, in from_s3_error
 #pragma once

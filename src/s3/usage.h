@@ -1,4 +1,4 @@
-// L2: bucket usage accounting (roadmap §3.9 ①, docs/multi-tenancy.md §2).
+// L2: bucket usage accounting (roadmap §3.9 ①, docs/architecture/multi-tenancy.md §2).
 // Per-bucket {objects, bytes, mpu_bytes} counters maintained by the gateway:
 //   - incremental: every write handler applies its delta after the backend commit
 //     (PutObject/Copy/Complete: +size −replaced; Delete: −size; UploadPart: +part

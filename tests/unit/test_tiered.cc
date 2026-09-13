@@ -1,4 +1,4 @@
-// Tiered storage backend unit tests (docs/storage/tiered-design.md §10 P1-P4 acceptance):
+// Tiered storage backend unit tests (docs/architecture/storage/tiered-design.md §10 P1-P4 acceptance):
 // consistency suite, tier state machine, overwrite/delete entering GC, scanner cold detection and crash recovery, space
 // fallback. The cloud side is played by MemoryBackend (wrapped with counters to assert the number of cloud calls).
 #include <sys/xattr.h>
@@ -300,7 +300,7 @@ TEST(tiered_gc_never_deletes_live_copy) {
 }
 
 // GC with the cloud unreachable: entries back off exponentially (attempts/retry_at persisted in the TSV, not reset on
-// restart), and resume liquidation once due (todo §3.4; docs/storage/tiered-design.md §9)
+// restart), and resume liquidation once due (todo §3.4; docs/architecture/storage/tiered-design.md §9)
 TEST(tiered_gc_retry_exponential_backoff) {
     Fixture f;
     sync_wait(f.tiered->create_bucket("bkt"));
@@ -362,8 +362,8 @@ TEST(tiered_gc_retry_exponential_backoff) {
     CHECK_EQ(f.gc_entries(), size_t(0));
 }
 
-// Reconciliation forward direction (docs/storage/tiered-design.md §9): a manually mis-deleted stub is rebuilt from the
-// lights3-* redundant headers; foreign objects without the redundant headers are skipped untouched
+// Reconciliation forward direction (docs/architecture/storage/tiered-design.md §9): a manually mis-deleted stub is
+// rebuilt from the lights3-* redundant headers; foreign objects without the redundant headers are skipped untouched
 TEST(tiered_reconcile_rebuilds_lost_stub) {
     Fixture f;
     sync_wait(f.tiered->create_bucket("bkt"));
@@ -753,9 +753,9 @@ TEST(tiered_registry_two_phase_build) {
     CHECK(threw);
 }
 
-// Per-backend dedicated IO pool (docs/concurrency.md §3.1): the io_threads parameter builds a dedicated pool for that
-// backend (a generic key for any type), pool observability metrics carry the backend label; backends without it share
-// the global pool (no such metric); invalid values error at configuration time
+// Per-backend dedicated IO pool (docs/architecture/concurrency.md §3.1): the io_threads parameter builds a dedicated
+// pool for that backend (a generic key for any type), pool observability metrics carry the backend label; backends
+// without it share the global pool (no such metric); invalid values error at configuration time
 TEST(registry_per_backend_thread_pool) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(2);

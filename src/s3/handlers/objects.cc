@@ -1,4 +1,5 @@
-// Object-level handlers: Put/Get/Head/Delete/Copy/DeleteObjects and conditional requests (docs/s3-protocol.md §1/§6)
+// Object-level handlers: Put/Get/Head/Delete/Copy/DeleteObjects and conditional requests
+// (docs/architecture/s3-protocol.md §1/§6)
 #include <algorithm>
 #include <charconv>
 
@@ -107,7 +108,7 @@ void fill_object_headers(http::HttpResponse& resp, const storage::ObjectMeta& me
     for (auto& [k, v] : meta.user_meta) resp.headers.set("x-amz-meta-" + k, v);
 }
 
-// GET/HEAD conditional requests (docs/s3-protocol.md §6, precedence follows RFC 7232:
+// GET/HEAD conditional requests (docs/architecture/s3-protocol.md §6, precedence follows RFC 7232:
 // If-Match > If-Unmodified-Since；If-None-Match > If-Modified-Since）
 void check_read_preconditions(const http::HttpRequest& req, const storage::ObjectMeta& meta, bool& not_modified) {
     if (auto v = req.headers.get("If-Match")) {
@@ -170,12 +171,12 @@ Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::stri
     if (usage_ && usage_->enabled() && req.body)
         req.body = std::make_unique<ByteCountingReader>(std::move(req.body), &written);
 
-    // PUT conditional requests (docs/s3-protocol.md §6): If-None-Match:* prevents overwrite, If-Match is optimistic
-    // concurrency. "Check + commit" is done by the backend at its atomic commit point (PutCondition contract,
-    // backend.h) -- here only one lock-free head precheck is done, so obviously failing requests get their 412/404
-    // without uploading the full body. The precheck is non-atomic and carries no correctness burden; the old L2 striped
-    // lock spanned the entire body upload, so 64 slow connections could block all conditional writes gateway-wide, and
-    // it could never hold in multi-instance deployments anyway
+    // PUT conditional requests (docs/architecture/s3-protocol.md §6): If-None-Match:* prevents overwrite, If-Match is
+    // optimistic concurrency. "Check + commit" is done by the backend at its atomic commit point (PutCondition
+    // contract, backend.h) -- here only one lock-free head precheck is done, so obviously failing requests get their
+    // 412/404 without uploading the full body. The precheck is non-atomic and carries no correctness burden; the old L2
+    // striped lock spanned the entire body upload, so 64 slow connections could block all conditional writes
+    // gateway-wide, and it could never hold in multi-instance deployments anyway
     storage::PutCondition cond;
     if (auto v = req.headers.get("If-None-Match")) {
         if (*v != "*") throw S3Error(S3ErrorCode::NotImplemented, "PUT If-None-Match only supports '*'.");
@@ -562,7 +563,7 @@ Task<http::HttpResponse> S3Service::delete_objects(http::HttpRequest& req, std::
             if (!auth.policy->allows(bucket, keys[i], Action::Delete))
                 outcome[i] = S3Error(S3ErrorCode::AccessDenied, "Access denied by credential policy.");
 #ifdef LIGHTS3_TABLES
-    // Reserved catalog keys of a table bucket fail per key (docs/s3-tables-design.md §8.1)
+    // Reserved catalog keys of a table bucket fail per key (docs/architecture/s3-tables-design.md §8.1)
     if (table_guard_)
         for (size_t i = 0; i < keys.size(); ++i)
             if (!outcome[i] && table_guard_->reserved_key(bucket, keys[i]))

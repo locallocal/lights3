@@ -1,7 +1,7 @@
-// Dedicated RadosDataStore unit tests (docs/storage/duostore-data-rados-design.md §11): the injected combination runs
-// the backend suite, multi-chunk roundtrip and cross-extent Range, unknown-length streaming, idempotent remove,
-// namespace isolation, semaphore backpressure, the alarm path for refs-present-but-object-missing, bitrot detection,
-// close guard; C3 double-buffered pipeline (including serial degradation), C4 orphan scan
+// Dedicated RadosDataStore unit tests (docs/architecture/storage/duostore-data-rados-design.md §11): the injected
+// combination runs the backend suite, multi-chunk roundtrip and cross-extent Range, unknown-length streaming,
+// idempotent remove, namespace isolation, semaphore backpressure, the alarm path for refs-present-but-object-missing,
+// bitrot detection, close guard; C3 double-buffered pipeline (including serial degradation), C4 orphan scan
 // (forward/reverse/grace/foreign objects) and op metrics. Real-cluster acquisition: runs only when the environment
 // variables LIGHTS3_TEST_RADOS_CONF + LIGHTS3_TEST_RADOS_POOL are both set (optional LIGHTS3_TEST_RADOS_CLIENT, default
 // client.admin), otherwise an explicit SKIP (not a failure; same mechanism as test_duostore_redis.cc). Isolation: a

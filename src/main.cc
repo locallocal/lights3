@@ -1,11 +1,11 @@
 // Process entry point: command-line parsing (ccmd, third_party/ccmd) +
 // Application lifecycle (src/app/app.h). Assembly and startup/shutdown
-// ordering live in lights3::Application (docs/architecture.md §4).
+// ordering live in lights3::Application (docs/architecture/overview.md §4).
 //
 // Command tree:
 //   lights3 [--config=<path>]                     start the server        (cli/cli_server.cc)
 //   lights3 duostore dump <backend> <file> [...]  duostore meta admin     (cli/cli_duostore.cc)
-//   lights3 duostore load <backend> <file> [...]  (docs/storage/duostore-core.md §11)
+//   lights3 duostore load <backend> <file> [...]  (docs/architecture/storage/duostore-core.md §11)
 //   lights3 duostore backup|restore <backend> ...  meta backup chains / PITR (§11.1)
 //   lights3 duostore gc|scan <backend> [...]      run one GC / orphan-scan round (roadmap §3.2)
 //   lights3 duostore quarantine list|release|purge ...  corrupt-pack quarantine (roadmap §3.7)

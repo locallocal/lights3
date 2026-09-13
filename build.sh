@@ -7,20 +7,20 @@ usage() {
     cat <<'EOF'
 Usage: ./build.sh [options]
   --seastar     Enable the seastar driver (heavy dependency, off by default;
-                see docs/http-adapter.md §3.3). The switch is sticky once
+                see docs/architecture/http-adapter.md §3.3). The switch is sticky once
                 written into the CMake cache; use --clean to turn it off
   --tikv        Enable the TiKV meta backend for duostore (client-c submodule
                 plus system-level gRPC/Poco dependencies, off by default; see
-                docs/storage/duostore-meta-tikv-design.md §8). Same sticky semantics as
+                docs/architecture/storage/duostore-meta-tikv-design.md §8). Same sticky semantics as
                 --seastar; recommend -B build-tikv to isolate from regular builds
   --redis       Enable the Redis meta backend for duostore (hiredis submodule,
-                off by default; see docs/storage/duostore-meta-redis-design.md). Same sticky
+                off by default; see docs/architecture/storage/duostore-meta-redis-design.md). Same sticky
                 semantics as --seastar
   --sqlite      Enable the SQLite meta backend for duostore (sqlite submodule,
-                off by default; see docs/storage/duostore-meta-sqlite-design.md). Same sticky
+                off by default; see docs/architecture/storage/duostore-meta-sqlite-design.md). Same sticky
                 semantics as --seastar
   --rados       Enable the RADOS data backend for duostore (off by default; see
-                docs/storage/duostore-data-rados-design.md §9). Requires system librados
+                docs/architecture/storage/duostore-data-rados-design.md §9). Requires system librados
                 (apt install librados-dev, or unpack to a custom path and point
                 -DLIGHTS3_RADOS_ROOT=... at it). Same sticky semantics as
                 --seastar; recommend -B build-rados to isolate from regular builds
@@ -30,12 +30,12 @@ Usage: ./build.sh [options]
   --tsan        ThreadSanitizer build; the build directory defaults to
                 build-tsan. Mutually exclusive with --asan
   --ubsan       UndefinedBehaviorSanitizer build; defaults to build-ubsan.
-                Mutually exclusive with --asan/--tsan (docs/testing.md §7)
+                Mutually exclusive with --asan/--tsan (docs/development/testing.md §7)
   --coverage    gcov instrumentation (-O0 --coverage); defaults to build-cov;
-                scripts/coverage.sh builds, runs and reports (docs/testing.md §7)
+                scripts/coverage.sh builds, runs and reports (docs/development/testing.md §7)
   --fuzz        libFuzzer harnesses (requires clang; CC/CXX are switched to
                 clang unless already set); defaults to build-fuzz
-                (docs/testing.md §3)
+                (docs/development/testing.md §3)
   --clean       Remove the build directory first, then do a full build
   --test        Run ctest after the build (unit + per-driver e2e)
   -j N          Build parallelism (default nproc)
@@ -103,7 +103,7 @@ fi
 
 # Submodules: always init the regular ones (rocksdb is a shallow clone; with all
 # compression disabled it has zero system-level deps, so no lazy fetch,
-# docs/storage/duostore-design.md §13.2); the seastar clone is huge, fetch only when needed
+# docs/architecture/storage/duostore-design.md §13.2); the seastar clone is huge, fetch only when needed
 # (its bundled dpdk submodule is unused at build time, so no recursive init)
 LIGHT_MODULES=(third_party/spdlog third_party/httplib third_party/json
                third_party/rocksdb third_party/hiredis third_party/sqlite)
@@ -114,7 +114,7 @@ if [[ $SEASTAR -eq 1 ]]; then
     git submodule update --init third_party/seastar
 fi
 # client-c needs a system-level gRPC/Poco toolchain, so fetch it lazily
-# (docs/storage/duostore-meta-tikv-design.md §8.1); of its nested submodules only kvproto/libfiu
+# (docs/architecture/storage/duostore-meta-tikv-design.md §8.1); of its nested submodules only kvproto/libfiu
 # are taken (abseil uniformly uses the system copy, googletest is not built)
 if [[ $TIKV -eq 1 ]]; then
     git submodule update --init third_party/client-c

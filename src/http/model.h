@@ -1,4 +1,4 @@
-// L1/L2 boundary: HTTP-neutral model (see docs/http-adapter.md)
+// L1/L2 boundary: HTTP-neutral model (see docs/architecture/http-adapter.md)
 // This header depends only on the standard library and core/task.h; no HTTP
 // library types may appear here.
 #pragma once
@@ -163,7 +163,7 @@ private:
     std::array<uint64_t, 4> present_{};
 };
 
-// Zero-copy exit for file-backed bodies (roadmap §4.3 ④, docs/http-adapter.md §1):
+// Zero-copy exit for file-backed bodies (roadmap §4.3 ④, docs/architecture/http-adapter.md §1):
 // the reader's *remaining* bytes are exactly this contiguous range of fd
 struct FileSpan {
     int fd;
@@ -230,7 +230,7 @@ struct HttpRequest {
     std::string remote_addr;
     // May be nullptr (no body)
     std::unique_ptr<BodyReader> body;
-    // Cancellation signal (docs/concurrency.md §5): the driver/assembly layer
+    // Cancellation signal (docs/architecture/concurrency.md §5): the driver/assembly layer
     // attaches this request's token, L2 merges it with the request-level
     // timeout into one source, and the whole coroutine chain unwinds from it.
     // Defaults to "never cancelled"
@@ -241,7 +241,7 @@ struct HttpRequest {
     // without the split
     bool admin_face = false;
     // Verified client certificate of the connection (mTLS, backlog-sequence ⑥,
-    // docs/tls.md §2.1): set by the driver after a handshake in which the peer
+    // docs/usage/tls.md §2.1): set by the driver after a handshake in which the peer
     // presented a certificate that verified against http.tls_client_ca; absent on
     // plaintext, without a client certificate, or when client auth is off. L1
     // reports both candidate subjects, L2 picks one by auth.tls_identity

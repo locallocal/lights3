@@ -1,6 +1,6 @@
-// Behavioral tests for the ingress admission-control assembly (docs/concurrency.md §6 · docs/archive/issues.md T11):
-// queueing when over the limit, the Permit tied into the streaming response body (returned only when fully read
-// or dropped on disconnect), and a cancelled queued request returning 503. The unit under test is
+// Behavioral tests for the ingress admission-control assembly (docs/architecture/concurrency.md §6 ·
+// docs/archive/issues.md T11): queueing when over the limit, the Permit tied into the streaming response body (returned
+// only when fully read or dropped on disconnect), and a cancelled queued request returning 503. The unit under test is
 // http/admission.h -- the same code main.cc assembles; previously this lifetime-sensitive path had no unit-test
 // coverage at all, so Permit-leak regressions (quota exhaustion hanging the whole site) were undetectable.
 // Also covers the transfer stall guard's (stall_guard.h) decision behavior.

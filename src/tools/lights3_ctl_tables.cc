@@ -1,5 +1,5 @@
-// lights3-ctl `tables` -- the S3 Tables catalog from the operator's side (docs/cli.md
-// §3.13, docs/s3-tables-design.md §9): table buckets (enable / disable /
+// lights3-ctl `tables` -- the S3 Tables catalog from the operator's side (docs/usage/cli.md
+// §3.13, docs/architecture/s3-tables-design.md §9): table buckets (enable / disable /
 // status), listing, maintenance (plan / run / purge / config), diagnostics and recovery.
 // Catalog calls go to "<prefix>/v1/..." signed with service "s3"; plan and run use the
 // admin plane (POST /-/admin/tables/<bucket>/<ns-path>/<t>/<op>, root) and poll the job
@@ -389,7 +389,7 @@ std::shared_ptr<ccmd::command> make_recover() {
 std::shared_ptr<ccmd::command> make_tables() {
     auto cmd = std::make_shared<ccmd::command>(
         "tables", "lights3-ctl tables list lake", "lights3-ctl tables <command> [options]",
-        "S3 Tables / Iceberg REST catalog operations (docs/s3-tables-design.md): table buckets "
+        "S3 Tables / Iceberg REST catalog operations (docs/architecture/s3-tables-design.md): table buckets "
         "(enable / disable / status), listing, maintenance (config / plan / run / purge) and "
         "the commit-log diagnostics (diagnose / recover). Catalog calls go to "
         "<prefix>/v1 (--catalog-prefix, default /iceberg); plan and run are admin-plane jobs "

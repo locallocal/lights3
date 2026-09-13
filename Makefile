@@ -48,7 +48,7 @@ release:
 debug:
 	./build.sh --debug -B $(DEBUG_DIR) -j $(JOBS) $(BUILD_ARGS)
 
-# The quick set of docs/testing.md §1: everything except the 3-second bench gate, the
+# The quick set of docs/development/testing.md §1: everything except the 3-second bench gate, the
 # 30-second soak and the docker-only mint suite (the same filter scripts/check-all.sh
 # uses).  ctest runs serially: the e2e sections bind fixed ports and share temp dirs.
 test: debug

@@ -1,5 +1,5 @@
 // lights3-ctl `tenant` command group: tenant lifecycle and bucket ownership via
-// /-/admin/tenants (docs/multi-tenancy.md §6). Implementation in lights3_ctl_tenant.cc.
+// /-/admin/tenants (docs/architecture/multi-tenancy.md §6). Implementation in lights3_ctl_tenant.cc.
 #pragma once
 
 #include <ccmd.h>

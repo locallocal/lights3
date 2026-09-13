@@ -1,4 +1,4 @@
-// per-credential policy（docs/credential-management.md §10.4）。
+// per-credential policy（docs/architecture/credential-management.md §10.4）。
 // Standalone header: the signature layer (sigv4.h) must carry a policy snapshot at verify time (docs/archive/gaps.md
 // §3.7), while credential_store.h depends on sigv4.h -- moving this back would create a cycle.
 #pragma once
@@ -42,7 +42,7 @@ struct CredentialPolicy {
     bool prefix_may_contain(std::string_view group_prefix) const;
 };
 
-// Narrowing (docs/s3-tables-design.md §8.4, STS-vended table credentials): the session
+// Narrowing (docs/architecture/s3-tables-design.md §8.4, STS-vended table credentials): the session
 // policy is `narrow` restricted to what `parent` already allows -- buckets kept only
 // when the parent admits them, prefixes kept only when the parent admits keys under
 // them, readonly / actions intersected. A nullopt parent (root / unrestricted) yields

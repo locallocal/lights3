@@ -1,4 +1,4 @@
-// CORS configuration store + rule matching (roadmap §2.1, docs/s3-protocol.md).
+// CORS configuration store + rule matching (roadmap §2.1, docs/architecture/s3-protocol.md).
 // Entries are managed through PUT/GET/DELETE /bucket?cors (root credential only) and
 // persisted as .sys/cors/<bucket> JSON objects via SysConfigStore (write-through +
 // tombstone sync, the WebsiteStore pattern).

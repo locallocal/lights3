@@ -1,4 +1,4 @@
-// L2: /-/admin/credentials -- dynamic credential management API (docs/credential-management.md §2).
+// L2: /-/admin/credentials -- dynamic credential management API (docs/architecture/credential-management.md §2).
 // Unlike the data plane: responses and errors are both JSON; errors are caught and rendered inside this handler,
 // never taking dispatch's outer S3 XML error path.
 #include <nlohmann/json.hpp>
@@ -63,7 +63,7 @@ json to_json(const CredentialInfo& c, bool with_secret) {
         if (!c.comment.empty()) j["comment"] = c.comment;
         if (c.policy) j["policy"] = json::parse(policy_to_json(*c.policy));
         if (!c.tenant.empty()) {
-            // docs/multi-tenancy.md §4
+            // docs/architecture/multi-tenancy.md §4
             j["tenant"] = c.tenant;
             j["role"] = c.tenant_admin ? "admin" : "user";
         }
@@ -76,7 +76,7 @@ json to_json(const CredentialInfo& c, bool with_secret) {
 struct CreateRequest {
     std::string comment;
     std::optional<CredentialPolicy> policy;
-    // docs/multi-tenancy.md §4: owning tenant (optional)
+    // docs/architecture/multi-tenancy.md §4: owning tenant (optional)
     std::string tenant;
     // "role": "admin"
     bool tenant_admin = false;
@@ -130,7 +130,7 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req, st
     try {
         auto ident = verify_identity(req);
         access_key = ident.access_key;
-        // Tiered model (docs/credential-management.md §3, docs/multi-tenancy.md §4.4): root
+        // Tiered model (docs/architecture/credential-management.md §3, docs/architecture/multi-tenancy.md §4.4): root
         // (static credentials) manages everything; a tenant admin manages the credentials
         // of its own tenant only. With auth disabled, verify returns an empty ak, which
         // falls to AccessDenied -- no root, no admin plane

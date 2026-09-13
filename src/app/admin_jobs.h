@@ -1,7 +1,7 @@
 // Application-level maintenance jobs on a live gateway: the offline integrity
 // scrub (`run_scrub_once`, roadmap §3.1, backlog-sequence ③) plus the on-demand
 // background rounds the offline CLI already exposes (`lights3 duostore gc|scan`,
-// `lights3 tier scan|gc|reconcile`, docs/cli.md §2.4) -- each run against the
+// `lights3 tier scan|gc|reconcile`, docs/usage/cli.md §2.4) -- each run against the
 // application's backends, one job per backend at a time, on a dedicated thread,
 // with the outcome kept for polling. Drives `lights3 fsck` (run_scrub,
 // synchronous) and the admin endpoints (AdminJobs, asynchronous):
@@ -42,7 +42,7 @@ using FsckOutcome = JobOutcome;
 
 // The maintenance operations. Fsck runs on duostore / localfs / xlocalfs, the
 // Duo* ops on duostore, the Tier* ops on tiered; anything else is Unsupported.
-// The Table* ops are resource-level custom jobs (docs/s3-tables-design.md §9):
+// The Table* ops are resource-level custom jobs (docs/architecture/s3-tables-design.md §9):
 // their resource is "tables:<bucket>/<ns-path>/<t>" and the work is a function
 enum class JobOp { Fsck, DuoGc, DuoScan, TierScan, TierGc, TierReconcile, TablePlan, TableRun, TablePurge };
 // "fsck" | "gc" | "scan" | "reconcile" | "plan" | "run" | "purge": the op's name on the
@@ -116,7 +116,7 @@ public:
     // a job of any op is running on that backend
     bool busy(const std::string& name) const;
     // Extra fsck work after run_scrub (S3 Tables catalog reconciliation,
-    // docs/s3-tables-design.md §14 ③): called with the backend name inside the job
+    // docs/architecture/s3-tables-design.md §14 ③): called with the backend name inside the job
     // thread; a returned outcome is merged into the scrub's (findings added, stats under
     // its kind). nullopt = nothing to add for that backend
     using FsckExtension = std::function<std::optional<JobOutcome>(const std::string& backend)>;

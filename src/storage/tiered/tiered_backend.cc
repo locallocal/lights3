@@ -36,11 +36,11 @@ using tier::TierInfo;
 
 namespace {
 
-// access flush period (docs/storage/tiered-design.md §4.3)
+// access flush period (docs/architecture/storage/tiered-design.md §4.3)
 constexpr int64_t kAccessFlushSec = 300;
 
 // For demotion uploads: layers synchronous MD5 and byte counting on top of the local
-// side's snapshot stream (docs/storage/tiered-design.md §5.2 step 3 verification)
+// side's snapshot stream (docs/architecture/storage/tiered-design.md §5.2 step 3 verification)
 class HashingReader final : public http::BodyReader {
 public:
     explicit HashingReader(std::unique_ptr<http::BodyReader> inner) : inner_(std::move(inner)) {}
@@ -80,7 +80,7 @@ struct InflightRelease {
     ~InflightRelease() { owner->inflight_end(ikey); }
 };
 
-// Tee passthrough + cache-while-downloading (docs/storage/tiered-design.md §6.2): the cloud stream
+// Tee passthrough + cache-while-downloading (docs/architecture/storage/tiered-design.md §6.2): the cloud stream
 // is returned to the client as usual while also being written into a local cache fill
 // with incremental MD5; if verification passes at EOF, commit as cached. Local write
 // failures silently degrade to pure passthrough; on client disconnect the destructor runs
@@ -441,7 +441,7 @@ std::shared_ptr<TieredBackend> TieredBackend::from_config(
     if (!local)
         throw std::runtime_error("tiered backend '" + cfg.name + "': local '" + local_name +
                                  "' must be a localfs/xlocalfs or duostore backend "
-                                 "(docs/storage/tiered-design.md §2)");
+                                 "(docs/architecture/storage/tiered-design.md §2)");
 
     TieredConfig tc;
     if (auto v = param("cold_after"); !v.empty()) tc.cold_after_sec = parse_duration_sec(v);
@@ -552,7 +552,7 @@ Task<ObjectStream> TieredBackend::get_object(std::string_view bucket, std::strin
         const TierInfo& t = obj->tier;
 
         // remote + Range: block cache (roadmap §3.6 ⑦) when enabled, else passthrough
-        // (docs/storage/tiered-design.md §6.3); external meta is always the local original
+        // (docs/architecture/storage/tiered-design.md §6.3); external meta is always the local original
         if (range && cfg_.range_cache && local_->supports_range_cache() && m.size > 0) {
             // InvalidRange here matches what the cloud would say
             auto [f, l] = resolve_range(*range, m.size);
@@ -761,7 +761,7 @@ Task<ListUploadsResult> TieredBackend::list_multipart_uploads(std::string_view b
     co_return co_await local_->backend().list_multipart_uploads(bucket, opt);
 }
 
-// ---------- Demotion (docs/storage/tiered-design.md §5) ----------
+// ---------- Demotion (docs/architecture/storage/tiered-design.md §5) ----------
 
 Task<void> TieredBackend::demote_object(std::string bucket, std::string key) {
     // max_concurrent_transfers throttle
@@ -864,8 +864,8 @@ Task<void> TieredBackend::demote_object(std::string bucket, std::string key) {
     co_return;
 }
 
-// ---------- Promotion (background whole-object promotion for Range GETs + test hook, docs/storage/tiered-design.md
-// §6.3) ----------
+// ---------- Promotion (background whole-object promotion for Range GETs + test hook,
+// docs/architecture/storage/tiered-design.md §6.3) ----------
 
 Task<void> TieredBackend::promote_object(std::string bucket, std::string key) {
     auto permit = co_await transfers_.acquire();
@@ -931,7 +931,7 @@ Task<void> TieredBackend::commit_cache_fill(std::string bucket, std::string key,
     co_return;
 }
 
-// ---------- Access records + time wheel (docs/storage/tiered-design.md §4.3/§5.1) ----------
+// ---------- Access records + time wheel (docs/architecture/storage/tiered-design.md §4.3/§5.1) ----------
 
 void TieredBackend::touch(std::string_view bucket, std::string_view key) {
     const int64_t now = ::time(nullptr);
@@ -1077,7 +1077,7 @@ Task<void> TieredBackend::flush_task() {
     flush_access_sync();
 }
 
-// ---------- TierScanner (docs/storage/tiered-design.md §5.1) ----------
+// ---------- TierScanner (docs/architecture/storage/tiered-design.md §5.1) ----------
 
 struct TieredBackend::ScanCtx {
     int64_t now = 0;
@@ -1370,7 +1370,7 @@ Task<void> TieredBackend::promote_quiet(std::string bucket, std::string key) {
     }
 }
 
-// ---------- GC queue (docs/storage/tiered-design.md §7.2) ----------
+// ---------- GC queue (docs/architecture/storage/tiered-design.md §7.2) ----------
 
 void TieredBackend::enqueue_gc(std::string_view bucket, std::string_view key, std::string_view remote_etag) {
     if (remote_etag.empty()) return;
@@ -1674,7 +1674,7 @@ Task<bool> TieredBackend::quarantine_purge(std::string bucket, std::string key) 
     co_return true;
 }
 
-// ---------- Reconciliation (docs/storage/tiered-design.md §9) ----------
+// ---------- Reconciliation (docs/architecture/storage/tiered-design.md §9) ----------
 
 Task<TierReconcileStats> TieredBackend::run_reconcile_once() {
     co_await pool_->schedule();
@@ -1912,7 +1912,7 @@ Task<void> TieredBackend::reconcile_orphan(std::string bucket, std::string key, 
 
 Task<void> TieredBackend::ensure_cloud_bucket(std::string_view bucket) {
     // No bucket_exists check: cloudproxy treats a remote 403 as "exists" per AWS HeadBucket
-    // semantics (docs/storage/cloudproxy-design.md §4.3), so a gateway-side permission fault would
+    // semantics (docs/architecture/storage/cloudproxy-design.md §4.3), so a gateway-side permission fault would
     // make that check lie, skip bucket creation, and leave the demotion pipeline silently
     // failing every round. Create directly and treat 409 as already-exists: idempotent and
     // unambiguous

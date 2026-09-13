@@ -1,4 +1,4 @@
-// L3: DuoStore metadata-side interface (docs/storage/duostore-design.md §3.2).
+// L3: DuoStore metadata-side interface (docs/architecture/storage/duostore-design.md §3.2).
 // Contract: synchronous interface, must be called on a pool thread (DuoStoreBackend
 // switches to the pool uniformly at the entry point, §2.2); errors throw
 // s3::S3Error; commit-type methods internally complete
@@ -30,7 +30,7 @@
 namespace lights3::storage::duostore {
 
 // Tiering state of an object when duostore is the local side of a TieredBackend
-// (roadmap §3.6 ⑥, docs/storage/tiered-design.md §3): remote = the data lives in the cloud and
+// (roadmap §3.6 ⑥, docs/architecture/storage/tiered-design.md §3): remote = the data lives in the cloud and
 // `data` is empty (a stub), cached = local extents are a cache of the cloud replica.
 // Codec object record v3; absent on older records = local
 struct TierState {
@@ -205,7 +205,7 @@ struct IMetaReadView {
     virtual ~IMetaReadView() = default;
 };
 
-// One entry of a meta backup chain (backlog-sequence ⑧, docs/storage/duostore-core.md
+// One entry of a meta backup chain (backlog-sequence ⑧, docs/architecture/storage/duostore-core.md
 // §11.1): what an engine wrote into the backup directory and how to address it
 // at restore time. full=false is a delta over the previous entry of the chain
 struct MetaBackupEntry {
@@ -384,7 +384,7 @@ struct IMetaStore : IMetaReadView {
     // borrows this store: it must be destroyed before close()
     virtual std::unique_ptr<IMetaReadView> snapshot() { return nullptr; }
 
-    // ---- generic KV facade (docs/s3-tables-design.md §12) ----
+    // ---- generic KV facade (docs/architecture/s3-tables-design.md §12) ----
     // An opaque, ordered key/value space apart from the object tables (rocksdb column
     // family "tc", sqlite table tc, redis hash + lex index, tikv key tag 'T'), the
     // backing of the S3 Tables catalog when tables.catalog_backing = duostore. Values

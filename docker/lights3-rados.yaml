@@ -1,5 +1,5 @@
 # compose profile `rados`: duostore with RocksDB metadata under the volume and
-# chunk data in the ceph demo cluster (docs/storage/duostore-data-rados-design.md); needs the
+# chunk data in the ceph demo cluster (docs/architecture/storage/duostore-data-rados-design.md); needs the
 # image built with LIGHTS3_RADOS=ON and the shared /etc/ceph volume
 http:
   driver: builtin

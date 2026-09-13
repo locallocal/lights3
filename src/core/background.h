@@ -1,4 +1,4 @@
-// L4: background task wait group (docs/concurrency.md §7): self-destroying
+// L4: background task wait group (docs/architecture/concurrency.md §7): self-destroying
 // top-level coroutine driver + close waits for in-flight tasks to drain to zero.
 // Extracted from the verbatim-duplicated private mechanisms in TieredBackend /
 // DuoStoreBackend (the lifetime-critical path is maintained in one place only).

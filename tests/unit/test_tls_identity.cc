@@ -1,5 +1,5 @@
 // backlog-sequence ⑥: mTLS client certificate -> credential / tenant identity
-// mapping (docs/tls.md §2.1, docs/multi-tenancy.md §4.2). Full-dispatch tests on
+// mapping (docs/usage/tls.md §2.1, docs/architecture/multi-tenancy.md §4.2). Full-dispatch tests on
 // the memory backend; the certificate is injected on HttpRequest::tls_identity
 // exactly as the drivers set it (test_tls.cc proves the driver side)
 #include <nlohmann/json.hpp>

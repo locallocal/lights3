@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-shot verification matrix (roadmap §6.1, docs/testing.md §8): incremental
+# One-shot verification matrix (roadmap §6.1, docs/development/testing.md §8): incremental
 # build + ctest for every build directory that exists (or that --configure
 # creates through build.sh), with a summary table at the end. Variants are
 # selected by directory name; sanitizer variants run under the matching

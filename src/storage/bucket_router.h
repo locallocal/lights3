@@ -1,5 +1,5 @@
 // L3: bucket → backend routing (glob rules, matched in declaration order, see
-// docs/storage/storage-backend.md §2).
+// docs/architecture/storage/storage-backend.md §2).
 // Build-time validation (docs/archive/gaps.md §6.3): bad glob syntax / literal characters
 // impossible in a bucket name / unreachable rules (placed after a catch-all, or duplicating
 // an earlier rule) all fail at startup -- a mistyped pattern that silently never matches
@@ -38,7 +38,7 @@ public:
     // Snapshot of the backend set (name -> instance): stable for the caller's
     // iteration even while a reload swaps the set underneath
     std::shared_ptr<const BackendMap> backends() const { return table()->backends; }
-    // Internal data (e.g. credential persistence, docs/credential-management.md §4.1)
+    // Internal data (e.g. credential persistence, docs/architecture/credential-management.md §4.1)
     // always lands on the default backend
     std::shared_ptr<IStorageBackend> default_backend() const { return shared_->default_backend; }
 

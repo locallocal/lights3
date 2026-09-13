@@ -84,7 +84,7 @@ void run_load(const Cmd& c) {
     app.shutdown();
 }
 
-// ---- Backup chains / PITR (backlog-sequence ⑧, docs/storage/duostore-core.md §11.1) ----
+// ---- Backup chains / PITR (backlog-sequence ⑧, docs/architecture/storage/duostore-core.md §11.1) ----
 
 // `<backend>` positional or --backend=; the directory comes from --to= / --from=
 std::string backend_dir_args(const Cmd& c, const char* dir_flag, std::string& dir) {
@@ -338,7 +338,7 @@ void run_duo_quarantine_purge(const Cmd& c) {
 Cmd make_duo_quarantine() {
     auto cmd = make_group("quarantine", "lights3 duostore quarantine list local",
                           "lights3 duostore quarantine <list|release|purge> <backend> [<pack_id>] [--config=<path>]",
-                          "Corrupt-pack quarantine (docs/storage/duostore-core.md §8.6): packs whose "
+                          "Corrupt-pack quarantine (docs/architecture/storage/duostore-core.md §8.6): packs whose "
                           "compaction found corrupt records and made no progress for consecutive scans are "
                           "parked here instead of retrying forever. list shows them; release drops an entry "
                           "so compaction retries (use after restoring the pack file from backup); purge "
@@ -379,17 +379,18 @@ Cmd make_admin_leaf(const char* name, const char* example, const char* usage, co
 }  // namespace
 
 Cmd make_duostore() {
-    auto cmd = make_group("duostore", "lights3 duostore dump local meta.dump --config=config/lights3.yaml",
-                          "lights3 duostore <dump|load|backup|restore|gc|scan|quarantine> <backend> [<file>|<pack_id>] "
-                          "[--config=<path>]",
-                          "DuoStore admin: meta dump/load (docs/storage/duostore-core.md §11), backup chains "
-                          "with point-in-time restore (§11.1), on-demand "
-                          "GC / orphan-scan rounds (§8), and the corrupt-pack quarantine (§8.1). All run "
-                          "with the backends built but no server listening, then exit; load ends with a "
-                          "forced orphan scan. Backup order: copy the data dir first, then dump meta "
-                          "(online-consistent on rocksdb/sqlite/tikv; stop writes on redis); restore data "
-                          "first, then load.",
-                          "duostore admin (dump/load/gc/scan/quarantine)");
+    auto cmd = make_group(
+        "duostore", "lights3 duostore dump local meta.dump --config=config/lights3.yaml",
+        "lights3 duostore <dump|load|backup|restore|gc|scan|quarantine> <backend> [<file>|<pack_id>] "
+        "[--config=<path>]",
+        "DuoStore admin: meta dump/load (docs/architecture/storage/duostore-core.md §11), backup chains "
+        "with point-in-time restore (§11.1), on-demand "
+        "GC / orphan-scan rounds (§8), and the corrupt-pack quarantine (§8.1). All run "
+        "with the backends built but no server listening, then exit; load ends with a "
+        "forced orphan scan. Backup order: copy the data dir first, then dump meta "
+        "(online-consistent on rocksdb/sqlite/tikv; stop writes on redis); restore data "
+        "first, then load.",
+        "duostore admin (dump/load/gc/scan/quarantine)");
     cmd->add_subcommand(make_admin_leaf("dump", "lights3 duostore dump local meta.dump",
                                         "lights3 duostore dump <backend> <file> [--config=<path>]",
                                         "Write the backend's full meta (buckets, objects, sealed packs) to <file>.",
@@ -402,7 +403,7 @@ Cmd make_duostore() {
         auto bk = std::make_shared<ccmd::command>(
             "backup", "lights3 duostore backup local --to=/backup/local-meta --incremental",
             "lights3 duostore backup <backend> --to=<dir> [--incremental] [--config=<path>]",
-            "Append one entry to the meta backup chain in <dir> (docs/storage/duostore-core.md "
+            "Append one entry to the meta backup chain in <dir> (docs/architecture/storage/duostore-core.md "
             "§11.1). sqlite: a full copy, or with --incremental the WAL segment since the "
             "previous entry (needs sqlite_wal_archive pointing at <dir>); rocksdb: a "
             "BackupEngine backup (incremental by construction, every entry restores on its "
@@ -434,18 +435,18 @@ Cmd make_duostore() {
                              "restore through the last entry at or before this time (ISO 8601 or unix ms)");
         cmd->add_subcommand(rs);
     }
-    cmd->add_subcommand(make_backend_leaf("gc", "lights3 duostore gc local",
-                                          "lights3 duostore gc <backend> [--config=<path>]",
-                                          "Run one GC round now (docs/storage/duostore-core.md §8.1): mpu_ttl expiry "
-                                          "cleanup, gcq consumption, aged-pack sealing + compaction, whole-empty-pack "
-                                          "deletion. Same round the background worker runs on its timer.",
-                                          "run one duostore GC round", run_duo_gc));
-    cmd->add_subcommand(make_backend_leaf("scan", "lights3 duostore scan local",
-                                          "lights3 duostore scan <backend> [--config=<path>]",
-                                          "Run one orphan-scan round now (docs/storage/duostore-core.md §8.3): two-way "
-                                          "reconciliation of on-disk chunks/packs against refs/packstat; unreferenced "
-                                          "residue beyond gc_grace is unlinked, loss signals are warned and counted.",
-                                          "run one duostore orphan-scan round", run_duo_scan));
+    cmd->add_subcommand(
+        make_backend_leaf("gc", "lights3 duostore gc local", "lights3 duostore gc <backend> [--config=<path>]",
+                          "Run one GC round now (docs/architecture/storage/duostore-core.md §8.1): mpu_ttl expiry "
+                          "cleanup, gcq consumption, aged-pack sealing + compaction, whole-empty-pack "
+                          "deletion. Same round the background worker runs on its timer.",
+                          "run one duostore GC round", run_duo_gc));
+    cmd->add_subcommand(
+        make_backend_leaf("scan", "lights3 duostore scan local", "lights3 duostore scan <backend> [--config=<path>]",
+                          "Run one orphan-scan round now (docs/architecture/storage/duostore-core.md §8.3): two-way "
+                          "reconciliation of on-disk chunks/packs against refs/packstat; unreferenced "
+                          "residue beyond gc_grace is unlinked, loss signals are warned and counted.",
+                          "run one duostore orphan-scan round", run_duo_scan));
     cmd->add_subcommand(make_duo_quarantine());
     return cmd;
 }

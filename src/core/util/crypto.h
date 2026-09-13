@@ -22,7 +22,7 @@ std::string sha256_hex(std::string_view data);
 
 Sha256Digest hmac_sha256(std::span<const uint8_t> key, std::string_view data);
 
-// AES-256-GCM authenticated encryption (docs/credential-management.md §10.1, SK
+// AES-256-GCM authenticated encryption (docs/architecture/credential-management.md §10.1, SK
 // at-rest encryption). seal output layout: 12B random nonce || ciphertext || 16B tag;
 // open returns nullopt when it cannot decrypt (truncation/tampering/wrong key)
 using Aes256Key = std::array<uint8_t, 32>;

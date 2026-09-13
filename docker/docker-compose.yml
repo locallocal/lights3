@@ -1,4 +1,4 @@
-# LightS3 compose (roadmap §6.3, docs/deployment.md §4). Run from this directory
+# LightS3 compose (roadmap §6.3, docs/usage/deployment.md §4). Run from this directory
 # (or `docker compose -f docker/docker-compose.yml ...` from the repository root);
 # images build with the repository root as context and docker/Dockerfile.
 #
@@ -174,7 +174,7 @@ services:
     restart: unless-stopped
 
   # ---- profile multi: two gateways over shared storage behind a round-robin -----
-  # The multi-gateway deployment the design supports (docs/storage/multi-gateway-
+  # The multi-gateway deployment the design supports (docs/archive/multi-gateway-
   # multipart-design.md §2): redis metadata + RADOS data shared by both instances,
   # read/write leases on, GC on exactly one of them (LIGHTS3_GC_ENABLED), nginx
   # rotating requests with no stickiness. Each gateway keeps its own root volume

@@ -1,6 +1,6 @@
 // lights3-ctl `mpu list|abort` — zombie multipart upload cleanup over the standard S3
 // API (ListMultipartUploads / AbortMultipartUpload), no admin endpoint involved,
-// so any credential allowed on the bucket works (roadmap §6.2, docs/cli.md §3.11).
+// so any credential allowed on the bucket works (roadmap §6.2, docs/usage/cli.md §3.11).
 // `list` walks every page (key-marker / upload-id-marker cursor) and prints one
 // line per upload with its age; `--older-than` filters by initiation time and
 // `abort --all` removes everything the same filter selects.

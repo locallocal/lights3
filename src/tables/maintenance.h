@@ -1,4 +1,4 @@
-// Table maintenance (docs/s3-tables-design.md §9):
+// Table maintenance (docs/architecture/s3-tables-design.md §9):
 // a read-only planner that binds its findings to the table's version token, a runner
 // that executes a plan (snapshot expiry through the standard commit, then file deletes
 // re-checked against the safety window), and the purge that follows a
@@ -35,7 +35,7 @@ struct PlannerOptions {
     iceberg::DeepCheckOptions deep;
 };
 
-// One bin of files the engine should rewrite into one (docs/s3-tables-design.md §9):
+// One bin of files the engine should rewrite into one (docs/architecture/s3-tables-design.md §9):
 // not executed here (Spark rewrite_data_files / the engine's own compaction)
 struct CompactionCandidate {
     // the files' directory prefix (Iceberg partitions are directories)

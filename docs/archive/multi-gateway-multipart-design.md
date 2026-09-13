@@ -1,14 +1,14 @@
 # 多网关共享存储下的 Multipart：现状核对与补齐步骤（已归档）
 
 > **归档说明（2026-09-09）**：§4 的四个补齐步骤已全部实现并合并（① 写侧租约
-> #110，② 双实例测试 #111，③ 文档配置，④ 误配防线 #112），文件从 `docs/storage/`
+> #110，② 双实例测试 #111，③ 文档配置，④ 误配防线 #112），文件从 `docs/architecture/storage/`
 > 移至此处，内容不再更新（英文版随之删除）。源码 / 文档注释里的
 > `multi-gateway-multipart §N` 指本文件的 §N，章节编号保持不变。长期有效的结论
-> 已搬到常驻文档：支持矩阵与部署清单在 [../deployment.md §5](../deployment.md)，
-> multipart 跨网关不变量在 [../storage/duostore-core.md §9.1](../storage/duostore-core.md)，
-> 前提核对表在 [../storage/duostore-data-rados-design.md §8.3](../storage/duostore-data-rados-design.md)，
+> 已搬到常驻文档：支持矩阵与部署清单在 [../deployment.md §5](../usage/deployment.md)，
+> multipart 跨网关不变量在 [../storage/duostore-core.md §9.1](../architecture/storage/duostore-core.md)，
+> 前提核对表在 [../storage/duostore-data-rados-design.md §8.3](../architecture/storage/duostore-data-rados-design.md)，
 > 唯一未闭环项（compose `multi` profile 的容器 e2e，本机无 docker）记在
-> [../todo.md §2](../todo.md)。
+> [../todo.md §2](../development/todo.md)。
 >
 > 状态：**§4 ①–④ 全部实现（① 2026-09-08，②③④ 2026-09-09）**。本文回答一个问题：
 > 多个 lights3 网关指向同一份共享存储时，一个 multipart 上传的
@@ -18,10 +18,10 @@
 > 已由 §4 ① 的写侧租约关闭）与零端到端测试，补齐步骤见 §4。其余后端不是
 > 多网关设计，§2 逐一说明。
 >
-> 相关：[duostore-core.md](../storage/duostore-core.md) §3 / §8 / §9、
-> [duostore-data-rados-design.md](../storage/duostore-data-rados-design.md) §8.3、
-> [duostore-meta-redis.md](../storage/duostore-meta-redis.md) §8、
-> [duostore-meta-tikv.md](../storage/duostore-meta-tikv.md) §9、[localfs.md](../storage/localfs.md) §7。
+> 相关：[duostore-core.md](../architecture/storage/duostore-core.md) §3 / §8 / §9、
+> [duostore-data-rados-design.md](../architecture/storage/duostore-data-rados-design.md) §8.3、
+> [duostore-meta-redis.md](../architecture/storage/duostore-meta-redis.md) §8、
+> [duostore-meta-tikv.md](../architecture/storage/duostore-meta-tikv.md) §9、[localfs.md](../architecture/storage/localfs.md) §7。
 
 ## 1. 场景定义
 
@@ -43,11 +43,11 @@
 | 后端 | 状态 | 依据 |
 | --- | --- | --- |
 | memory | 不适用 | 进程内存 |
-| localfs / xlocalfs | **非多网关设计** | 分片状态全在 `<staging>/mpu/<upload_id>/`（[localfs.md](../storage/localfs.md) §7），无进程内 upload 注册表，理论上共享 POSIX 文件系统（NFS）下能"碰巧工作"；但仓库从未把共享 root 当作支持的部署：rename / fsync / xattr 在 NFS 上的语义未论证，`commit_lock` 是进程内 per-key 互斥（两网关同 key 并发 complete 各自 rename，后者胜），`next_tmp_name` = pid + steady_clock + 进程内序号（跨主机可撞名，靠 `O_EXCL` 兜成报错），过期清理每个网关各跑一遍（`remove_all` 幂等，无害） |
+| localfs / xlocalfs | **非多网关设计** | 分片状态全在 `<staging>/mpu/<upload_id>/`（[localfs.md](../architecture/storage/localfs.md) §7），无进程内 upload 注册表，理论上共享 POSIX 文件系统（NFS）下能"碰巧工作"；但仓库从未把共享 root 当作支持的部署：rename / fsync / xattr 在 NFS 上的语义未论证，`commit_lock` 是进程内 per-key 互斥（两网关同 key 并发 complete 各自 rename，后者胜），`next_tmp_name` = pid + steady_clock + 进程内序号（跨主机可撞名，靠 `O_EXCL` 兜成报错），过期清理每个网关各跑一遍（`remove_all` 幂等，无害） |
 | tiered | 同 localfs | multipart 四步全部委托 local 侧 `LocalFsBackend`（`tiered_backend.cc:740-773`） |
 | cloudproxy | **支持** | 纯透传：upload_id 是远端 S3 的，网关无本地状态（`cloudproxy_backend.cc:1104-1200`）；任意网关处理任意一步 |
 | duostore + rocksdb / sqlite meta | 不可能 | 本地引擎持文件锁，单进程独占 |
-| duostore + redis / tikv meta + **fs data** | **不支持**（且与 multipart 无关） | meta 共享但数据在各网关本地盘：A 写的 chunk / pack 在 B 上不存在，B 的 GET 直接缺 extent；B 的 GC 对 A 的 extent `remove` 得 ENOENT 幂等销账 → A 盘上永久泄漏；B 启动的 `abandon_stale_packs` 只能探测本机 flock，会误封 A 的 active pack。文档把共享 root 明列为误配（[duostore-data-fs.md](../storage/duostore-data-fs.md) §5 "误配共享 root"）。这条组合只能作单网关部署（共享 meta 仅换来 meta 侧高可用） |
+| duostore + redis / tikv meta + **fs data** | **不支持**（且与 multipart 无关） | meta 共享但数据在各网关本地盘：A 写的 chunk / pack 在 B 上不存在，B 的 GET 直接缺 extent；B 的 GC 对 A 的 extent `remove` 得 ENOENT 幂等销账 → A 盘上永久泄漏；B 启动的 `abandon_stale_packs` 只能探测本机 flock，会误封 A 的 active pack。文档把共享 root 明列为误配（[duostore-data-fs.md](../architecture/storage/duostore-data-fs.md) §5 "误配共享 root"）。这条组合只能作单网关部署（共享 meta 仅换来 meta 侧高可用） |
 | duostore + redis / tikv meta + **rados data** | **设计上支持，有缺口** | 见 §3 |
 
 ## 3. duostore（redis / tikv + rados）逐项核对
@@ -56,12 +56,12 @@
 
 | 前提 | 现状 |
 | --- | --- |
-| P1 | `create_upload` / `put_part` / `complete_upload` / `abort_upload` 各为单事务（[duostore-core.md](../storage/duostore-core.md) §3.1）；redis 为服务端 Lua 脚本（[duostore-meta-redis.md](../storage/duostore-meta-redis.md) §8），tikv 为 2PC + 写写冲突重试（[duostore-meta-tikv.md](../storage/duostore-meta-tikv.md) §9）。跨网关的竞态全部收敛：同号分片两网关并发上传 = last-write-wins，败者入 gcq；A 在泵送分片时 B abort/complete → A 的 `put_part` 抛 NoSuchUpload，`commit_or_discard` 删已落数据；`UndeterminedCommit` 不删、留给孤儿扫描 |
+| P1 | `create_upload` / `put_part` / `complete_upload` / `abort_upload` 各为单事务（[duostore-core.md](../architecture/storage/duostore-core.md) §3.1）；redis 为服务端 Lua 脚本（[duostore-meta-redis.md](../architecture/storage/duostore-meta-redis.md) §8），tikv 为 2PC + 写写冲突重试（[duostore-meta-tikv.md](../architecture/storage/duostore-meta-tikv.md) §9）。跨网关的竞态全部收敛：同号分片两网关并发上传 = last-write-wins，败者入 gcq；A 在泵送分片时 B abort/complete → A 的 `put_part` 抛 NoSuchUpload，`commit_or_discard` 删已落数据；`UndeterminedCommit` 不删、留给孤儿扫描 |
 | P2 | `multipart.cc:new_upload_id` = `getentropy` 128 bit 随机，与进程无关 |
 | P3 | rados 无 pack 层，全部 extent 为 `kRados` 对象，同 pool + namespace 内全网关可读；complete 是纯 meta 装配（§9），任一网关装配、任一网关读 |
 | P4 | `alloc_file_run` 走共享 meta 的号段分配（redis INCRBY / tikv 计数器 RMW），单测 `duostore_redis_multi_gateway_shared_meta` / `duostore_tikv_multi_gateway_shared_meta` 覆盖 |
 | P6 | `try_gc_lease` 保证 GC 轮与孤儿扫描单执行者；mpu_ttl 清理是 GC 轮第 1 步，随租约走；非指定网关 `gc_enabled: false` |
-| 读侧 | read-lease（[duostore-core.md](../storage/duostore-core.md) §8.5）已把"A 在读、B 在回收"的 pin 表跨进程问题覆盖 |
+| 读侧 | read-lease（[duostore-core.md](../architecture/storage/duostore-core.md) §8.5）已把"A 在读、B 在回收"的 pin 表跨进程问题覆盖 |
 | 元数据缓存 | 分片记录不进缓存；complete 在本网关 `invalidate_on_exit`，redis 经 pub/sub 广播、tikv 靠 `meta_cache_ttl` 有界陈旧（§7.1），对 multipart 无额外问题 |
 
 ### 3.2 缺口 G1（已关闭）：写侧在途保护曾是进程内的
@@ -105,14 +105,14 @@ compose `multi` profile。
 
 ### 3.4 缺口 G3（文档配置已关闭，误配告警归 ④）：曾经无承载
 
-- [duostore-data-rados-design.md](../storage/duostore-data-rados-design.md) §8.3 的前提表
-  没有 multipart / 写侧在途一行；[duostore-core.md](../storage/duostore-core.md) §9 无多网关
+- [duostore-data-rados-design.md](../architecture/storage/duostore-data-rados-design.md) §8.3 的前提表
+  没有 multipart / 写侧在途一行；[duostore-core.md](../architecture/storage/duostore-core.md) §9 无多网关
   说明；`config/lights3.yaml` 未列 `read_lease`，`gc_enabled` 注释未提写侧约束。
 - `redis/tikv meta + fs data` 这条**不支持**的组合启动时无任何告警，误配只在
   跨网关 GET 失败时暴露。
 
 **现状**：第一条随 §4 ③ 关闭（前提表、§9.1、`read_lease` 样例、
-[../deployment.md §5](../deployment.md) 多网关小节）；第二条随 §4 ④ 关闭
+[../deployment.md §5](../usage/deployment.md) 多网关小节）；第二条随 §4 ④ 关闭
 （启动 WARN + `--check-config` 同文）。
 
 ## 4. 补齐步骤
@@ -122,7 +122,7 @@ compose `multi` profile。
 ### ① 写侧租约（write-lease）：把写侧在途保护搬到共享介质 —— 已实现
 
 与 read-lease 同构，复用其发布/消费骨架，不引入新表（实现细节与安全论证
-汇总在 [duostore-core.md §8.5](../storage/duostore-core.md)）：
+汇总在 [duostore-core.md §8.5](../architecture/storage/duostore-core.md)）：
 
 1. **登记**：`put_object` / `upload_part` / `tier_commit_cached` 在 `pump_body`
    之前构造 `WriteTicket`（向 `write_clock_`——与读侧同一实现 `InFlightClock`
@@ -197,20 +197,20 @@ e2e 两层：
   nginx 跑 5 分片 multipart，校验合成 ETag、GET 字节、两网关请求计数都在动；
   用 curl `--aws-sigv4` 而非 aws cli，与仓库 e2e 工具链一致）。
   `docker compose --profile multi config` 通过；本机无 docker daemon，实际拉起归入
-  [../todo.md](../todo.md) §2 待验证。
+  [../todo.md](../development/todo.md) §2 待验证。
 
 ### ③ 文档与配置 —— 已实现
 
-- [duostore-data-rados-design.md](../storage/duostore-data-rados-design.md) §8.3 前提表：
+- [duostore-data-rados-design.md](../architecture/storage/duostore-data-rados-design.md) §8.3 前提表：
   "写侧 pin vs 他网关孤儿扫描"行随 ① 加入，本步补"multipart 跨网关：已验证
   （§4 ②）"行，并把"暂不实现租约式"的结语改为已落地的粗粒度租约；
-  [duostore-core.md](../storage/duostore-core.md) §8.5 已随 ① 改题为"多网关读写租约"，
+  [duostore-core.md](../architecture/storage/duostore-core.md) §8.5 已随 ① 改题为"多网关读写租约"，
   本步加 §9.1 多网关小节（全局唯一、竞态收敛、在途保护、单执行者、用例、
   fs data 不在矩阵内）。
 - `config/lights3.yaml` duostore 段补 `read_lease: 5s`（多网关必开，`0s` = 关，
   关则 `gc_grace` 须盖过最长 GET 与上传）注释，`gc_enabled` 注释指向本文与
   deployment.md §5。
-- [../deployment.md](../deployment.md) §5 "多网关部署"（+en）：支持矩阵（§2）、
+- [../deployment.md](../usage/deployment.md) §5 "多网关部署"（+en）：支持矩阵（§2）、
   必要配置表（`gc_enabled` 单实例、`read_lease` 开启、NTP、`meta_cache_ttl`
   约束、前缀 / namespace 一致、实例级后台任务单开）、负载均衡无需粘连
   （透传 `Host`、关请求缓冲）。原 §5 / §6 顺延为 §6 / §7。
@@ -240,5 +240,5 @@ duostore-redis / duostore-tikv 变体断言 check-config 与启动日志都带�
   锁，与 duostore 的正路重复；明确不做，文档保持"单网关"。
 - fs 数据面的跨网关共享（共享 root）：见 §2，误配。
 - 分片级别的分布式 pin（逐 extent 上报）：read-lease 的评估结论同样适用
-  （[duostore-data-rados-design.md](../storage/duostore-data-rados-design.md) §8.3 候选表），
+  （[duostore-data-rados-design.md](../architecture/storage/duostore-data-rados-design.md) §8.3 候选表），
   粗粒度租约足够。

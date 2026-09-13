@@ -1,4 +1,4 @@
-// ITableCatalogStore on the .sys bucket of the default backend (docs/s3-tables-design.md
+// ITableCatalogStore on the .sys bucket of the default backend (docs/architecture/s3-tables-design.md
 // §4.3): one JSON object per entity, listing through the backend's prefix/delimiter
 // listing, CAS through PutCondition. No cache -- every read hits the backend, which is
 // what makes the state shared across gateways

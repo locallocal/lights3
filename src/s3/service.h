@@ -51,8 +51,8 @@ struct RequestContext {
     // relay the pair they saw, so the log side must be able to match it
     std::string host_id;
     // Cancellation signal: client disconnect (detected by the driver), request timeout, process shutdown
-    // (docs/concurrency.md §5); defaults to "never cancelled". Long loops (between chunks of streaming reads/writes)
-    // and pool.schedule() observe it
+    // (docs/architecture/concurrency.md §5); defaults to "never cancelled". Long loops (between chunks of streaming
+    // reads/writes) and pool.schedule() observe it
     CancelToken cancel;
     // W3C trace context (roadmap §5.4, core/trace.h): inherited from the client's
     // traceparent or started here; stamped on log lines and propagated outbound
@@ -61,7 +61,7 @@ struct RequestContext {
 
 class S3Service {
 public:
-    // Non-empty base_domain enables virtual-host style addressing (docs/s3-protocol.md §2)
+    // Non-empty base_domain enables virtual-host style addressing (docs/architecture/s3-protocol.md §2)
     S3Service(storage::BucketRouter router, SigV4Authenticator auth, std::string base_domain = "")
         : router_(std::move(router)), auth_(std::move(auth)), base_domain_(std::move(base_domain)) {
         // Host matching is done uniformly in lowercase (resolve_address); the config side normalizes the same way
@@ -84,7 +84,7 @@ public:
     // L1 connection counters for /-/metrics (roadmap §4.2, optional)
     void set_conn_stats(std::function<http::ConnStats()> fn) { conn_stats_ = std::move(fn); }
 
-    // Per-client rate limits (roadmap §4.2, docs/http-adapter.md §2.3): the IP
+    // Per-client rate limits (roadmap §4.2, docs/architecture/http-adapter.md §2.3): the IP
     // limiter is consulted before signature verification on every non-internal
     // request, the access-key limiter after it on the S3 plane. null = off
     // Swappable at runtime (config hot reload): dispatch pins the limiter it admitted
@@ -98,7 +98,7 @@ public:
     // hook the app installs and renders its report as JSON
     void set_reload_hook(std::function<ConfigReloadReport()> fn) { reload_hook_ = std::move(fn); }
     // Maintenance jobs on the live gateway (backlog-sequence ③ fsck, plus the
-    // duostore / tier groups, docs/cli.md §3.12): the application supplies them
+    // duostore / tier groups, docs/usage/cli.md §3.12): the application supplies them
     // through hooks so the service never sees backend types. start(backend, group,
     // op, max_bytes_per_sec) returns the job document with "job_id" or throws
     // S3Error (NoSuchKey / InvalidRequest / ScrubInProgress / JobInProgress);
@@ -120,11 +120,11 @@ public:
     // Backend-level metrics registry (optional): rendered appended after the L2 request metrics
     void set_backend_metrics(std::shared_ptr<MetricsRegistry> m) { backend_metrics_ = std::move(m); }
 
-    // Dynamic credential management (docs/credential-management.md): when not injected, /-/admin/credentials is always
-    // AccessDenied
+    // Dynamic credential management (docs/architecture/credential-management.md): when not injected,
+    // /-/admin/credentials is always AccessDenied
     void set_credential_store(std::shared_ptr<CredentialStore> s) { cred_store_ = std::move(s); }
 
-    // mTLS identity mapping (backlog-sequence ⑥, docs/tls.md §2.1): the binding
+    // mTLS identity mapping (backlog-sequence ⑥, docs/usage/tls.md §2.1): the binding
     // table (.sys/tls-identities/) and which certificate field names the subject
     // (auth.tls_identity: off | subject-cn | san-uri). Mode off = certificates
     // stay transport admission only, the table is still manageable. Restart-only
@@ -167,7 +167,7 @@ public:
     }
     uint64_t min_part_size() const { return min_part_size_.load(std::memory_order_relaxed); }
 
-    // Static website hosting (docs/static-website.md): buckets accepting anonymous
+    // Static website hosting (docs/usage/static-website.md): buckets accepting anonymous
     // GET/HEAD object reads, with index/error document semantics. Names are validated
     // here (startup) with the same gate as user requests — a config entry for a reserved
     // bucket (.sys) must fail loudly, not sit dormant until dispatch happens to reject it.
@@ -185,7 +185,7 @@ public:
     // lives in LifecycleRunner, wired separately in the app assembly
     void set_lifecycle_store(std::shared_ptr<LifecycleStore> store) { lifecycle_store_ = std::move(store); }
 
-    // Usage accounting + quotas + tenancy + audit (roadmap §3.9, docs/multi-tenancy.md).
+    // Usage accounting + quotas + tenancy + audit (roadmap §3.9, docs/architecture/multi-tenancy.md).
     // Each is optional: not injected = feature off (no counters / no ?quota / no
     // ownership filter / no audit records)
     void set_usage_tracker(std::shared_ptr<UsageTracker> u) { usage_ = std::move(u); }
@@ -194,7 +194,7 @@ public:
     void set_audit_log(std::shared_ptr<AuditLog> a) { audit_ = std::move(a); }
     const std::shared_ptr<UsageTracker>& usage_tracker() const { return usage_; }
 
-    // S3 Tables / Iceberg REST catalog (docs/s3-tables-design.md §3): the REST surface
+    // S3 Tables / Iceberg REST catalog (docs/architecture/s3-tables-design.md §3): the REST surface
     // hangs off the catalog path prefix, the guard keeps the S3 plane off the reserved
     // prefix. Not injected = feature off, every path behaves exactly as before
     void set_tables(std::shared_ptr<tables::RestApi> api, std::shared_ptr<tables::TableBucketGuard> guard) {
@@ -210,15 +210,15 @@ public:
         std::string_view access_key;
         // nullptr = unrestricted
         const CredentialPolicy* policy = nullptr;
-        // empty = not a tenant credential (docs/multi-tenancy.md §4)
+        // empty = not a tenant credential (docs/architecture/multi-tenancy.md §4)
         std::string_view tenant;
         bool tenant_admin = false;
         // for audit records
         std::string_view request_id;
     };
 
-    // Explicit dispatch table (docs/s3-protocol.md §2): (method, scope, query-flag) -> handler, matched in declaration
-    // order
+    // Explicit dispatch table (docs/architecture/s3-protocol.md §2): (method, scope, query-flag) -> handler, matched in
+    // declaration order
     enum class Scope { Service, Bucket, Object };
     using Handler = Task<http::HttpResponse> (*)(S3Service&, http::HttpRequest&, std::string, std::string,
                                                  const RequestAuth&);
@@ -258,7 +258,7 @@ private:
     Task<http::HttpResponse> list_buckets(const RequestAuth& auth);
     Task<http::HttpResponse> create_bucket(http::HttpRequest& req, std::string bucket, const RequestAuth& auth);
     Task<http::HttpResponse> head_bucket(std::string bucket);
-    // ?website subresource (docs/static-website.md phase ③, root credential only)
+    // ?website subresource (docs/usage/static-website.md phase ③, root credential only)
     Task<http::HttpResponse> get_bucket_website(std::string bucket, const RequestAuth& auth);
     Task<http::HttpResponse> put_bucket_website(http::HttpRequest& req, std::string bucket, const RequestAuth& auth);
     Task<http::HttpResponse> delete_bucket_website(std::string bucket, const RequestAuth& auth);
@@ -315,10 +315,10 @@ private:
     // verified with service scope "sts"; errors render in the STS XML shape
     Task<http::HttpResponse> sts_endpoint(http::HttpRequest& req, const RequestContext& ctx, std::string& access_key);
 
-    // handlers/admin_credentials.cc (docs/credential-management.md §2): performs verification and root check
-    // internally, renders errors as JSON bodies; access_key out-param feeds the access log
+    // handlers/admin_credentials.cc (docs/architecture/credential-management.md §2): performs verification and root
+    // check internally, renders errors as JSON bodies; access_key out-param feeds the access log
     Task<http::HttpResponse> admin_credentials(http::HttpRequest& req, std::string& access_key);
-    // handlers/admin_tenants.cc (docs/multi-tenancy.md §6): /-/admin/tenants,
+    // handlers/admin_tenants.cc (docs/architecture/multi-tenancy.md §6): /-/admin/tenants,
     // /-/admin/usage — root, or a tenant admin scoped to its own tenant
     // GET /-/admin/objects/<bucket>/<key>: object layout for operators (roadmap §6.2)
     Task<http::HttpResponse> admin_object_inspect(http::HttpRequest& req, std::string& access_key,
@@ -331,7 +331,7 @@ private:
     // (root only) -- certificate subject -> credential bindings
     Task<http::HttpResponse> admin_tls_identities(http::HttpRequest& req, std::string& access_key,
                                                   const RequestContext& ctx);
-    // Signature verification with the mTLS identity folded in (docs/tls.md §2.1):
+    // Signature verification with the mTLS identity folded in (docs/usage/tls.md §2.1):
     // an unsigned request from a bound certificate is treated as signed by the
     // bound credential; a signed request must agree with the certificate's tenant
     // (root is exempt). Without a usable certificate / mode off this is
@@ -372,7 +372,7 @@ private:
     // complete/abort); 0 when accounting is off
     Task<uint64_t> upload_parts_bytes(storage::IStorageBackend& backend, const std::string& bucket,
                                       const std::string& key, const std::string& upload_id);
-    // Tenant ownership gate (docs/multi-tenancy.md §4.3): a tenant credential may only
+    // Tenant ownership gate (docs/architecture/multi-tenancy.md §4.3): a tenant credential may only
     // touch buckets its tenant owns. creating = the CreateBucket route (an unowned
     // name is admitted, the handler records ownership after the backend accepts it)
     Task<void> require_tenant_bucket(const std::string& bucket, std::string_view tenant, bool creating);
@@ -392,14 +392,14 @@ private:
 
     // True when the request may take the anonymous website-read path: no signature
     // material at all (neither Authorization header nor presigned query parameters),
-    // GET/HEAD on a listed website bucket (docs/static-website.md). Bucket-scope reads
+    // GET/HEAD on a listed website bucket (docs/usage/static-website.md). Bucket-scope reads
     // are admitted here because the index rewrite in dispatch turns them into object
     // reads; anything still non-object after the rewrite is refused by the route gate.
     // The snapshot is taken once per request in dispatch: pointers into it must stay
     // valid across co_awaits even if a concurrent ?website PUT swaps the store
     bool anonymous_website_read(const http::HttpRequest& req, const Address& addr,
                                 const WebsiteStore::Snapshot& snap) const;
-    // Anonymous error page (docs/static-website.md phase ②): the configured error
+    // Anonymous error page (docs/usage/static-website.md phase ②): the configured error
     // object's content under the ORIGINAL status code, or a built-in HTML page
     Task<http::HttpResponse> website_error_page(const S3Error& e, const WebsiteBucket& site, bool head_only);
 

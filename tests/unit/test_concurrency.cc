@@ -1,5 +1,5 @@
-// docs/concurrency.md concurrency primitives: when_all / with_timeout / cancellation / home executor / backpressure and
-// metrics / semaphore
+// docs/architecture/concurrency.md concurrency primitives: when_all / with_timeout / cancellation / home executor /
+// backpressure and metrics / semaphore
 #include <atomic>
 #include <chrono>
 #include <future>
@@ -209,7 +209,7 @@ TEST(with_timeout_cancels_cooperatively) {
     CHECK(std::chrono::steady_clock::now() - begin < 2s);
 }
 
-// ---------- Switching back to the home executor (docs/concurrency.md §3) ----------
+// ---------- Switching back to the home executor (docs/architecture/concurrency.md §3) ----------
 
 TEST(continuation_posted_back_to_home_executor) {
     ThreadPool home(1);
@@ -258,7 +258,7 @@ TEST(inline_executor_resumes_in_place) {
     CHECK(sync_wait(std::move(task)) != std::this_thread::get_id());
 }
 
-// ---------- Backpressure and metrics (docs/concurrency.md §3) ----------
+// ---------- Backpressure and metrics (docs/architecture/concurrency.md §3) ----------
 
 TEST(bounded_queue_backpressure) {
     ThreadPool pool(1, /*queue_capacity=*/1);
@@ -297,7 +297,7 @@ TEST(bounded_queue_backpressure) {
     CHECK_EQ(hist_total, uint64_t(4));
 }
 
-// ---------- AsyncSemaphore（docs/concurrency.md §6）----------
+// ---------- AsyncSemaphore（docs/architecture/concurrency.md §6）----------
 
 TEST(semaphore_limits_concurrency) {
     ThreadPool pool(8);

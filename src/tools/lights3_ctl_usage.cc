@@ -1,5 +1,5 @@
 // lights3-ctl `usage` command — bucket usage counters via /-/admin/usage
-// (docs/multi-tenancy.md §2/§6). Root sees every bucket; a tenant admin sees its
+// (docs/architecture/multi-tenancy.md §2/§6). Root sees every bucket; a tenant admin sees its
 // own tenant's buckets. --rescan triggers a synchronous full count of one bucket.
 #include "tools/lights3_ctl_usage.h"
 

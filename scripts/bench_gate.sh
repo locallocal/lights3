@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Performance regression gate (roadmap §6.1, docs/testing.md §5): starts a
+# Performance regression gate (roadmap §6.1, docs/development/testing.md §5): starts a
 # memory-backend gateway, runs `lights3-ctl bench put` and `get`, and fails when the
 # throughput floor or the p99 ceiling is missed. Thresholds are deliberately
 # loose defaults for a shared/loaded developer box — tighten per environment

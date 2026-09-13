@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install-tree smoke test (roadmap §6.3, docs/deployment.md §2): `cmake --install`
+# Install-tree smoke test (roadmap §6.3, docs/usage/deployment.md §2): `cmake --install`
 # into a scratch prefix, then assert the layout, the relocated unit file, the
 # preserve-existing-config rule and the --version output of the installed
 # binaries. Runs as ctest `install_tree`; no root, no packaging tools needed.
@@ -21,7 +21,7 @@ fi
 for f in bin/lights3 bin/lights3-ctl sbin/lights3ctl lib/systemd/system/lights3.service \
          etc/lights3/lights3.yaml share/lights3/lights3-setup.sh \
          share/lights3/deploy/prometheus/lights3.rules.yml share/lights3/deploy/grafana/lights3.json \
-         share/doc/lights3/README.md share/doc/lights3/docs/deployment.md; do
+         share/doc/lights3/README.md share/doc/lights3/docs/usage/deployment.md; do
     check "installed $f" "[[ -e '$PREFIX/$f' ]]"
 done
 check "no __pycache__ shipped" "! find '$PREFIX/share/lights3' -name __pycache__ | grep -q ."

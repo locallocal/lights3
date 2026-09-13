@@ -258,7 +258,7 @@ private:
     Task<http::HttpResponse> list_buckets(const RequestAuth& auth);
     Task<http::HttpResponse> create_bucket(http::HttpRequest& req, std::string bucket, const RequestAuth& auth);
     Task<http::HttpResponse> head_bucket(std::string bucket);
-    // ?website subresource (docs/usage/static-website.md phase ③, root credential only)
+    // ?website subresource (docs/usage/static-website.md §2.2, root credential only)
     Task<http::HttpResponse> get_bucket_website(std::string bucket, const RequestAuth& auth);
     Task<http::HttpResponse> put_bucket_website(http::HttpRequest& req, std::string bucket, const RequestAuth& auth);
     Task<http::HttpResponse> delete_bucket_website(std::string bucket, const RequestAuth& auth);
@@ -399,7 +399,7 @@ private:
     // valid across co_awaits even if a concurrent ?website PUT swaps the store
     bool anonymous_website_read(const http::HttpRequest& req, const Address& addr,
                                 const WebsiteStore::Snapshot& snap) const;
-    // Anonymous error page (docs/usage/static-website.md phase ②): the configured error
+    // Anonymous error page (docs/architecture/static-website.md §5): the configured error
     // object's content under the ORIGINAL status code, or a built-in HTML page
     Task<http::HttpResponse> website_error_page(const S3Error& e, const WebsiteBucket& site, bool head_only);
 

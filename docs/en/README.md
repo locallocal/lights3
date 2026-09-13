@@ -42,6 +42,7 @@ reference in a source comment applies to both languages.
 | [s3-protocol.md](architecture/s3-protocol.md) | S3 protocol: API scope, SigV4 (incl. presigned, STS and clock skew), Multipart Upload, error mapping, observability, mint compatibility gate |
 | [credential-management.md](architecture/credential-management.md) | Credential management: AK/SK admin API, three credential sources (static root / file / dynamic), `.sys` persistence, at-rest SK encryption, hot-reloaded credentials file, multi-instance sync, per-credential policy, STS sessions |
 | [multi-tenancy.md](architecture/multi-tenancy.md) | Usage accounting, bucket/tenant quotas, tenant entities and bucket ownership, tiered admin plane, audit log |
+| [static-website.md](architecture/static-website.md) | Static website hosting design: anonymous decision and the two authorization gates, request processing order, WebsiteStore persistence and multi-instance sync, error page rendering, redirect Location building, amplification and rate limiting |
 | [s3-tables-design.md](architecture/s3-tables-design.md) | S3 Tables / Apache Iceberg REST Catalog: catalog state on `.sys` with a CAS commit protocol, REST endpoints and error model, deep Avro validation with diagnostics / recovery, table-bucket guard and credential vending, maintenance jobs, the multi-gateway matrix, views, the duostore-meta catalog backing |
 | [storage/](architecture/storage/README.md) | Storage layer, design tier: `storage-backend.md` (interface abstraction, bucket routing, LocalFs/XLocalFs, new-backend guide) and the `*-design.md` of tiered / cloudproxy / duostore (with its redis / sqlite / tikv meta and rados data engines); the 13 implementation-level documents exist in Chinese only under `docs/architecture/storage/` |
 
@@ -54,7 +55,7 @@ reference in a source comment applies to both languages.
 | [config-reload.md](usage/config-reload.md) | Configuration hot reload: SIGHUP / admin API / `lights3-ctl reload`, whole-file validation, the hot-reloadable subset and the "requires restart" report |
 | [tls.md](usage/tls.md) | TLS: HTTPS on all four drivers, certificate hot reload, mTLS / ciphers / minimum version / SNI multi-certificate, reverse-proxy termination examples |
 | [monitoring.md](usage/monitoring.md) | Monitoring consumers: the Prometheus scrape config and alert/recording rules under `deploy/`, the Grafana dashboard and its generator |
-| [static-website.md](usage/static-website.md) | Static website hosting: anonymous-read semantics, index / error documents, routing rules and object-level redirects, rate limiting |
+| [static-website.md](usage/static-website.md) | Static website hosting manual: enabling a site (YAML / `?website` API / `lights3-ctl`), setting reference, scope of anonymous access, index / error documents, redirects, rate limiting, metrics and troubleshooting |
 
 Every configuration key is documented with its default in the comments of
 [config/lights3.yaml](../../config/lights3.yaml); the project introduction

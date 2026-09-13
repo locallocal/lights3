@@ -92,7 +92,7 @@ inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
             meta.user_meta[lk.substr(11)] = v;
         }
     }
-    // AWS constraint on the redirect target (docs/usage/static-website.md phase ③): the value is
+    // AWS constraint on the redirect target (docs/usage/static-website.md §5.1): the value is
     // served verbatim as a Location header on the anonymous website plane, so free-form
     // schemes (javascript:, data:) must never get in
     if (!meta.website_redirect.empty() && meta.website_redirect.front() != '/' &&

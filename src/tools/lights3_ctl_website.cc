@@ -1,5 +1,5 @@
 // lights3-ctl `website` command group — Get/Put/DeleteBucketWebsite against the
-// ?website subresource (docs/usage/static-website.md phase ③). Requires the root
+// ?website subresource (docs/usage/static-website.md §2.2). Requires the root
 // (static) credential, same as `cred`; responses print the server's XML verbatim.
 #include "tools/lights3_ctl_website.h"
 

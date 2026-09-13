@@ -383,7 +383,7 @@ lights3-ctl cred unbind-cert --subject=alice
 
 ### 3.3 `website` — bucket static-website configuration
 
-Drives the `?website` subresource ([static-website.md §4](static-website.md)).
+Drives the `?website` subresource ([static-website.md §2.2](static-website.md)).
 After `set` the bucket is anonymously readable (GET/HEAD objects only) with
 index/error document semantics; buckets configured statically in the YAML
 refuse dynamic changes (405).

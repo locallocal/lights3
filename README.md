@@ -246,7 +246,8 @@ cmake --build build --target package         # build/packages/lights3_<ver>_<arc
 make package                                 # same from a Release tree: build-rel/packages/
 sudo apt install ./build/packages/lights3_0.1.0_amd64.deb
 
-# 3. Docker / compose
+# 3. Docker / compose (docker/: Dockerfile, docker-compose.yml, image configs)
+cd docker
 docker compose up -d                         # localfs demo on :9000 (AKIDEXAMPLE / lights3-demo-secret)
 docker compose --profile redis up -d         # duostore + redis meta on :9001 (tikv / rados profiles too)
 docker compose --profile e2e run --rm e2e    # the redis / tikv / rados e2e paths that SKIP on a dev box

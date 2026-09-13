@@ -1,4 +1,4 @@
-# Container config for the lights3 image (deploy/docker, docs/deployment.md §4):
+# Container config for the lights3 image (docker/, docs/deployment.md §4):
 # builtin driver on 0.0.0.0:9000, localfs under the /var/lib/lights3 volume.
 # The root secret comes from the LIGHTS3_SECRET_1 environment variable
 # (docker run -e / compose environment:). Every other key is documented with its

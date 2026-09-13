@@ -1,4 +1,6 @@
-# LightS3 compose (roadmap §6.3, docs/deployment.md §4).
+# LightS3 compose (roadmap §6.3, docs/deployment.md §4). Run from this directory
+# (or `docker compose -f docker/docker-compose.yml ...` from the repository root);
+# images build with the repository root as context and docker/Dockerfile.
 #
 #   docker compose up -d                       # demo: localfs on :9000, root key AKIDEXAMPLE
 #   docker compose --profile redis up -d       # + duostore with redis metadata on :9001
@@ -18,7 +20,8 @@ x-lights3-env: &lights3-env
   LIGHTS3_LOG_LEVEL: ${LIGHTS3_LOG_LEVEL:-info}
 
 x-full-build: &full-build
-  context: .
+  context: ..
+  dockerfile: docker/Dockerfile
   args:
     LIGHTS3_GIT_COMMIT: ${LIGHTS3_GIT_COMMIT:-unknown}
     LIGHTS3_RADOS: "ON"
@@ -28,7 +31,8 @@ services:
   # ---- default: localfs demo -------------------------------------------------
   lights3:
     build:
-      context: .
+      context: ..
+      dockerfile: docker/Dockerfile
       args:
         LIGHTS3_GIT_COMMIT: ${LIGHTS3_GIT_COMMIT:-unknown}
     image: lights3:local
@@ -64,7 +68,7 @@ services:
       - "${LIGHTS3_REDIS_PORT:-9001}:9000"
     volumes:
       - lights3-redis-data:/var/lib/lights3
-      - ./deploy/docker/lights3-redis.yaml:/etc/lights3/lights3.yaml:ro
+      - ./lights3-redis.yaml:/etc/lights3/lights3.yaml:ro
     restart: unless-stopped
 
   # ---- profile tikv: duostore + TiKV metadata (single PD + single TiKV) --------
@@ -105,7 +109,7 @@ services:
       - "${LIGHTS3_TIKV_PORT:-9002}:9000"
     volumes:
       - lights3-tikv-data:/var/lib/lights3
-      - ./deploy/docker/lights3-tikv.yaml:/etc/lights3/lights3.yaml:ro
+      - ./lights3-tikv.yaml:/etc/lights3/lights3.yaml:ro
     restart: unless-stopped
 
   # ---- profile rados: duostore + RADOS data (ceph single-node demo) -----------
@@ -166,7 +170,7 @@ services:
     volumes:
       - lights3-rados-data:/var/lib/lights3
       - ceph-etc:/etc/ceph:ro
-      - ./deploy/docker/lights3-rados.yaml:/etc/lights3/lights3.yaml:ro
+      - ./lights3-rados.yaml:/etc/lights3/lights3.yaml:ro
     restart: unless-stopped
 
   # ---- profile multi: two gateways over shared storage behind a round-robin -----
@@ -192,7 +196,7 @@ services:
     volumes:
       - lights3-multi-a-data:/var/lib/lights3
       - ceph-etc:/etc/ceph:ro
-      - ./deploy/docker/lights3-multi.yaml:/etc/lights3/lights3.yaml:ro
+      - ./lights3-multi.yaml:/etc/lights3/lights3.yaml:ro
     restart: unless-stopped
 
   lights3-multi-b:
@@ -204,7 +208,7 @@ services:
     volumes:
       - lights3-multi-b-data:/var/lib/lights3
       - ceph-etc:/etc/ceph:ro
-      - ./deploy/docker/lights3-multi.yaml:/etc/lights3/lights3.yaml:ro
+      - ./lights3-multi.yaml:/etc/lights3/lights3.yaml:ro
 
   nginx-multi:
     image: nginx:alpine
@@ -213,7 +217,7 @@ services:
     ports:
       - "${LIGHTS3_MULTI_PORT:-9004}:9000"
     volumes:
-      - ./deploy/docker/nginx-multi.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx-multi.conf:/etc/nginx/nginx.conf:ro
     restart: unless-stopped
 
   # docker compose --profile multi run --rm e2e-multi
@@ -230,7 +234,7 @@ services:
       LIGHTS3_E2E_GATEWAYS: http://lights3-multi-a:9000 http://lights3-multi-b:9000
       LIGHTS3_SECRET_1: ${LIGHTS3_SECRET_1:-lights3-demo-secret}
     volumes:
-      - ./deploy/docker/e2e-multi.sh:/usr/local/bin/lights3-e2e-multi:ro
+      - ./e2e-multi.sh:/usr/local/bin/lights3-e2e-multi:ro
 
   # ---- profile e2e: run the externally-backed e2e paths against the services --
   # docker compose --profile e2e run --rm e2e            # all three

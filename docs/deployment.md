@@ -118,7 +118,11 @@ POSIX sh（dpkg/rpm 用 dash 跑维护脚本），三个子命令：
 
 ### 4.1 镜像
 
-`Dockerfile` 三阶段：`builder`（ubuntu:24.04 + 工具链，`cmake --install` 到
+容器相关文件集中在 `docker/`：`Dockerfile`、`docker-compose.yml`、镜像内配置
+`lights3.yaml` 与 entrypoint、各 profile 的配置和 e2e 脚本。构建上下文仍是仓库
+根目录（`.dockerignore` 在根目录），所以 `docker build` 要带 `-f docker/Dockerfile`。
+
+`docker/Dockerfile` 三阶段：`builder`（ubuntu:24.04 + 工具链，`cmake --install` 到
 `/stage`）→ `runtime`（只带两个二进制、setup helper、监控资产；非 root 用户
 `lights3`；`HEALTHCHECK` 打 `/-/healthz`）→ `e2e`（builder + curl/python3，
 可选 ceph CLI；§4.3 的测试跑手）。
@@ -126,7 +130,7 @@ POSIX sh（dpkg/rpm 用 dash 跑维护脚本），三个子命令：
 ```bash
 git submodule update --init third_party/{spdlog,httplib,json,rocksdb,hiredis,sqlite}
 git submodule update --init --recursive third_party/ccmd     # 或直接 ./build.sh 一次
-docker build -t lights3 --build-arg LIGHTS3_GIT_COMMIT=$(git rev-parse --short=12 HEAD) .
+docker build -f docker/Dockerfile -t lights3 --build-arg LIGHTS3_GIT_COMMIT=$(git rev-parse --short=12 HEAD) .
 docker run -d -p 9000:9000 -e LIGHTS3_SECRET_1=my-secret -v lights3-data:/var/lib/lights3 lights3
 docker run --rm lights3 --version
 docker run --rm lights3 lights3-ctl --help
@@ -141,7 +145,7 @@ docker run --rm lights3 lights3-ctl --help
 | `CMAKE_BUILD_TYPE` | `Release` | |
 | `BASE` | `ubuntu:24.04` | Debian 基底也可（`libssl3` 名字已兜底） |
 
-镜像配置 `deploy/docker/lights3.yaml`：builtin 驱动、`0.0.0.0:9000`、localfs
+镜像配置 `docker/lights3.yaml`：builtin 驱动、`0.0.0.0:9000`、localfs
 在 `/var/lib/lights3` 卷下；`LIGHTS3_SECRET_1` 必给（entrypoint 缺它直接退出
 2，而不是起一个拒绝所有请求的实例）；`LIGHTS3_ACCESS_KEY` / `LIGHTS3_REGION` /
 `LIGHTS3_LOG_LEVEL` / `LIGHTS3_LOG_FORMAT` 可选。entrypoint 规则：无参数或
@@ -154,7 +158,12 @@ daemon 不可达，镜像构建与 compose 拉起未在本机验证**；`docker 
 
 ### 4.2 compose 上手 demo
 
+compose 文件是 `docker/docker-compose.yml`，相对路径（构建上下文 `..`、挂载的
+profile 配置）都按该目录解析：在 `docker/` 下执行，或在根目录加
+`-f docker/docker-compose.yml`。
+
 ```bash
+cd docker
 docker compose up -d                          # :9000，AKIDEXAMPLE / lights3-demo-secret
 LIGHTS3_SECRET_1=... docker compose up -d      # 自定义密钥
 aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://demo
@@ -168,10 +177,10 @@ docker compose --profile multi run --rm e2e-multi   # 跨网关 5 分片 multipa
 | profile | 服务 | 说明 |
 | --- | --- | --- |
 | （默认） | `lights3` | `lights3:local` 镜像，localfs |
-| `redis` | `redis`（`redis:7-alpine`，AOF 开）、`lights3-redis` | 配置 `deploy/docker/lights3-redis.yaml` 只读挂进 `/etc/lights3/lights3.yaml` |
+| `redis` | `redis`（`redis:7-alpine`，AOF 开）、`lights3-redis` | 配置 `docker/lights3-redis.yaml` 只读挂进 `/etc/lights3/lights3.yaml` |
 | `tikv` | `pd0`、`tikv0`（`pingcap/{pd,tikv}:${TIKV_VERSION:-v8.5.2}`）、`lights3-tikv` | 单 PD 单 TiKV；`lights3:full` 由 `LIGHTS3_RADOS=ON LIGHTS3_TIKV=ON` 构建 |
 | `rados` | `ceph`（`${CEPH_IMAGE:-quay.io/ceph/demo:latest}`，固定 IP 172.28.0.10）、`rados-init`（建池一次性任务）、`lights3-rados` | `ceph.conf` + admin keyring 经 `ceph-etc` 卷只读共享；keyring 仅 root 可读，消费者以 root 运行 |
-| `multi` | `redis`、`ceph`、`rados-init`、`lights3-multi-a` / `-b`、`nginx-multi`、`e2e-multi` | 多网关共享存储（[archive/multi-gateway-multipart-design.md §2](archive/multi-gateway-multipart-design.md) 支持的组合）：两网关同一 `deploy/docker/lights3-multi.yaml`（redis meta + RADOS data，`read_lease: 5s`），`LIGHTS3_GC_ENABLED` 仅 a 为 true；`nginx-multi.conf` 无粘连逐请求轮询；`e2e-multi.sh` 经 nginx 跑 5 分片 multipart，校验合成 ETag、GET 字节与两网关请求计数 |
+| `multi` | `redis`、`ceph`、`rados-init`、`lights3-multi-a` / `-b`、`nginx-multi`、`e2e-multi` | 多网关共享存储（[archive/multi-gateway-multipart-design.md §2](archive/multi-gateway-multipart-design.md) 支持的组合）：两网关同一 `docker/lights3-multi.yaml`（redis meta + RADOS data，`read_lease: 5s`），`LIGHTS3_GC_ENABLED` 仅 a 为 true；`nginx-multi.conf` 无粘连逐请求轮询；`e2e-multi.sh` 经 nginx 跑 5 分片 multipart，校验合成 ETag、GET 字节与两网关请求计数 |
 
 `LIGHTS3_GIT_COMMIT=$(git rev-parse --short=12 HEAD) docker compose build` 给
 镜像打 commit。数据卷：`lights3-data` 等命名卷，`docker compose down -v` 清空。
@@ -183,12 +192,13 @@ docker compose --profile multi run --rm e2e-multi   # 跨网关 5 分片 multipa
 把三套依赖拉起来，再在 `lights3:e2e` 镜像里跑 ctest：
 
 ```bash
+cd docker
 docker compose --profile e2e run --rm e2e                                  # 三条都跑
 docker compose --profile e2e run --rm -e E2E_TESTS=e2e_duostore_redis e2e  # 只跑一条
 docker compose --profile e2e down -v
 ```
 
-`deploy/docker/e2e.sh` 先等服务就绪（redis TCP；PD 的 `/pd/api/v1/stores` 出现
+`docker/e2e.sh` 先等服务就绪（redis TCP；PD 的 `/pd/api/v1/stores` 出现
 `Up` 的 store；`ceph -s` 通过并建好 `lights3-e2e` 池），再
 `ctest -R "$E2E_TESTS"`。环境变量就是 `run_e2e.sh` 原有的探测口：
 
@@ -248,7 +258,7 @@ rename 中断由任一实例的下一次写驱动完成；`tables.maintenance.sc
 代理侧注意两点：SigV4 签名覆盖 `Host`，须原样透传（nginx
 `proxy_set_header Host $http_host`）；S3 body 大，关闭请求缓冲
 （`proxy_request_buffering off`，`client_max_body_size 0`）。compose 的 `multi`
-profile（§4.2）就是这样一套最小部署，`deploy/docker/nginx-multi.conf` 可作起点。
+profile（§4.2）就是这样一套最小部署，`docker/nginx-multi.conf` 可作起点。
 
 ## 6. 升级、回滚、卸载（`install.sh` 渠道）
 

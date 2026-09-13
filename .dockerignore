@@ -1,4 +1,5 @@
-# Build context for the Dockerfile (roadmap §6.3): sources + submodule checkouts,
+# Build context for docker/Dockerfile (roadmap §6.3; the context is the repository
+# root, `docker build -f docker/Dockerfile .`): sources + submodule checkouts,
 # no build trees, no git history (the commit is passed as LIGHTS3_GIT_COMMIT).
 # Submodules must be checked out on the host first: ./build.sh does that, or
 #   git submodule update --init third_party/{spdlog,httplib,json,rocksdb,hiredis,sqlite}

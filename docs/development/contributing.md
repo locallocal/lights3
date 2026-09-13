@@ -21,6 +21,14 @@
 
 分层与请求生命周期见 [architecture/overview.md](../architecture/overview.md)。
 
+**构建文件跟着代码走**：根 `CMakeLists.txt` 只管项目级设置（标准、告警、特性开关），
+每个源码目录有自己的 `CMakeLists.txt`，用 `target_sources(lights3_core PRIVATE …)`
+把本目录的 `.cc` 加进核心库，该目录需要的第三方链接、宏定义与选项判断也写在那里。
+所以**新增一个 `.cc` 只改它所在目录的 `CMakeLists.txt`**；新增一个目录则建一个
+`CMakeLists.txt` 并在父目录 `add_subdirectory()`。第三方项目的获取与裁剪集中在
+`cmake/Dependencies.cmake`（顺序敏感，文件头解释了为什么不能拆开）；可执行文件
+即使在子目录声明，输出仍钉在构建根（`build*/lights3`），脚本与文档才不用改。
+
 ## 2. 构建
 
 ```bash

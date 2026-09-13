@@ -1,6 +1,6 @@
 // lights3-ctl `cred` command group: manages tenant credentials with the ops-plane
 // (root static credential) AK/SK, talking to /-/admin/credentials
-// (docs/credential-management.md §2/§3). Implementation in lights3_ctl_cred.cc.
+// (docs/architecture/credential-management.md §2/§3). Implementation in lights3_ctl_cred.cc.
 #pragma once
 
 #include <ccmd.h>

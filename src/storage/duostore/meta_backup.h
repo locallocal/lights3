@@ -1,5 +1,5 @@
 // L3: duostore meta backup chains and point-in-time restore planning
-// (backlog-sequence ⑧, docs/storage/duostore-core.md §11.1). A backup directory
+// (backlog-sequence ⑧, docs/architecture/storage/duostore-core.md §11.1). A backup directory
 // holds one chain per engine: manifest.json lists the entries in order -- a full
 // copy first, deltas after it -- and the engine-specific payloads next to it.
 // Which payload an engine writes is the engine's business (IMetaStore::

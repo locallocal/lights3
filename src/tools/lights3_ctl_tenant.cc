@@ -1,5 +1,5 @@
 // lights3-ctl `tenant` command group — tenant lifecycle and bucket ownership against
-// /-/admin/tenants (docs/multi-tenancy.md §6). Root credential for mutations;
+// /-/admin/tenants (docs/architecture/multi-tenancy.md §6). Root credential for mutations;
 // a tenant admin may `get`/`list` its own tenant. Responses print the server's
 // JSON verbatim.
 #include "tools/lights3_ctl_tenant.h"
@@ -196,7 +196,7 @@ namespace lights3_ctl {
 std::shared_ptr<ccmd::command> make_tenant() {
     auto cmd = std::make_shared<ccmd::command>(
         "tenant", "lights3-ctl tenant list --endpoint=http://127.0.0.1:9000", "lights3-ctl tenant <command> [options]",
-        "Manage tenants and bucket ownership via /-/admin/tenants (docs/multi-tenancy.md). "
+        "Manage tenants and bucket ownership via /-/admin/tenants (docs/architecture/multi-tenancy.md). "
         "Mutations need the root credential; `list`/`get` also work for a tenant admin "
         "on its own tenant. Options must follow the leaf subcommand; long options take "
         "values as --name=value.",

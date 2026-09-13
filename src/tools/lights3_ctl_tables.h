@@ -1,4 +1,4 @@
-// lights3-ctl `tables` command group (docs/cli.md §3.13, docs/s3-tables-design.md §9)
+// lights3-ctl `tables` command group (docs/usage/cli.md §3.13, docs/architecture/s3-tables-design.md §9)
 #pragma once
 
 #include <ccmd.h>

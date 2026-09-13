@@ -1,4 +1,4 @@
-// L2: ?website subresource — Get/Put/DeleteBucketWebsite (docs/static-website.md
+// L2: ?website subresource — Get/Put/DeleteBucketWebsite (docs/usage/static-website.md
 // phase ③). Root (static credential) only, same two-tier model as the admin plane:
 // website configuration makes a bucket anonymously readable, which is an operator
 // decision, not a tenant one. Dynamic entries persist to .sys/website/<bucket>

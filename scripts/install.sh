@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install an already-built LightS3 tree as a systemd service (/usr/local layout).
-# Packages (`cpack -G DEB|RPM`, docs/deployment.md) are the alternative for /usr;
+# Packages (`cpack -G DEB|RPM`, docs/usage/deployment.md) are the alternative for /usr;
 # both channels share packaging/lights3-setup.sh for the user / directory /
 # secrets / systemd handling, so the behavior is identical.
 #

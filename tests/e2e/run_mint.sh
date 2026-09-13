@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MinIO mint compatibility test suite (docs/s3-protocol.md §8): start a real lights3
+# MinIO mint compatibility test suite (docs/architecture/s3-protocol.md §8): start a real lights3
 # process and run the minio/mint container against it. mint depends on docker --
 # explicit SKIP when unavailable (same probing pattern as the duostore-rados/tikv e2e;
 # lacking docker permission on this machine does not count as failure).
@@ -78,7 +78,7 @@ docker run --rm --network host \
     -v "$WORK/mint-log:/mint/log" \
     minio/mint "$@"
 RC=$?
-# Baseline bookkeeping (docs/testing.md §6): mint's log.json lists one line per
+# Baseline bookkeeping (docs/development/testing.md §6): mint's log.json lists one line per
 # test with a status; summarize pass/fail per suite so a run leaves a number behind
 if [[ -f "$WORK/mint-log/log.json" ]]; then
     echo "--- mint baseline ($(date -u +%Y-%m-%dT%H:%M:%SZ)) ---"

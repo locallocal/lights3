@@ -1,4 +1,4 @@
-// Process assembly and lifecycle (docs/architecture.md §4). Application owns
+// Process assembly and lifecycle (docs/architecture/overview.md §4). Application owns
 // every process-wide component in dependency order, replacing the hand-wired
 // startup/shutdown sequence that used to live in main()
 #pragma once
@@ -81,7 +81,7 @@ public:
     uint16_t bound_port() const;
     uint16_t admin_bound_port() const;
 
-    // Config hot reload (roadmap §4.4, docs/config-reload.md): re-read the file,
+    // Config hot reload (roadmap §4.4, docs/usage/config-reload.md): re-read the file,
     // validate it as at startup, apply the runtime-changeable subset, report the
     // rest. Driven by SIGHUP and POST /-/admin/config/reload. Never partial: a
     // file that fails validation changes nothing
@@ -131,7 +131,7 @@ private:
     std::shared_ptr<s3::TlsIdentityStore> tls_identity_store_;
     std::shared_ptr<s3::LifecycleStore> lifecycle_store_;
     std::unique_ptr<s3::LifecycleRunner> lifecycle_runner_;
-    // roadmap §3.9: usage accounting, quotas, tenancy, audit (docs/multi-tenancy.md)
+    // roadmap §3.9: usage accounting, quotas, tenancy, audit (docs/architecture/multi-tenancy.md)
     std::shared_ptr<s3::AuditLog> audit_;
     std::shared_ptr<s3::UsageTracker> usage_;
     std::shared_ptr<s3::QuotaStore> quota_store_;
@@ -139,7 +139,7 @@ private:
     std::shared_ptr<s3::OwnerStore> owner_store_;
     std::shared_ptr<s3::TenantRegistry> tenants_;
 #ifdef LIGHTS3_TABLES
-    // S3 Tables / Iceberg REST catalog (docs/s3-tables-design.md); all null when tables.enabled is off
+    // S3 Tables / Iceberg REST catalog (docs/architecture/s3-tables-design.md); all null when tables.enabled is off
     std::shared_ptr<tables::TableBucketStore> table_bucket_store_;
     std::shared_ptr<tables::Catalog> tables_catalog_;
     std::shared_ptr<tables::RestApi> tables_api_;

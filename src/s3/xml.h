@@ -11,7 +11,8 @@ namespace lights3::s3 {
 
 std::string xml_escape(const std::string& s);
 
-// ---------- Parsing (docs/s3-protocol.md §4: only shallow structures such as CompleteMultipartUpload / DeleteObjects)
+// ---------- Parsing (docs/architecture/s3-protocol.md §4: only shallow structures such as CompleteMultipartUpload /
+// DeleteObjects)
 // ---------- Supports: nested elements, text, entities (lt gt amp quot apos #dd #xhh), comments, XML declaration,
 // CDATA. Attributes are skipped (S3 request XML only carries xmlns). Malformed input or exceeding max_size throws
 // S3Error{MalformedXML}.

@@ -1,4 +1,4 @@
-// L3: Redis implementation of IMetaStore (docs/storage/duostore-meta-redis-design.md).
+// L3: Redis implementation of IMetaStore (docs/architecture/storage/duostore-meta-redis-design.md).
 // Commit-class operations = one generic guarded-commit Lua script (check-and-commit) + client-
 // side optimistic CAS retry (§3.2); the script executes atomically on the single-threaded Redis
 // server — script atomicity is global atomicity, so multiple gateways sharing one redis share
@@ -51,7 +51,7 @@ public:
     ~RedisMetaStore() override;
     RedisMetaStore(const RedisMetaStore&) = delete;
 
-    // KV facade (docs/s3-tables-design.md §12)
+    // KV facade (docs/architecture/s3-tables-design.md §12)
     std::optional<KvItem> kv_get(std::string_view key) override;
     std::string kv_put(std::string_view key, std::string_view value, PutCondition cond) override;
     bool kv_delete(std::string_view key) override;
@@ -107,7 +107,7 @@ public:
                       const DataRef& to) override;
     bool chunk_referenced(uint64_t file_id) override;
     void scan_refs(const std::function<void(uint64_t file_id)>& cb) override;
-    // Invalidation feed (backlog-sequence ⑤, docs/storage/duostore-meta-redis-design.md §3.6): every
+    // Invalidation feed (backlog-sequence ⑤, docs/architecture/storage/duostore-meta-redis-design.md §3.6): every
     // commit that changes an object record PUBLISHes "<bucket>\0<key>" on <prefix>inv
     // from inside the commit script (atomic with the write, no extra round trip);
     // this starts a dedicated subscriber connection + thread that feeds on_key, calls

@@ -16,23 +16,23 @@ add_compile_options(-Wall -Wextra)
 find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
 
-# Compile-time trimming of HTTP drivers (dependency policy, docs/architecture.md §6)
+# Compile-time trimming of HTTP drivers (dependency policy, docs/architecture/overview.md §6)
 option(LIGHTS3_DRIVER_BUILTIN "Build the built-in POSIX socket HTTP driver" ON)
 option(LIGHTS3_DRIVER_BEAST "Build the Boost.Beast async HTTP driver (requires Boost headers)" ON)
 option(LIGHTS3_DRIVER_HTTPLIB "Build the cpp-httplib sync HTTP driver (vendored header)" ON)
 option(LIGHTS3_DRIVER_SEASTAR "Build the Seastar shard-per-core HTTP driver (heavy deps)" OFF)
-option(LIGHTS3_CLOUDPROXY "Build the cloudproxy storage backend (self-signed SigV4 + vendored httplib, docs/storage/cloudproxy-design.md)" ON)
-option(LIGHTS3_DUOSTORE "Build the duostore storage backend (RocksDB metadata + chunk/pack data engine, docs/storage/duostore-design.md)" ON)
-option(LIGHTS3_DUOSTORE_REDIS_META "Build the Redis-backed IMetaStore for duostore (hiredis submodule, docs/storage/duostore-meta-redis-design.md)" OFF)
-option(LIGHTS3_DUOSTORE_SQLITE_META "Build the SQLite-backed IMetaStore for duostore (sqlite submodule, docs/storage/duostore-meta-sqlite-design.md)" OFF)
-option(LIGHTS3_DUOSTORE_RADOS_DATA "Build the Ceph/RADOS-backed IDataStore for duostore (system librados, docs/storage/duostore-data-rados-design.md)" OFF)
-option(LIGHTS3_DUOSTORE_TIKV_META "Build the TiKV-backed IMetaStore for duostore (client-c submodule, docs/storage/duostore-meta-tikv-design.md)" OFF)
-option(LIGHTS3_TABLES "Build the S3 Tables / Iceberg REST catalog (docs/s3-tables-design.md)" ON)
+option(LIGHTS3_CLOUDPROXY "Build the cloudproxy storage backend (self-signed SigV4 + vendored httplib, docs/architecture/storage/cloudproxy-design.md)" ON)
+option(LIGHTS3_DUOSTORE "Build the duostore storage backend (RocksDB metadata + chunk/pack data engine, docs/architecture/storage/duostore-design.md)" ON)
+option(LIGHTS3_DUOSTORE_REDIS_META "Build the Redis-backed IMetaStore for duostore (hiredis submodule, docs/architecture/storage/duostore-meta-redis-design.md)" OFF)
+option(LIGHTS3_DUOSTORE_SQLITE_META "Build the SQLite-backed IMetaStore for duostore (sqlite submodule, docs/architecture/storage/duostore-meta-sqlite-design.md)" OFF)
+option(LIGHTS3_DUOSTORE_RADOS_DATA "Build the Ceph/RADOS-backed IDataStore for duostore (system librados, docs/architecture/storage/duostore-data-rados-design.md)" OFF)
+option(LIGHTS3_DUOSTORE_TIKV_META "Build the TiKV-backed IMetaStore for duostore (client-c submodule, docs/architecture/storage/duostore-meta-tikv-design.md)" OFF)
+option(LIGHTS3_TABLES "Build the S3 Tables / Iceberg REST catalog (docs/architecture/s3-tables-design.md)" ON)
 option(LIGHTS3_BUILD_TESTS "Build unit tests" ON)
-option(LIGHTS3_FUZZ_LIBFUZZER "Link the fuzz harnesses against libFuzzer (clang, -fsanitize=fuzzer); off = standalone corpus replay (docs/testing.md §3)" OFF)
+option(LIGHTS3_FUZZ_LIBFUZZER "Link the fuzz harnesses against libFuzzer (clang, -fsanitize=fuzzer); off = standalone corpus replay (docs/development/testing.md §3)" OFF)
 
 if(LIGHTS3_DUOSTORE)
-  # RocksDB trimming presets (docs/storage/duostore-design.md §13.3, modeled on the gflags/seastar template)
+  # RocksDB trimming presets (docs/architecture/storage/duostore-design.md §13.3, modeled on the gflags/seastar template)
   set(WITH_GFLAGS OFF CACHE BOOL "" FORCE)      # only rocksdb tools need gflags; the repo does not ship it
   set(WITH_TESTS OFF CACHE BOOL "" FORCE)
   set(WITH_ALL_TESTS OFF CACHE BOOL "" FORCE)
@@ -66,7 +66,7 @@ if(LIGHTS3_DUOSTORE_REDIS_META)
   if(NOT LIGHTS3_DUOSTORE)
     message(FATAL_ERROR "LIGHTS3_DUOSTORE_REDIS_META requires LIGHTS3_DUOSTORE")
   endif()
-  # hiredis trimming presets (docs/storage/duostore-meta-redis-design.md §7.2)
+  # hiredis trimming presets (docs/architecture/storage/duostore-meta-redis-design.md §7.2)
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)  # hiredis defaults to shared; repo-wide convention is static
   set(DISABLE_TESTS ON CACHE BOOL "" FORCE)
   set(ENABLE_SSL OFF CACHE BOOL "" FORCE)         # TLS not enabled in the first phase (§5.5)
@@ -84,7 +84,7 @@ if(LIGHTS3_DUOSTORE_SQLITE_META)
   endif()
   # sqlite's canonical source tree ships no prebuilt amalgamation; it must be generated
   # via configure && make sqlite3.c (the script runs on tclsh, bootstrapping with the
-  # bundled jimsh on a fresh tree without tclsh; docs/storage/duostore-meta-sqlite-design.md §7).
+  # bundled jimsh on a fresh tree without tclsh; docs/architecture/storage/duostore-meta-sqlite-design.md §7).
   # Generated out-of-tree into the build dir; DEPENDS on VERSION makes a submodule
   # upgrade trigger regeneration
   set(SQLITE_GEN_DIR ${CMAKE_BINARY_DIR}/sqlite-amalgamation)
@@ -98,7 +98,7 @@ if(LIGHTS3_DUOSTORE_SQLITE_META)
     COMMENT "Generating SQLite amalgamation (third_party/sqlite)"
     VERBATIM)
   # Compile-time options = trimmed set of the official Recommended Compile-time Options
-  # (docs/storage/duostore-meta-sqlite-design.md §5.1); THREADSAFE=1 (serialized) is defense in depth
+  # (docs/architecture/storage/duostore-meta-sqlite-design.md §5.1); THREADSAFE=1 (serialized) is defense in depth
   enable_language(C)  # the project itself is CXX-only; the amalgamation is the sole C translation unit
   add_library(lights3_sqlite3 STATIC ${SQLITE_GEN_DIR}/sqlite3.c)
   target_include_directories(lights3_sqlite3 PUBLIC ${SQLITE_GEN_DIR})
@@ -115,7 +115,7 @@ if(LIGHTS3_DUOSTORE_RADOS_DATA)
     message(FATAL_ERROR "LIGHTS3_DUOSTORE_RADOS_DATA requires LIGHTS3_DUOSTORE")
   endif()
   # librados comes from the system package, not a submodule (the Ceph repo is several GiB,
-  # docs/storage/duostore-data-rados-design.md §9.1): prefer pkg-config, fall back to find_path/find_library;
+  # docs/architecture/storage/duostore-data-rados-design.md §9.1): prefer pkg-config, fall back to find_path/find_library;
   # without sudo, dpkg -x can unpack librados-dev/librados2 into ~/.local/opt/ceph,
   # or point LIGHTS3_RADOS_ROOT there explicitly
   find_package(PkgConfig QUIET)
@@ -166,7 +166,7 @@ if(LIGHTS3_DUOSTORE_TIKV_META)
   # client-c depends on gRPC/protobuf (build time additionally needs protoc +
   # grpc_cpp_plugin to generate kvproto) /Poco/abseil, taken from system packages;
   # without sudo, apt-get download + dpkg -x unpack into ~/.local/opt/tikv-deps
-  # (docs/storage/duostore-meta-tikv-design.md §8.2), or set LIGHTS3_TIKV_DEPS_ROOT explicitly to the
+  # (docs/architecture/storage/duostore-meta-tikv-design.md §8.2), or set LIGHTS3_TIKV_DEPS_ROOT explicitly to the
   # unpack prefix (<root>/bin/protoc, <root>/include, <root>/lib/<arch>). All of
   # client-c's dependency discovery is guarded by if(NOT ...), so pre-seeding variables
   # in the parent scope short-circuits its find modules wholesale
@@ -284,7 +284,7 @@ endif()
 # spdlog: logging implementation (git submodule, static lib; core/log.h is the facade)
 add_subdirectory(third_party/spdlog EXCLUDE_FROM_ALL)
 
-# nlohmann/json: JSON encode/decode for the admin credential API (header-only, docs/credential-management.md §5.4)
+# nlohmann/json: JSON encode/decode for the admin credential API (header-only, docs/architecture/credential-management.md §5.4)
 add_subdirectory(third_party/json EXCLUDE_FROM_ALL)
 
 # ccmd v0.0.2: command/subcommand framework (git submodule, header-only together with its
@@ -362,7 +362,7 @@ target_include_directories(lights3_core PUBLIC src)
 # libssl is unconditional since roadmap §4.1: the shared TLS material/holder
 # (src/http/tls.cc) serves every OpenSSL-backed driver, builtin included
 target_link_libraries(lights3_core PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads spdlog::spdlog)
-# JSON is used only in the admin handler / CredentialStore .cc files, never in public headers (docs/credential-management.md §5.4)
+# JSON is used only in the admin handler / CredentialStore .cc files, never in public headers (docs/architecture/credential-management.md §5.4)
 target_link_libraries(lights3_core PUBLIC nlohmann_json::nlohmann_json)  # json in public headers (service.h, app/admin_jobs.h)
 
 if(LIGHTS3_DRIVER_BUILTIN)
@@ -403,7 +403,7 @@ if(LIGHTS3_DRIVER_HTTPLIB)
 endif()
 
 if(LIGHTS3_TABLES)
-  # S3 Tables / Iceberg REST catalog (docs/s3-tables-design.md)
+  # S3 Tables / Iceberg REST catalog (docs/architecture/s3-tables-design.md)
   target_sources(lights3_core PRIVATE
     src/tables/identifier.cc
     src/tables/object_catalog_store.cc
@@ -425,11 +425,11 @@ if(LIGHTS3_TABLES)
     src/tables/iceberg/view_metadata.cc
   )
   if(LIGHTS3_DUOSTORE)
-    # the duostore-meta catalog backing (docs/s3-tables-design.md §12)
+    # the duostore-meta catalog backing (docs/architecture/s3-tables-design.md §12)
     target_sources(lights3_core PRIVATE src/tables/duo_meta_catalog_store.cc)
   endif()
   target_compile_definitions(lights3_core PUBLIC LIGHTS3_TABLES)
-  # deflate-coded Avro manifests need zlib (docs/s3-tables-design.md §7.4); without it the
+  # deflate-coded Avro manifests need zlib (docs/architecture/s3-tables-design.md §7.4); without it the
   # deep check skips such snapshots and reports "skipped-codec"
   find_package(ZLIB QUIET)
   if(ZLIB_FOUND)
@@ -448,14 +448,14 @@ if(LIGHTS3_CLOUDPROXY)
     src/storage/cloudproxy/cloudproxy_backend.cc
   )
   # OPENSSL_SUPPORT must be uniform target-wide: having it on in httplib_server.cc but
-  # off in the cloudproxy TUs is an ODR violation (docs/storage/cloudproxy-design.md §8.3)
+  # off in the cloudproxy TUs is an ODR violation (docs/architecture/storage/cloudproxy-design.md §8.3)
   target_compile_definitions(lights3_core PUBLIC LIGHTS3_CLOUDPROXY CPPHTTPLIB_OPENSSL_SUPPORT)
   target_include_directories(lights3_core SYSTEM PRIVATE third_party)
   target_link_libraries(lights3_core PUBLIC OpenSSL::SSL)
 endif()
 
 if(LIGHTS3_DUOSTORE)
-  # Trimming template follows cloudproxy (docs/storage/duostore-design.md §13.3)
+  # Trimming template follows cloudproxy (docs/architecture/storage/duostore-design.md §13.3)
   target_sources(lights3_core PRIVATE
     src/storage/duostore/codec.cc
     src/storage/duostore/meta_dump.cc
@@ -561,7 +561,7 @@ endif()
 target_link_libraries(lights3 PRIVATE lights3_core ccmd::ccmd)
 
 # ---- Ops tooling ----
-# lights3-ctl: CLI client for /-/admin/credentials (docs/credential-management.md §2).
+# lights3-ctl: CLI client for /-/admin/credentials (docs/architecture/credential-management.md §2).
 # CPPHTTPLIB_OPENSSL_SUPPORT propagates via lights3_core's PUBLIC definition, staying
 # target-level consistent with the core library (ODR); in trimmed builds without
 # httplib/cloudproxy it automatically degrades to http-only
@@ -632,13 +632,13 @@ if(LIGHTS3_BUILD_TESTS)
     endif()
     if(LIGHTS3_DUOSTORE_RADOS_DATA)
       # rados cases need librados headers (namespace cleanup + fault injection connect to
-      # the cluster directly); without a cluster all cases SKIP explicitly (docs/storage/duostore-data-rados-design.md §11)
+      # the cluster directly); without a cluster all cases SKIP explicitly (docs/architecture/storage/duostore-data-rados-design.md §11)
       target_sources(unit_tests PRIVATE tests/unit/test_duostore_rados.cc)
       target_include_directories(unit_tests SYSTEM PRIVATE ${LIGHTS3_RADOS_INCLUDE})
     endif()
     if(LIGHTS3_DUOSTORE_TIKV_META)
       # tikv cases need a real PD/TiKV cluster (LIGHTS3_TEST_PD_ADDR), otherwise explicit
-      # SKIP (docs/storage/duostore-meta-tikv-design.md §10); dedicated cases talk to kv_client directly
+      # SKIP (docs/architecture/storage/duostore-meta-tikv-design.md §10); dedicated cases talk to kv_client directly
       # for guard/conflict verification
       target_sources(unit_tests PRIVATE tests/unit/test_duostore_tikv.cc)
       target_link_libraries(unit_tests PRIVATE kv_client)
@@ -652,7 +652,7 @@ if(LIGHTS3_BUILD_TESTS)
   endif()
   add_test(NAME unit_tests COMMAND unit_tests)
 
-  # Fuzz harnesses (roadmap §6.1, docs/testing.md §3): one LLVMFuzzerTestOneInput
+  # Fuzz harnesses (roadmap §6.1, docs/development/testing.md §3): one LLVMFuzzerTestOneInput
   # per parser reachable without authentication. Default = standalone binaries
   # replaying tests/fuzz/corpus/<name>/ (a crash-regression gate under any
   # compiler / sanitizer); LIGHTS3_FUZZ_LIBFUZZER=ON (clang) links libFuzzer and
@@ -678,12 +678,12 @@ if(LIGHTS3_BUILD_TESTS)
   endforeach()
 
   # MinIO mint compatibility suite (roadmap §6.1): needs docker; SKIP (77) without
-  # it. The s3cmd + awscli subset is the regression gate (docs/testing.md §6)
+  # it. The s3cmd + awscli subset is the regression gate (docs/development/testing.md §6)
   add_test(NAME mint
            COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_mint.sh $<TARGET_FILE:lights3> s3cmd awscli)
   set_tests_properties(mint PROPERTIES SKIP_RETURN_CODE 77 LABELS mint TIMEOUT 3600)
 
-  # Performance gate + short soak (roadmap §6.1, docs/testing.md §5): lights3-ctl bench
+  # Performance gate + short soak (roadmap §6.1, docs/development/testing.md §5): lights3-ctl bench
   # against a memory-backend gateway with throughput / latency floors, and a
   # 30-second soak asserting RSS / fd stability. Both labeled so `ctest -LE perf`
   # skips them on a loaded box
@@ -696,7 +696,7 @@ if(LIGHTS3_BUILD_TESTS)
     set_tests_properties(soak_smoke PROPERTIES LABELS "perf;soak" TIMEOUT 900)
   endif()
 
-  # S3 Tables client smoke (docs/s3-tables-design.md §13): PyIceberg
+  # S3 Tables client smoke (docs/architecture/s3-tables-design.md §13): PyIceberg
   # and DuckDB against a live gateway. Opt-in through
   # LIGHTS3_TABLES_SMOKE=1 (python packages required); SKIP (77) otherwise
   if(LIGHTS3_TABLES AND LIGHTS3_DRIVER_BUILTIN)
@@ -705,7 +705,7 @@ if(LIGHTS3_BUILD_TESTS)
     set_tests_properties(tables_smoke PROPERTIES SKIP_RETURN_CODE 77 LABELS tables-smoke TIMEOUT 900)
   endif()
 
-  # Install tree + --version (roadmap §6.3, docs/deployment.md): cmake --install into a
+  # Install tree + --version (roadmap §6.3, docs/usage/deployment.md): cmake --install into a
   # scratch prefix, layout / unit relocation / config preservation / version output
   add_test(NAME install_tree
            COMMAND ${CMAKE_SOURCE_DIR}/tests/packaging/check_install.sh ${CMAKE_BINARY_DIR})
@@ -727,7 +727,7 @@ if(LIGHTS3_BUILD_TESTS)
     add_test(NAME e2e_seastar
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh $<TARGET_FILE:lights3> seastar)
   endif()
-  # Monitoring assets (roadmap §5.5, docs/monitoring.md §5): rules / scrape config /
+  # Monitoring assets (roadmap §5.5, docs/usage/monitoring.md §5): rules / scrape config /
   # dashboard validated against the source metric catalog and a live scrape
   find_program(LIGHTS3_PYTHON3 python3)
   if(LIGHTS3_DRIVER_BUILTIN AND LIGHTS3_PYTHON3)
@@ -740,13 +740,13 @@ if(LIGHTS3_BUILD_TESTS)
     add_test(NAME e2e_xlocalfs
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                      $<TARGET_FILE:lights3> builtin xlocalfs)
-    # The tiered composite backend (localfs+memory, docs/storage/tiered-design.md) also runs the full protocol cases
+    # The tiered composite backend (localfs+memory, docs/architecture/storage/tiered-design.md) also runs the full protocol cases
     add_test(NAME e2e_tiered
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                      $<TARGET_FILE:lights3> builtin tiered)
   endif()
-  # cloudproxy two-instance scenario (docs/storage/cloudproxy-design.md §10): instance B acts as the "cloud", A proxies through cloudproxy;
-  # tiered-cloudproxy is the docs/storage/tiered-design.md P5 combination (tiered's cloud side wired to a real CloudProxyBackend)
+  # cloudproxy two-instance scenario (docs/architecture/storage/cloudproxy-design.md §10): instance B acts as the "cloud", A proxies through cloudproxy;
+  # tiered-cloudproxy is the docs/architecture/storage/tiered-design.md P5 combination (tiered's cloud side wired to a real CloudProxyBackend)
   # The duostore backend (RocksDB meta + chunk/pack data plane) runs the same e2e cases
   if(LIGHTS3_DUOSTORE AND LIGHTS3_DRIVER_BUILTIN)
     add_test(NAME e2e_duostore
@@ -757,7 +757,7 @@ if(LIGHTS3_BUILD_TESTS)
     add_test(NAME e2e_duostore_uring
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                      $<TARGET_FILE:lights3> builtin duostore-uring)
-    # tiered combination (docs/storage/duostore-design.md §13.1/§15 P5): duostore as tiered's
+    # tiered combination (docs/architecture/storage/duostore-design.md §13.1/§15 P5): duostore as tiered's
     # cloud side (cloud goes only through the IStorageBackend abstraction, re-validating the component relationship)
     add_test(NAME e2e_tiered_duostore
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
@@ -767,27 +767,27 @@ if(LIGHTS3_BUILD_TESTS)
     add_test(NAME e2e_tiered_duolocal
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                      $<TARGET_FILE:lights3> builtin tiered-duolocal)
-    # duostore + Redis meta (docs/storage/duostore-meta-redis-design.md §9): the script probes for
+    # duostore + Redis meta (docs/architecture/storage/duostore-meta-redis-design.md §9): the script probes for
     # redis-server, explicit SKIP if missing
     if(LIGHTS3_DUOSTORE_REDIS_META)
       add_test(NAME e2e_duostore_redis
                COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                        $<TARGET_FILE:lights3> builtin duostore-redis)
     endif()
-    # duostore + SQLite meta (docs/storage/duostore-meta-sqlite-design.md §9): zero external deps
+    # duostore + SQLite meta (docs/architecture/storage/duostore-meta-sqlite-design.md §9): zero external deps
     if(LIGHTS3_DUOSTORE_SQLITE_META)
       add_test(NAME e2e_duostore_sqlite
                COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                        $<TARGET_FILE:lights3> builtin duostore-sqlite)
     endif()
-    # duostore + RADOS data (docs/storage/duostore-data-rados-design.md §11): the script probes
+    # duostore + RADOS data (docs/architecture/storage/duostore-data-rados-design.md §11): the script probes
     # LIGHTS3_TEST_RADOS_CONF/POOL, explicit SKIP if missing (real cluster dependency)
     if(LIGHTS3_DUOSTORE_RADOS_DATA)
       add_test(NAME e2e_duostore_rados
                COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                        $<TARGET_FILE:lights3> builtin duostore-rados)
     endif()
-    # duostore + TiKV meta (docs/storage/duostore-meta-tikv-design.md §10): the script probes
+    # duostore + TiKV meta (docs/architecture/storage/duostore-meta-tikv-design.md §10): the script probes
     # LIGHTS3_TEST_PD_ADDR, explicit SKIP if missing (real cluster dependency)
     if(LIGHTS3_DUOSTORE_TIKV_META)
       add_test(NAME e2e_duostore_tikv

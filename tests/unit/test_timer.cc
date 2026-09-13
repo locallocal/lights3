@@ -1,4 +1,4 @@
-// TimerQueue unit tests (docs/concurrency.md §2/§5):
+// TimerQueue unit tests (docs/architecture/concurrency.md §2/§5):
 // firing, expiry ordering, cancel semantics (true if not yet fired / false if fired or absent), no dangling on
 // destruction, wakeup when an earlier entry is inserted ahead. Timing assertions use only loose upper bounds (cv +
 // timed waits) to avoid flakes on slow machines.

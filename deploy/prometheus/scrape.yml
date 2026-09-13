@@ -1,4 +1,4 @@
-# Prometheus scrape configuration for lights3 (roadmap §5.5, docs/monitoring.md).
+# Prometheus scrape configuration for lights3 (roadmap §5.5, docs/usage/monitoring.md).
 # Drop the `scrape_configs` entry into an existing prometheus.yml, or run this
 # file as-is for a single-gateway lab setup:
 #
@@ -6,7 +6,7 @@
 #
 # /-/metrics is served on the data-plane listener in Prometheus text format --
 # or only on the admin listener when http.admin_port is configured
-# (docs/http-adapter.md §2.1): then the target below is host:admin_port.
+# (docs/architecture/http-adapter.md §2.1): then the target below is host:admin_port.
 # It must stay reachable anonymously for Prometheus (http.metrics_access:
 # anonymous, the default) — Prometheus cannot sign SigV4. With
 # http.metrics_access: root, scrape through a sidecar/proxy that signs, or keep

@@ -1,4 +1,4 @@
-// S3-plane guard for table buckets (docs/s3-tables-design.md §8.1): the reserved catalog
+// S3-plane guard for table buckets (docs/architecture/s3-tables-design.md §8.1): the reserved catalog
 // prefix is read-only through the S3 API, a non-empty table bucket cannot be deleted,
 // and the catalog prefix's first segment is not a legal bucket name. Pure in-memory
 // decisions on the TableBucketStore snapshot; the DeleteBucket check is the only one

@@ -1,4 +1,4 @@
-// L4: cooperative cancellation primitives (docs/concurrency.md §5)
+// L4: cooperative cancellation primitives (docs/architecture/concurrency.md §5)
 // CancelSource triggers, CancelToken observes; cancellation surfaces as an
 // OperationCancelled exception thrown from suspension points.
 // No preemption is attempted: a blocking call in progress returns naturally, after
@@ -27,7 +27,7 @@ namespace detail {
 
 class CancelState {
 public:
-    // Callback contract (docs/concurrency.md §5): **must be lightweight**. The
+    // Callback contract (docs/architecture/concurrency.md §5): **must be lightweight**. The
     // cancellation source is often TimerQueue's single timer thread, and resuming a
     // continuation directly inside a callback would run the whole request chain on
     // the timer thread, stalling every timer in the process meanwhile (docs/archive/gaps.md

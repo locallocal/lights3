@@ -1,6 +1,6 @@
-// Single source of truth for S3 error codes: code -> (HTTP status, wire code) (docs/s3-protocol.md §5)
-// The L3 storage layer also throws S3Error (convention in docs/storage/storage-backend.md §1), so this header has no
-// HTTP model dependency.
+// Single source of truth for S3 error codes: code -> (HTTP status, wire code) (docs/architecture/s3-protocol.md §5)
+// The L3 storage layer also throws S3Error (convention in docs/architecture/storage/storage-backend.md §1), so this
+// header has no HTTP model dependency.
 #pragma once
 
 #include <exception>
@@ -99,8 +99,8 @@ struct S3Error : std::exception {
 
 int http_status(S3ErrorCode code);
 const char* wire_code(S3ErrorCode code);
-// wire code -> enum reverse lookup (used by cloudproxy to pass through remote errors, docs/storage/cloudproxy-design.md
-// §5.1); returns nullopt for unknown codes
+// wire code -> enum reverse lookup (used by cloudproxy to pass through remote errors,
+// docs/architecture/storage/cloudproxy-design.md §5.1); returns nullopt for unknown codes
 std::optional<S3ErrorCode> code_from_wire(std::string_view wire);
 
 // Standard S3 error response XML. Empty host_id omits <HostId> (the driver's fallback response has no L2 context,

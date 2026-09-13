@@ -1,4 +1,4 @@
-# LightS3 — Design Documents for a C++ S3-Protocol Gateway
+# LightS3 documentation
 
 > English translation of [../README.md](../README.md). Section numbering matches
 > the Chinese originals one-to-one; source-code comments reference sections as
@@ -24,30 +24,58 @@ the inside. The design emphasizes three points:
 
 ## Document index
 
+The documents are grouped by reader: **architecture** (what the system is made
+of and why), **usage** (deploying, configuring, operating), **development**
+(building, testing, contributing). Chinese is the original; every document here
+mirrors it with identical section numbering, so a `docs/<group>/<name>.md §N`
+reference in a source comment applies to both languages.
+
+### Architecture ([architecture/](architecture/))
+
 | Document | Contents |
 | --- | --- |
-| [architecture.md](architecture.md) | Overall architecture, layering, request lifecycle, code layout |
-| [config-reload.md](config-reload.md) | Configuration hot reload: SIGHUP / admin API / `lights3-ctl reload`, whole-file validation, the hot-reloadable subset and the "requires restart" report (roadmap §4.4) |
-| [tls.md](tls.md) | TLS: HTTPS on all four drivers, certificate hot reload, mTLS / ciphers / minimum version / SNI multi-certificate, reverse-proxy termination examples (roadmap §4.1) |
-| [http-adapter.md](http-adapter.md) | Pluggable HTTP layer: neutral request/response model, streaming bodies, adapter notes |
-| [concurrency.md](concurrency.md) | Concurrency model: Task coroutines, Executor abstraction, thread pool, unifying sync/async HTTP libraries |
-| [coroutine-internals.md](coroutine-internals.md) | Coroutine internals: Task promise layout & symmetric transfer, top-level drivers, when_all/with_timeout, cancellation race protocols and lifetime rules |
-| [storage/](storage/README.md) | Storage layer, design tier (index in that README): `storage-backend.md` (interface abstraction, bucket routing, LocalFs/XLocalFs, new-backend guide) and the `*-design.md` of tiered / cloudproxy / duostore (with its redis / sqlite / tikv meta and rados data engines); the 13 implementation-level documents exist in Chinese only under `docs/storage/` |
-| [s3-protocol.md](s3-protocol.md) | S3 protocol: API scope, SigV4 (incl. presigned & clock skew), Multipart Upload, error mapping, mint compatibility gate |
-| [credential-management.md](credential-management.md) | Credential management: AK/SK generate/query/revoke API, three credential sources (static root / file / dynamic), `.sys` persistence; phase 2: at-rest SK encryption, hot-reloaded credentials file, multi-instance sync, per-credential policy |
-| [multi-tenancy.md](multi-tenancy.md) | Usage accounting, bucket/tenant quotas, tenant entities and bucket ownership, tiered admin plane, audit log (the whole roadmap §3.9 chain) |
-| [s3-tables-design.md](s3-tables-design.md) | S3 Tables / Apache Iceberg REST Catalog (①–⑥ implemented, 2026-09-12): findings from the RustFS implementation, catalog state on `.sys` with a `PutCondition` CAS commit protocol, REST endpoints and error model, deep Avro validation with diagnostics / recovery, table-bucket guard and credential vending, maintenance jobs and `lights3-ctl tables`, the multi-gateway matrix, PyIceberg / DuckDB smoke, Iceberg views, the `/_iceberg` alias, the duostore-meta catalog backing |
-| [testing.md](testing.md) | Testing: the ctest matrix and labels, website/lights3-ctl/fault-injection e2e, fuzz harnesses, the fault-injection facade, the performance gate and soak, mint, ubsan/coverage, the one-shot matrix script (roadmap §6.1) |
-| [deployment.md](deployment.md) | Build and distribution: `--version` / embedded git commit, the `cmake --install` tree, CPack deb/rpm, Dockerfile + compose (with the redis/tikv/rados e2e profile), rollback and uninstall for `install.sh` upgrades (roadmap §6.3) |
-| [performance-baseline.md](performance-baseline.md) | Performance baseline: the `scripts/bench_matrix.sh` matrix of 4 drivers × TLS × put/get, before/after the §4.3 data-plane work, how to reproduce (roadmap §4.3) |
-| [todo.md](todo.md) | Open items and plans: pending verification, findings from the performance baseline, long-term items, the not-planned list; entries are deleted when done (the closed ledgers backlog.md / backlog-sequence.md and finished design step documents such as multi-gateway-multipart-design.md are archived, Chinese only, under `docs/archive/`) |
-| [monitoring.md](monitoring.md) | Monitoring consumers: the Prometheus scrape config and alert/recording rules under `deploy/`, the Grafana dashboard and its generator, the asset-reconciliation test (roadmap §5.5, zero C++) |
-| [object-read-write-flow.md](object-read-write-flow.md) | Object read/write flow: the three-layer code path, BodyReader chains, atomic staging commit, fd-snapshot reads |
-| [cli.md](cli.md) | Command-line tools: `lights3` startup, `duostore dump/load/gc/scan`, `tier scan/gc/reconcile`, the offline `fsck` scrub, `lights3-ctl` cred/website/bench/fsck/quota/tenant/usage commands, ccmd option semantics and exit codes |
+| [overview.md](architecture/overview.md) | Overall architecture, layering, request lifecycle, process assembly, source layout |
+| [http-adapter.md](architecture/http-adapter.md) | Pluggable HTTP layer: neutral request/response model, streaming bodies, notes on the four drivers |
+| [concurrency.md](architecture/concurrency.md) | Concurrency model: Task coroutines, Executor abstraction, thread pool, unifying sync/async HTTP libraries |
+| [coroutine-internals.md](architecture/coroutine-internals.md) | Coroutine internals: Task promise layout & symmetric transfer, top-level drivers, when_all/with_timeout, cancellation race protocols and lifetime rules |
+| [object-read-write-flow.md](architecture/object-read-write-flow.md) | Object read/write flow: the three-layer code path, BodyReader chains, atomic staging commit, fd-snapshot reads |
+| [s3-protocol.md](architecture/s3-protocol.md) | S3 protocol: API scope, SigV4 (incl. presigned, STS and clock skew), Multipart Upload, error mapping, observability, mint compatibility gate |
+| [credential-management.md](architecture/credential-management.md) | Credential management: AK/SK admin API, three credential sources (static root / file / dynamic), `.sys` persistence, at-rest SK encryption, hot-reloaded credentials file, multi-instance sync, per-credential policy, STS sessions |
+| [multi-tenancy.md](architecture/multi-tenancy.md) | Usage accounting, bucket/tenant quotas, tenant entities and bucket ownership, tiered admin plane, audit log |
+| [s3-tables-design.md](architecture/s3-tables-design.md) | S3 Tables / Apache Iceberg REST Catalog: catalog state on `.sys` with a CAS commit protocol, REST endpoints and error model, deep Avro validation with diagnostics / recovery, table-bucket guard and credential vending, maintenance jobs, the multi-gateway matrix, views, the duostore-meta catalog backing |
+| [storage/](architecture/storage/README.md) | Storage layer, design tier: `storage-backend.md` (interface abstraction, bucket routing, LocalFs/XLocalFs, new-backend guide) and the `*-design.md` of tiered / cloudproxy / duostore (with its redis / sqlite / tikv meta and rados data engines); the 13 implementation-level documents exist in Chinese only under `docs/architecture/storage/` |
 
-*The project introduction (build/run/current scope) lives in the repository
-root [README.md](../../README.md) (English) and
-[../README.zh-CN.md](../README.zh-CN.md) (Chinese).*
+### Usage ([usage/](usage/))
+
+| Document | Contents |
+| --- | --- |
+| [deployment.md](usage/deployment.md) | Build and distribution: `--version` / embedded git commit, the `cmake --install` tree, deb/rpm packages, Dockerfile + compose under `docker/` (redis/tikv/rados/multi/e2e profiles), multi-gateway deployment, upgrade rollback and uninstall |
+| [cli.md](usage/cli.md) | Command-line tools: `lights3` startup and its `duostore` / `tier` / `fsck` / `tables` subcommands, the `lights3-ctl` cred/website/bench/fsck/quota/tenant/usage/tables commands, option semantics and exit codes |
+| [config-reload.md](usage/config-reload.md) | Configuration hot reload: SIGHUP / admin API / `lights3-ctl reload`, whole-file validation, the hot-reloadable subset and the "requires restart" report |
+| [tls.md](usage/tls.md) | TLS: HTTPS on all four drivers, certificate hot reload, mTLS / ciphers / minimum version / SNI multi-certificate, reverse-proxy termination examples |
+| [monitoring.md](usage/monitoring.md) | Monitoring consumers: the Prometheus scrape config and alert/recording rules under `deploy/`, the Grafana dashboard and its generator |
+| [static-website.md](usage/static-website.md) | Static website hosting: anonymous-read semantics, index / error documents, routing rules and object-level redirects, rate limiting |
+
+Every configuration key is documented with its default in the comments of
+[config/lights3.yaml](../../config/lights3.yaml); the project introduction
+(build / run / current scope) is the repository root [README.md](../../README.md).
+
+### Development ([development/](development/))
+
+| Document | Contents |
+| --- | --- |
+| [contributing.md](development/contributing.md) | Development guide: repository layout, build variants, verification routine, code and documentation conventions, branches and commits |
+| [testing.md](development/testing.md) | Testing: the ctest matrix and labels, the e2e sections, fuzz harnesses, fault injection, the performance gate and soak, mint, ubsan/coverage, the one-shot matrix script, the Makefile |
+| [performance-baseline.md](development/performance-baseline.md) | Performance baseline: the `scripts/bench_matrix.sh` matrix of 4 drivers × TLS × put/get, before/after the data-plane work, how to reproduce |
+| [todo.md](development/todo.md) | Open items and plans: pending verification, findings from the performance baseline, long-term items, the not-planned list; entries are deleted when done |
+
+### Archive (`docs/archive/`, Chinese only)
+
+The closed ledgers (gaps.md / issues.md / roadmap.md / backlog.md /
+backlog-sequence.md) and the finished design-step document
+(multi-gateway-multipart-design.md): read-only, no longer updated, and the
+place source comments point at with `docs/archive/<name>.md §N`, `roadmap §N`,
+`backlog §N`, `backlog-sequence ①…⑩` and `multi-gateway-multipart §4 ①…④`.
 
 ## One-page architecture
 
@@ -87,7 +115,7 @@ root [README.md](../../README.md) (English) and
 - **Bucket-level routing rather than object-level**: routing rules stay simple
   and statically configurable, avoiding a metadata service; object-level
   tiering is layered on top as a combinator backend in the same spirit (see
-  [tiered-design.md](storage/tiered-design.md)).
+  [tiered-design.md](architecture/storage/tiered-design.md)).
 - **Metadata sidecar instead of embedding into data files**: the LocalFs
   backend keeps Content-Type, ETag and custom metadata in a sidecar file,
   leaving data files compatible with ordinary filesystem tools.

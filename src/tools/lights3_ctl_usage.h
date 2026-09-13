@@ -1,5 +1,5 @@
 // lights3-ctl `usage` command: bucket usage counters via /-/admin/usage
-// (docs/multi-tenancy.md §2/§6). Implementation in lights3_ctl_usage.cc.
+// (docs/architecture/multi-tenancy.md §2/§6). Implementation in lights3_ctl_usage.cc.
 #pragma once
 
 #include <ccmd.h>

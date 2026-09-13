@@ -145,7 +145,7 @@ Task<http::HttpResponse> S3Service::put_bucket_lifecycle(http::HttpRequest& req,
     co_await lifecycle_store_->put(bucket, std::move(rules));
     LOG_INFO("lifecycle: configuration for bucket {} set by {}", bucket, std::string(auth.access_key));
 #ifdef LIGHTS3_TABLES
-    // accepted like AWS does, but never enforced (docs/s3-tables-design.md §8.2)
+    // accepted like AWS does, but never enforced (docs/architecture/s3-tables-design.md §8.2)
     if (table_guard_ && table_guard_->is_table_bucket(bucket))
         LOG_WARN("lifecycle: bucket {} is a table bucket, lifecycle rules are ignored on table buckets", bucket);
 #endif

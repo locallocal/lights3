@@ -1,4 +1,4 @@
-// L1: HTTP server interface and driver factory (see docs/http-adapter.md)
+// L1: HTTP server interface and driver factory (see docs/architecture/http-adapter.md)
 #pragma once
 
 #include <functional>

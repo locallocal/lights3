@@ -99,7 +99,7 @@ struct MetricsEndGuard {
     }
 };
 
-// Access log record (roadmap §5.2, docs/s3-protocol.md §7). Filled at dispatch end;
+// Access log record (roadmap §5.2, docs/architecture/s3-protocol.md §7). Filled at dispatch end;
 // emitted right away for buffered responses, and at end of body for streaming ones
 // (the driver pulls the body after dispatch returns, so total time and the bytes
 // actually sent are only known then). Self-contained: emission may run on a driver
@@ -280,8 +280,8 @@ private:
     bool eof_ = false;
 };
 
-// Explicitly unsupported subresources (docs/s3-protocol.md §1): explicit 501, avoiding wrong answers from falling into
-// the List/Get fallback
+// Explicitly unsupported subresources (docs/architecture/s3-protocol.md §1): explicit 501, avoiding wrong answers from
+// falling into the List/Get fallback
 constexpr std::string_view kUnsupportedSubresources[] = {
     "acl",
     "policy",
@@ -331,7 +331,7 @@ void reject_unsupported_headers(const http::HttpRequest& req) {
         // the five ACL grant headers, same class as x-amz-acl
         "x-amz-grant-",
     };
-    // x-amz-website-redirect-location left this list with docs/static-website.md phase ③,
+    // x-amz-website-redirect-location left this list with docs/usage/static-website.md phase ③,
     // x-amz-tagging with roadmap §2.5: both are first-class metadata fields now
     for (auto& [k, v] : req.headers.items()) {
         std::string lk;
@@ -403,7 +403,7 @@ void enforce_query_whitelist(const http::HttpRequest& req, const S3Service::Rout
 
 }  // namespace
 
-// ---------- virtual-host style（docs/s3-protocol.md §2）----------
+// ---------- virtual-host style（docs/architecture/s3-protocol.md §2）----------
 
 S3Service::Address S3Service::resolve_address(const http::HttpRequest& req) const {
     if (!base_domain_.empty()) {
@@ -434,7 +434,7 @@ S3Service::Address S3Service::resolve_address(const http::HttpRequest& req) cons
     return {std::move(bucket), std::move(key), /*vhost=*/false};
 }
 
-// ---------- Static website hosting (docs/static-website.md) ----------
+// ---------- Static website hosting (docs/usage/static-website.md) ----------
 
 void S3Service::set_website_buckets(std::vector<WebsiteBucket> buckets) {
     // Same gate as user requests (allow_reserved defaults to false): an entry for .sys or
@@ -739,13 +739,13 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             api_name = "AdminCredentials";
             resp = co_await admin_credentials(req, access_key);
         } else if (internal && req.path == "/-/admin/config/reload") {
-            // Config hot reload (roadmap §4.4, docs/config-reload.md)
+            // Config hot reload (roadmap §4.4, docs/usage/config-reload.md)
             api_name = "AdminConfigReload";
             resp = co_await admin_config_reload(req, access_key, ctx);
         } else if (internal &&
                    (req.path == "/-/admin/tenants" || req.path == "/-/admin/usage" ||
                     req.path.rfind("/-/admin/tenants/", 0) == 0 || req.path.rfind("/-/admin/usage/", 0) == 0)) {
-            // Tenancy + usage admin plane (docs/multi-tenancy.md §6), same JSON conventions
+            // Tenancy + usage admin plane (docs/architecture/multi-tenancy.md §6), same JSON conventions
             api_name = "AdminTenancy";
             resp = co_await admin_tenancy(req, access_key, ctx);
         } else if (internal &&
@@ -759,13 +759,13 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             resp = co_await admin_fsck(req, access_key, ctx);
         } else if (internal &&
                    (req.path.rfind("/-/admin/duostore/", 0) == 0 || req.path.rfind("/-/admin/tier/", 0) == 0)) {
-            // Background rounds on demand + quarantine ledgers (docs/cli.md §3.12,
+            // Background rounds on demand + quarantine ledgers (docs/usage/cli.md §3.12,
             // `lights3-ctl duostore|tier ...`), same job model as fsck
             api_name = req.path.rfind("/-/admin/tier/", 0) == 0 ? "AdminTier" : "AdminDuostore";
             resp = co_await admin_jobs(req, access_key, ctx);
 #ifdef LIGHTS3_TABLES
         } else if (internal && tables_api_ && req.path.rfind("/-/admin/tables/", 0) == 0) {
-            // Table maintenance jobs on the admin plane (docs/s3-tables-design.md §9,
+            // Table maintenance jobs on the admin plane (docs/architecture/s3-tables-design.md §9,
             // `lights3-ctl tables plan|run`), same job model, resource = the table
             api_name = "AdminTables";
             resp = co_await admin_tables_jobs(req, access_key, ctx);
@@ -776,7 +776,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             resp = co_await admin_object_inspect(req, access_key, ctx);
 #ifdef LIGHTS3_TABLES
         } else if (tables_api_ && !addr.vhost && tables_api_->matches(req.path)) {
-            // Iceberg REST catalog (docs/s3-tables-design.md §6.1): path-style only; the
+            // Iceberg REST catalog (docs/architecture/s3-tables-design.md §6.1): path-style only; the
             // handler verifies and authorizes on its own and renders errors as the
             // Iceberg JSON envelope
             tables::RestApi::Hooks hooks;
@@ -850,7 +850,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             api_name = "Preflight";
             resp = co_await cors_preflight(req, bucket);
         } else {
-            // Static website hosting phase 1 (docs/static-website.md): requests with no
+            // Static website hosting phase 1 (docs/usage/static-website.md): requests with no
             // signature material may read objects from explicitly listed website buckets
             // anonymously. Decided before verify -- verify treats a missing Authorization
             // header as AccessDenied; when auth is globally disabled verify() admits
@@ -932,7 +932,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                     metrics_.website(WebsiteEvent::Redirect);
                     early = std::move(*redirect);
                 } else {
-                    // Index document (docs/static-website.md phase ②): an empty key (bucket
+                    // Index document (docs/usage/static-website.md phase ②): an empty key (bucket
                     // root, with or without trailing slash) or a directory-style key
                     // ("docs/") maps to the index object. Rewriting before the route gate
                     // also turns what would be a bucket-scope listing into a plain object
@@ -966,10 +966,10 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             if (early) {
                 resp = std::move(*early);
             } else {
-                // per-credential policy (docs/credential-management.md §10.4): the action comes from the matched
-                // route, not the HTTP method (docs/archive/gaps.md §5.10) -- DeleteObjects is a POST yet a delete,
-                // CreateMultipartUpload is also a POST yet a write; the method dimension cannot separate the two.
-                // The decision input is the snapshot verify returned, never a store lookup (§3.7)
+                // per-credential policy (docs/architecture/credential-management.md §10.4): the action comes from the
+                // matched route, not the HTTP method (docs/archive/gaps.md §5.10) -- DeleteObjects is a POST yet a
+                // delete, CreateMultipartUpload is also a POST yet a write; the method dimension cannot separate the
+                // two. The decision input is the snapshot verify returned, never a store lookup (§3.7)
                 RequestAuth auth{access_key, ident.policy ? &*ident.policy : nullptr, ident.tenant, ident.tenant_admin,
                                  ctx.request_id};
                 tenant_for_log = ident.tenant;
@@ -991,12 +991,12 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                     }
                 }
 #ifdef LIGHTS3_TABLES
-                // Table-bucket guard (docs/s3-tables-design.md §8.1): the reserved catalog
+                // Table-bucket guard (docs/architecture/s3-tables-design.md §8.1): the reserved catalog
                 // prefix is read-only through the S3 plane
                 if (table_guard_ && !bucket.empty() && !key.empty())
                     if (const Route* r = match_route(req, Scope::Object)) table_guard_->check(bucket, key, r->name);
 #endif
-                // Tenant ownership (docs/multi-tenancy.md §4.3): a tenant credential is
+                // Tenant ownership (docs/architecture/multi-tenancy.md §4.3): a tenant credential is
                 // confined to the buckets its tenant owns, on top of its policy. Service
                 // scope (ListBuckets) filters in the handler instead. Decided on the
                 // verify-time snapshot like the policy; the owner table is a snapshot too
@@ -1032,7 +1032,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                 else
                     resp = co_await std::move(route(req, bucket, key, auth).with_cancel(req_src.token()));
                 route_end = std::chrono::steady_clock::now();
-                // Object-level website redirect (docs/static-website.md phase ③): on the
+                // Object-level website redirect (docs/usage/static-website.md phase ③): on the
                 // anonymous plane, x-amz-website-redirect-location turns the response into a
                 // 301 — the header value was prefix-validated at PUT, so it is Location-safe.
                 // Signed (REST) requests keep the object body + echo header, matching AWS
@@ -1050,7 +1050,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     } catch (const OperationCancelled&) {
         // Timeout/disconnect/shutdown: 503 lets SDKs retry. Blocking syscalls already running on pool threads are
         // not preempted; this response only means "the gateway stops waiting for it" (the cooperative semantics of
-        // docs/concurrency.md §5)
+        // docs/architecture/concurrency.md §5)
         LOG_WARN("req {} {} {} cancelled (timeout or shutdown) trace={}", ctx.request_id, req.method, req.path,
                  ctx.trace.trace_id);
         metrics_.s3_error(S3ErrorCode::SlowDown);
@@ -1120,11 +1120,11 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     resp.headers.set("traceresponse", ctx.trace.traceparent());
 
     // Metrics close here: the histograms measure time-to-headers-ready, the same
-    // quantity the access line reports as ttfb (docs/s3-protocol.md §7)
+    // quantity the access line reports as ttfb (docs/architecture/s3-protocol.md §7)
     double secs = mguard.finish(resp.status);
     uint64_t bytes = resp.content_length.value_or(resp.small_body.size());
     metrics_.record_api(api_name, backend_name.empty() ? "-" : backend_name, resp.status, secs);
-    // Access log (roadmap §5.2, docs/s3-protocol.md §7): one line per request; a
+    // Access log (roadmap §5.2, docs/architecture/s3-protocol.md §7): one line per request; a
     // route that never ran (short-circuited before/at auth) reports handler=0
     auto access = std::make_unique<AccessRecord>();
     access->start = start;
@@ -1180,7 +1180,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     co_return resp;
 }
 
-// ---------- Explicit dispatch table (docs/s3-protocol.md §2) ----------
+// ---------- Explicit dispatch table (docs/architecture/s3-protocol.md §2) ----------
 
 namespace {
 
@@ -1218,7 +1218,7 @@ std::span<const S3Service::Route> S3Service::route_table() {
          [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth&) {
              return s.get_bucket_location(std::move(b));
          }},
-        // ?website subresource (docs/static-website.md phase ③): flagged routes must precede
+        // ?website subresource (docs/usage/static-website.md phase ③): flagged routes must precede
         // the flagless fallbacks of the same method, or PUT /bucket?website would create a bucket
         {"GET", Scope::Bucket, "website", "", Action::Read, "GetBucketWebsite",
          [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth& auth) {
@@ -1258,7 +1258,7 @@ std::span<const S3Service::Route> S3Service::route_table() {
          [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth& auth) {
              return s.delete_bucket_cors(std::move(b), auth);
          }},
-        // ?quota subresource (roadmap §3.9 ②, docs/multi-tenancy.md §3): GET for anyone
+        // ?quota subresource (roadmap §3.9 ②, docs/architecture/multi-tenancy.md §3): GET for anyone
         // admitted to the bucket, PUT/DELETE root only
         {"GET", Scope::Bucket, "quota", "", Action::Read, "GetBucketQuota",
          [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth& auth) {
@@ -1406,7 +1406,7 @@ Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bu
     throw S3Error(S3ErrorCode::MethodNotAllowed, "The specified method is not allowed.").with_header("Allow", allow);
 }
 
-// ---------- readyz (docs/s3-protocol.md §7: per-backend liveness probes) ----------
+// ---------- readyz (docs/architecture/s3-protocol.md §7: per-backend liveness probes) ----------
 
 Task<http::HttpResponse> S3Service::readyz() {
     http::HttpResponse resp;

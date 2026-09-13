@@ -1,5 +1,5 @@
 // multipart handler: Create/UploadPart/Complete/Abort/ListParts/ListMultipartUploads
-// (docs/s3-protocol.md §1; storage-layer semantics in docs/storage/storage-backend.md §3.2)
+// (docs/architecture/s3-protocol.md §1; storage-layer semantics in docs/architecture/storage/storage-backend.md §3.2)
 #include <algorithm>
 #include <charconv>
 #include <map>
@@ -57,7 +57,7 @@ int parse_max(const http::HttpRequest& req, const char* name, int cap) {
 
 // "scheme://host": Location must be a full URL (docs/archive/gaps.md §5.7). The scheme can only be relayed by the
 // reverse proxy -- on direct connections this implementation is plaintext HTTP, TLS is terminated by a front proxy
-// (docs/s3-protocol.md)
+// (docs/architecture/s3-protocol.md)
 std::string request_base_url(const http::HttpRequest& req) {
     std::string scheme = "http";
     if (auto p = req.headers.get("X-Forwarded-Proto"); p && !p->empty()) scheme = *p;
@@ -207,9 +207,9 @@ Task<http::HttpResponse> S3Service::upload_part(http::HttpRequest& req, std::str
     int part_no = parse_part_number(req);
     std::string upload_id = require_upload_id(req);
 
-    // UploadPartCopy (docs/s3-protocol.md §1): after conditional headers are checked via head, the source is
-    // streamed out by range and written into the target upload as the part body; source/target may be on
-    // different backends (same as CopyObject)
+    // UploadPartCopy (docs/architecture/s3-protocol.md §1): after conditional headers are checked via head, the source
+    // is streamed out by range and written into the target upload as the part body; source/target may be on different
+    // backends (same as CopyObject)
     if (auto src_hdr = req.headers.get("x-amz-copy-source")) {
         auto src = parse_copy_source(*src_hdr);
         const std::string& src_bucket = src.first;

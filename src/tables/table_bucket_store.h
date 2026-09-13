@@ -1,4 +1,4 @@
-// Table-bucket marker (docs/s3-tables-design.md §4.1): one .sys/tables/<bucket> object
+// Table-bucket marker (docs/architecture/s3-tables-design.md §4.1): one .sys/tables/<bucket> object
 // per enabled bucket, the same write-through + tombstone-sync SysConfigStore template
 // as cors / lifecycle / quota. The snapshot is what the S3-plane guard consults
 #pragma once

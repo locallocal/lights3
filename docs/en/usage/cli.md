@@ -1,0 +1,745 @@
+# Command-line tools: `lights3` and `lights3-ctl`
+
+> English translation of [../cli.md](../../usage/cli.md). Section numbering matches.
+
+This is the command reference for the two executables. Both are built on
+`third_party/ccmd` v0.0.2 (a header-only subcommand framework bundling the
+header-only `cflag` v0.0.2 for option parsing) and share one set of command-line semantics, spelled out once
+in §1. The startup assembly flow is in [architecture.md §4](../architecture/overview.md#4-process-structure-and-startup-flow),
+the credential admin plane in [credential-management.md](../architecture/credential-management.md),
+static websites in [static-website.md](static-website.md).
+
+## 1. ccmd semantics
+
+- **Command tree**: `<program> [<group> [<subcommand>]] [positionals] [options]`.
+  `<program> help [<group> [<subcommand>]]`, or `-h/--help` at any level,
+  prints that level's help.
+- **Options do not propagate downward**: every leaf subcommand owns an
+  independent option set, so options must follow the leaf
+  (`lights3-ctl cred list --endpoint=…`, not `lights3-ctl --endpoint=… cred list`).
+- **Value syntax**: long options accept both `--name=value` and `--name value`
+  (since cflag v0.0.2; before that only the `lights3` server folded the space
+  form of `--config`/`--backend`/`--file`, and that shim is gone); short options
+  accept `-e http://…` and `-ehttp://…`. A bare bool option means true
+  (`--insecure`, `--keep`); an explicit bool value must use `--name=true|false`
+  (`1/0`, `t/f` are accepted too); short bools combine (`-dv`). Integer options
+  are range-checked against their type and partial parses (`10x`) are rejected.
+- **`--flag-file=<path>`**: built into every (leaf) command; loads options from
+  a JSON / YAML / gflags file (chosen by the `.json`/`.yaml`/`.yml` extension,
+  otherwise sniffed from the content), applied at the position where it
+  appears so later command-line arguments override the file; a file may nest
+  another with `flag-file` (16 levels at most). `help`, `h` and `flag-file` are
+  reserved names; the command tree in this repository registers none of them.
+- **Help output**: `Commands:` / `Options:` are aligned two-column tables
+  wrapped at 100 columns; `Options:` lists the built-in `-h --help` and
+  `--flag-file` next to the command's own flags, defaults end the row as
+  `(default: …)`.
+- **`--` ends option parsing**; everything after it is positional.
+- **Exit codes**: `0` success; `1` runtime failure (request refused, IO error,
+  server startup failure); `2` usage error (missing positional, missing
+  credentials, value out of range, bare command group). ccmd itself exits `1`
+  with a stderr hint on an unknown command or option.
+
+## 2. `lights3` — the server process
+
+```text
+lights3 [--config=<path>]                                  start the server
+lights3 --version                                          version / git commit / compiled-in drivers and backends
+lights3 --check-config [--config=<path>]                   validate the config only (§2.1)
+lights3 duostore dump <backend> <file> [--config=<path>]   export duostore meta
+lights3 duostore load <backend> <file> [--config=<path>]   import duostore meta
+lights3 duostore backup <backend> --to=<dir> [--incremental] [--config=<path>]  append one entry to the meta backup chain
+lights3 duostore restore <backend> --from=<dir> [--to-id=<n>|--to-ts=<t>] [--config=<path>]  restore meta from the chain to a point
+lights3 duostore gc <backend> [--config=<path>]            run one duostore GC round now
+lights3 duostore scan <backend> [--config=<path>]          run one orphan-scan round now
+lights3 duostore quarantine list|release|purge <backend> [<pack_id>] corrupt-pack quarantine
+lights3 tier scan|gc|reconcile <backend> [--config=<path>] tiered background tasks on demand
+lights3 tier quarantine list|forget|purge <backend> [<bucket> <key>] tiered reconcile quarantine ledger
+lights3 fsck <backend> [--max-mbps=<n>] [--config=<path>]  offline integrity scrub
+lights3 tables export|import <file> [--backing=object|duostore] [--config=<path>]  migrate the S3 Tables catalog between the two backings (§2.6)
+lights3 help [duostore [<sub>] | tier [<sub>] | fsck | tables [<sub>]]
+```
+
+| Option | Applies to | Default | Meaning |
+| --- | --- | --- | --- |
+| `-c, --config=<path>` | all | `config/lights3.yaml` | YAML config file (format: [architecture.md §5](../architecture/overview.md#5-example-configuration-file)) |
+| `--version` | root command (`lights3-ctl` too) | — | print `lights3 <ver> (git <commit>, <build type>, <date>)` plus the `drivers:` / `features:` lines, exit 0; wins over `--check-config` (roadmap §6.3, [deployment.md §1](deployment.md)) |
+| `--backend=<name>` | `duostore *`, `tier *`, `fsck` | — | backend name, same as the first positional |
+| `--file=<path>` | `duostore dump|load`, `tables export|import` | — | dump / JSON-lines file path, same as the second (for tables: the first) positional |
+| `--to=<dir>` / `--from=<dir>` | `duostore backup` / `restore` | — | backup chain directory (required) |
+| `--incremental` | `duostore backup` | `false` | append the delta since the previous entry instead of a full copy |
+| `--to-id=<n>` / `--to-ts=<t>` | `duostore restore` | latest | restore through manifest entry n / the last entry at or before time t (ISO 8601 or unix ms); mutually exclusive |
+| `--max-mbps=<n>` | `fsck` | `0` | read throttle in MB/s, `0` = unthrottled |
+| `--backing=<name>` | `tables export|import` | `tables.catalog_backing` | which catalog backing to read / write: `object` or `duostore`; any other value exits 2 |
+
+### 2.1 Starting the server
+
+No subcommand means start: `Application(config)` → `open_storage()` →
+`start_server()` → `run()`, blocking until SIGINT/SIGTERM, then a graceful
+shutdown in the order of [architecture.md §4](../architecture/overview.md#4-process-structure-and-startup-flow);
+`run()`'s return value is the exit code: `0` = clean exit; `3` = unclean
+shutdown (roadmap §4.5) — requests still in flight past `http.shutdown_grace`,
+or a backend `close()` / thread-pool join that failed (each LOG_ERRORs; the
+process used to exit 0 regardless, invisible to a process manager). The drain
+deadline is `http.shutdown_grace` itself: one quantity bounds both the driver's
+connection drain and the return of admission permits, no separate hard-coded
+10s any more. Any startup exception (config parse
+failure, backend open failure, port in use, …) prints `fatal: …` to stderr and
+exits `1`; backends already built are closed through `~Application` (duostore
+seals its active pack, rados flushes).
+
+```bash
+export LIGHTS3_SECRET_1=my-secret
+./build/lights3 --config=config/lights3.yaml
+./build/lights3 -c /etc/lights3/lights3.yaml
+```
+
+**`--check-config`** (roadmap §6.2): a dry run that only parses and validates the
+configuration — no backend is opened, no port bound. It runs the exact
+`Config::load` validation the server runs, then checks that `http.driver` and
+every `backends[].type` are compiled into this binary; `type: duostore`
+backends additionally have their parameters parsed by the constructor's own
+`from_params` (engine selection, ranges, engines not compiled in fail right
+here), and the single-gateway combination of shared meta (redis / tikv) over
+local fs data is reported as `config warning:` on stderr without changing the
+exit code ([../archive/multi-gateway-multipart-design.md §4 ④](../../archive/multi-gateway-multipart-design.md));
+then it prints the resolved summary (driver/listener/TLS, threads, credential
+count, backends — duostore with `meta=… data=…`, routing rules, website
+entries, log and audit settings). Exit `0` = the file would
+start (runtime failures such as an unwritable data directory excepted), `1` =
+rejected, with the same message the server prints as `fatal:`. Run it from
+deployment scripts before a reload/restart:
+
+```bash
+./build/lights3 --check-config --config=/etc/lights3/lights3.yaml && systemctl reload lights3
+```
+
+### 2.2 `duostore dump` / `duostore load`
+
+Logical meta backup/restore for DuoStore (stream format and invariants:
+[storage/duostore-core.md §11](../../architecture/storage/duostore-core.md)). Registered only
+in `LIGHTS3_DUOSTORE` builds; both build every backend **without listening**,
+run, and exit. `<backend>` must name a `type: duostore` backend in the config,
+otherwise the command errors out. When run next to live gateways on a shared
+meta engine: `dump` is online-consistent on rocksdb/sqlite/tikv via an engine
+snapshot (roadmap §3.7); redis has no MVCC, so a dump is only consistent with
+writes stopped (the entry point warns). `load` always requires target-side
+write quiescence.
+
+- `dump`: writes all bucket/object records and the sealed-pack ledger of that
+  backend to `<file>` (truncating).
+- `load`: replays `<file>` record by record into the backend (buckets are
+  idempotent, so an interrupted run can be repeated) and ends with a forced
+  orphan scan.
+
+Backup order: copy the data directory first, then `dump`; on restore put the
+data back first, then `load`.
+
+```bash
+./build/lights3 duostore dump duo /backup/duo-meta.dump --config=/etc/lights3/lights3.yaml
+./build/lights3 duostore load --backend=duo --file=/backup/duo-meta.dump -c /etc/lights3/lights3.yaml
+```
+
+### 2.2.1 `duostore backup` / `duostore restore`
+
+Backup chains with point-in-time restore (directory layout, manifest and the
+per-engine payloads: [storage/duostore-core.md §11.1](../../architecture/storage/duostore-core.md)).
+`backup` appends one entry to `--to=<dir>`: a full copy by default, with
+`--incremental` the delta since the previous entry (refused while the directory
+holds no full entry yet). Per engine: sqlite's increment is a WAL segment and
+needs the backend's `sqlite_wal_archive` to name the same directory; rocksdb goes
+through BackupEngine, where every entry restores on its own; redis / tikv have no
+gateway-side increment -- `backup` writes a logical dump plus the restore marker
+(replication offset / TSO) and refuses `--incremental`. The local engines
+(sqlite / rocksdb) hold a file lock, so the server must be stopped.
+
+`restore` takes the chain prefix selected by `--to-id` / `--to-ts` (default:
+latest): sqlite / rocksdb are restored at file level **without building the
+backends**, then the backend is built for one forced orphan scan; redis / tikv
+require the cluster to be back at the entry's marker, then load that dump. Same
+order as §2.2: put the data directory back before `restore`.
+
+```bash
+./build/lights3 duostore backup duo --to=/backup/duo-meta -c /etc/lights3/lights3.yaml
+./build/lights3 duostore backup duo --to=/backup/duo-meta --incremental -c /etc/lights3/lights3.yaml
+./build/lights3 duostore restore duo --from=/backup/duo-meta --to-ts=2026-09-06T12:00:00Z -c /etc/lights3/lights3.yaml
+```
+
+### 2.3 `fsck`
+
+> The same scrub can be triggered and polled on a running gateway through the
+> admin plane: `POST/GET /-/admin/fsck/<backend>` and `lights3-ctl fsck --offline
+> <backend>` (§3.5). The offline CLI and the admin endpoint share the type
+> dispatch and the findings definition in `app/admin_jobs.h`.
+
+Offline data-integrity scrub (roadmap §3.1; implementation details in
+[storage/duostore-core.md §8.4](../../architecture/storage/duostore-core.md) and
+[storage/localfs.md §11](../../architecture/storage/localfs.md)). Same pattern as dump/load:
+builds every backend without listening, runs, and exits; **strictly
+read-only** — every finding is a log line plus a counter, nothing is repaired.
+Dispatches on the actual type of `<backend>`:
+
+- **duostore**: meta-driven — reads back every extent of every object and every
+  in-flight multipart part, recomputes crc32c per extent against the manifest
+  (independent of the `verify_chunk_crc` switch), and reconciles the
+  chunk/rados refs ledger against the manifests in both directions;
+- **localfs / xlocalfs**: re-reads every object and compares the recomputed MD5
+  with the stored ETag (multipart composites recomputed over the recorded part
+  layout; legacy objects without one count as unverifiable);
+- other types (memory/cloudproxy/tiered) error out;
+- **S3 Tables catalog reconciliation** (appended when `tables.enabled` is set and
+  `<backend>` is the default backend,
+  [s3-tables-design.md §16 ③](../architecture/s3-tables-design.md)): the table-bucket
+  markers in `.sys/tables/` and the catalog state in `.sys/tables-catalog/<bucket>/` are
+  checked against the table buckets themselves: `tables.orphan_state` (the bucket behind a
+  marker or catalog state does not exist / is not enabled), `tables.dangling_pointer` (a
+  table pointer names a metadata object that does not exist), `tables.stale_renaming` (a
+  table is RENAMING but its intent is gone), `tables.inconsistent_rename` (the intent's
+  phase disagrees with the source / destination entries), `tables.malformed_entry`.
+  Details land in `stats.tables` of the outcome, one finding each; repair goes through
+  `POST …/tables/{t}/catalog/recovery`, fsck itself changes no object. The online
+  `POST /-/admin/fsck/<default backend>` carries the same check.
+
+Exit codes: `0` clean; `1` when integrity findings exist (duostore's
+corrupt/unreadable/refs_missing/meta_errors, localfs's mismatches/read_errors,
+every tables finding).
+Warning-grade counters (refs_stale, unverifiable, orphan sidecars) are logged
+without affecting the exit code — refs_stale can be a transient artifact of an
+MPU completing mid-scrub; re-run to confirm. Safe against a live instance too
+(on duostore at the cost of GC standing still for the duration).
+
+```bash
+./build/lights3 fsck duodata --max-mbps=100 --config=/etc/lights3/lights3.yaml
+./build/lights3 fsck localdata -c /etc/lights3/lights3.yaml && echo clean
+```
+
+### 2.4 Background tasks on demand: `duostore gc|scan|quarantine`, `tier scan|gc|reconcile|quarantine`
+
+CLI exits for the background hooks (roadmap §3.2): `run_gc_once` /
+`run_orphan_scan_once` / `scan_once` / tiered `run_gc_once` /
+`run_reconcile_once` used to be reachable only through timers and unit tests —
+an operator wanting space back *now* had to wait for the next tick (GC every
+5min, orphan scan and reconciliation daily by default). Same pattern as
+dump/load: build the backends, listen on nothing, run one round, exit; stats go
+to the log. **Exit code is plain 0/1 (success/exception)** — loss signals like
+refs_missing are LOG_ERROR'd as always but do not change the exit code; the
+integrity-verdict surface is `lights3 fsck`.
+
+- `duostore gc <backend>`: one full GC round (mpu_ttl cleanup → gcq
+  consumption → aged sealing + compaction → whole-empty-pack deletion,
+  [storage/duostore-core.md §8.1](../../architecture/storage/duostore-core.md)). Local meta
+  engines (rocksdb/sqlite) hold a file lock, so stop the server first; shared
+  engines (redis/tikv) can run next to live gateways — the GC lease
+  coordinates. A `gc_enabled=false` (secondary gateway) config does not gate
+  the manual hooks.
+- `duostore scan <backend>`: one orphan-scan round (two-way reconciliation of
+  the disk against refs/packstat, §8.3); also prints chunk/pack on-disk usage.
+- `duostore quarantine list <backend>`: print the corrupt-pack quarantine
+  ledger (pack id / live and corrupt record counts / entry time / purged,
+  [storage/duostore-core.md §8.6](../../architecture/storage/duostore-core.md));
+  `duostore quarantine release <backend> <pack_id>` drops the entry so
+  compaction retries (use after restoring the pack file from backup);
+  `duostore quarantine purge <backend> <pack_id>` deletes the pack file while
+  keeping the accounting (accepting the loss of its remaining corrupt records;
+  refused while an in-flight reader pins the pack) — delete the owning objects
+  afterwards and regular GC retires the rest. Pack ids accept the 16-digit hex
+  the logs print, 0x-prefixed hex, or decimal.
+- `tier scan <backend>`: one scan round (the first after startup and every
+  `full_scan_interval` is a full enumeration, the rest are time-wheel
+  incremental rounds): coldness detection + watermark reclamation + crash
+  recovery + access-record flush; the round's `TierScanStats` go to the log;
+- `tier gc <backend>`: consume one round of the tiered GC queue (orphan cloud
+  replica deletion; exponential backoff persists with each entry);
+- `tier reconcile <backend>`: one bidirectional local/cloud reconciliation
+  (cloud-has-it-local-doesn't → rebuild the stub; local-remote-cloud-missing →
+  warn, never delete the stub); findings that repeat go to the quarantine
+  ledger and alert once;
+- `tier quarantine list <backend>`: print the quarantine ledger (kind / bucket /
+  key / etag / first and last sighting / count);
+  `tier quarantine forget <backend> <bucket> <key>` drops the entry only (it
+  returns next round if the finding still reproduces);
+  `tier quarantine purge <backend> <bucket> <key>` resolves a `refs_missing`
+  finding: after a HEAD confirms the cloud copy is still gone it deletes the
+  dead local stub (acknowledged data loss, the object leaves listings; if the
+  copy is back the stub stays, the entry is dropped and the exit code is 1).
+  See [tiered-design.md §9](../architecture/storage/tiered-design.md).
+
+```bash
+./build/lights3 duostore gc duodata --config=/etc/lights3/lights3.yaml   # reclaim space now
+./build/lights3 tier reconcile tierdata -c /etc/lights3/lights3.yaml
+./build/lights3 tier quarantine list tierdata -c /etc/lights3/lights3.yaml
+./build/lights3 tier quarantine purge tierdata archive photos/2024/a.jpg -c /etc/lights3/lights3.yaml
+```
+
+### 2.5 Configuration hot reload: `SIGHUP`
+
+`kill -HUP <pid>` makes the server re-read the file given by `--config`
+(roadmap §4.4, [config-reload.md](config-reload.md)): after validating it as a
+whole, only the hot-reloadable subset is applied (log level,
+`log.slow_request_threshold`, `request_timeout`/`transfer_stall_timeout`,
+`http.metrics_access`, `max_inflight_requests`,
+`min_part_size`, rate limits, bucket routing rules, adding / removing backend
+instances, TLS certificate contents);
+every other change is WARNed as "needs a restart", and a file that fails
+validation changes nothing. A systemd unit can use
+`ExecReload=/bin/kill -HUP $MAINPID`. The same action is available through
+`lights3-ctl reload` (§3.9), which also returns the report.
+
+### 2.6 `tables export` / `tables import`
+
+Moves the S3 Tables catalog state between the two backings
+([s3-tables-design.md §12](../architecture/s3-tables-design.md), `tables.catalog_backing: object |
+duostore`). Offline: the backends are built, nothing listens; stop every gateway
+first.
+
+```bash
+lights3 tables export catalog.jsonl --config=/etc/lights3/lights3.yaml                 # reads the configured backing
+lights3 tables import catalog.jsonl --backing=duostore --config=/etc/lights3/lights3.yaml
+```
+
+One `{"bucket","key","body"}` per line: `key` is the catalog key both backings
+share (`tables-catalog/<bucket>/…`), `body` the object's JSON; import overwrites
+the same key. Table-bucket markers (`.sys/tables/`) are not included -- both
+backings read `.sys`. `--backing` overrides the configured value, so a migration
+is "export with the old configuration → change it → import".
+
+## 3. `lights3-ctl` — ops CLI
+
+`src/tools/lights3_ctl*.cc`, built next to `lights3`. Command groups: `cred`
+(credential admin plane), `website` (bucket static-website configuration),
+`bench` (load testing), `fsck` (online object verification), `quota` (bucket
+quotas), `tenant` (tenants and bucket ownership), `usage` (usage counters;
+roadmap §3.9, see [multi-tenancy.md](../architecture/multi-tenancy.md)), `reload`
+(configuration hot reload, [config-reload.md](config-reload.md)), `object` (object
+internal layout, §3.10), `mpu` (zombie multipart cleanup, §3.11), `duostore` / `tier`
+(background rounds and quarantine ledgers on a live gateway, §3.12), `tables` (S3 Tables
+catalog: table buckets, listing, maintenance, diagnostics, §3.13). Every subcommand
+signs its own SigV4 requests against the lights3 HTTP endpoint; no aws cli
+needed.
+
+### 3.1 Connection and credential options (shared by every leaf)
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `-e, --endpoint=<url>` | `http://127.0.0.1:9000` | `scheme://host[:port]`; https needs a build with OpenSSL. When the server has `http.admin_port`, the admin listener serves only `/-/` paths and the data-plane port answers 404 for them (and vice versa): the commands that use `/-/admin/*` — `cred` / `tenant` / `usage` / `reload` / `object` / `fsck --offline|--status` / `duostore` / `tier` / `tables plan|run` — must point at the **admin port**; those that use the S3 face or `/iceberg/v1` — `website` (`?website`) / `quota` (`?quota`) / `mpu` / `bench` / online `fsck <bucket>` / the other `tables` subcommands — use the **data-plane port** ([http-adapter.md §2.1](../architecture/http-adapter.md)) |
+| `--ak=<key>` / `--sk=<key>` | env | fall back to `LIGHTS3_ADMIN_AK` / `LIGHTS3_ADMIN_SK`; prefer env for the SK (argv is visible to local `ps`) |
+| `--region=<r>` | `us-east-1` | SigV4 region; must match the server's `auth.region` |
+| `--insecure` | false | skip certificate verification for https (self-signed deployments) |
+| `--timeout-sec=<n>` | 10 | connect/read/write timeout |
+| `--cert=<pem>` / `--key=<pem>` | none | client certificate and private key for listeners with `tls_client_auth: optional\|require` ([tls.md §2.1](tls.md)); must be given together |
+
+`website`, `quota set/clear` and the mutating `tenant` commands require the
+**root static credential** (an entry in the config's `auth.credentials`, see
+[credential-management.md §3](../architecture/credential-management.md)); `cred`,
+`tenant list/get` and `usage` also accept a **tenant admin** (scoped to its
+own tenant, [multi-tenancy.md §4.4](../architecture/multi-tenancy.md)); other credentials get
+403. `bench` works with any credential allowed on the target bucket.
+
+```bash
+export LIGHTS3_ADMIN_AK=AKIDEXAMPLE
+export LIGHTS3_ADMIN_SK=my-secret
+```
+
+### 3.2 `cred` — credential management
+
+One subcommand per `/-/admin/credentials` endpoint plus three for the
+`/-/admin/tls-identities` certificate bindings; the JSON response is printed
+verbatim to stdout.
+
+```text
+lights3-ctl cred list                          list all credentials (SK masked; static/file/dynamic sources)
+lights3-ctl cred get <ak> [-s|--show-secret]   show one credential; --show-secret returns the plaintext SK
+                                         (dynamic/file credentials only; the server writes an audit line)
+lights3-ctl cred create [-c|--comment=<text>] [-p|--policy=<json>|@<file>] [-t|--tenant=<id>] [-r|--role=user|admin]
+                                         create an AK/SK pair (the only time the full SK is returned); --tenant sets the
+                                         owning tenant (pinned server-side when a tenant admin calls, so it may be omitted),
+                                         --role=admin grants that tenant's admin plane
+lights3-ctl cred delete <ak>                   revoke a dynamic credential (static ones belong to the config; refused)
+lights3-ctl cred bind-cert <ak> -S|--subject=<subject> [-c|--comment=<text>]
+                                         bind a client-certificate subject (the CN, or the URI SAN under
+                                         auth.tls_identity: san-uri) to a credential: unsigned requests over that
+                                         certificate run as the credential, signed ones must be of the same tenant
+                                         (tls.md §2.1); root only, rebinding replaces (201 created / 200 replaced)
+lights3-ctl cred unbind-cert -S|--subject=<subject>
+                                         remove a binding (idempotent); root only
+lights3-ctl cred list-certs                    list every binding and the server's auth.tls_identity mode; root only
+```
+
+`--policy` takes inline JSON or `@file`, shaped
+`{"buckets":[...],"prefixes":[...],"readonly":bool,"actions":[...]}`; semantics
+in [credential-management.md §11](../architecture/credential-management.md).
+
+```bash
+lights3-ctl cred create --comment=tenant-a --policy='{"buckets":["tenant-a-*"],"readonly":false}'
+lights3-ctl cred create -c ci-runner -p @policies/ci.json
+lights3-ctl cred get L3AK7Q2MXX5EIY4BJZW3 --show-secret
+lights3-ctl cred list --endpoint=https://s3.example.com --insecure
+lights3-ctl cred delete L3AK7Q2MXX5EIY4BJZW3
+lights3-ctl cred create --tenant=acme --role=admin --comment='acme operator'
+lights3-ctl cred bind-cert L3AK7Q2MXX5EIY4BJZW3 --subject=alice --endpoint=https://s3.example.com --cert=ops.crt --key=ops.key
+lights3-ctl cred bind-cert L3AK7Q2MXX5EIY4BJZW3 --subject=spiffe://example.org/ns/prod/sa/api   # san-uri mode
+lights3-ctl cred unbind-cert --subject=alice
+```
+
+### 3.3 `website` — bucket static-website configuration
+
+Drives the `?website` subresource ([static-website.md §4](static-website.md)).
+After `set` the bucket is anonymously readable (GET/HEAD objects only) with
+index/error document semantics; buckets configured statically in the YAML
+refuse dynamic changes (405).
+
+```text
+lights3-ctl website get <bucket>                            print the configuration XML (404 when unset → exit 1)
+lights3-ctl website set <bucket> [-i|--index-suffix=<s>] [-k|--error-key=<key>]
+                                                      enable/replace; index-suffix defaults to index.html and
+                                                      must not contain '/'; empty error-key = built-in error page
+lights3-ctl website delete <bucket>                         remove the configuration (idempotent); no longer anonymous
+```
+
+```bash
+lights3-ctl website set my-site --index-suffix=index.html --error-key=404.html
+lights3-ctl website get my-site
+lights3-ctl website delete my-site
+```
+
+### 3.4 `bench` — load testing
+
+Closed-loop benchmarks of the data plane (put/get) and non-IO APIs
+(stat/list/list-buckets): `--concurrency` workers, one connection each, loop
+over a pool of `--objects` keys under `--prefix` for `--duration-sec` seconds;
+one interval stats line per second, then a summary (ops, ops/s, MiB/s,
+avg/p50/p90/p99/max latency).
+
+```text
+lights3-ctl bench put           upload (round-robin overwrite across the pool)
+lights3-ctl bench get           download (uploads the pool first)
+lights3-ctl bench stat          HeadObject (uploads the pool first)
+lights3-ctl bench list          ListObjectsV2 (uploads the pool first; --max-keys per page)
+lights3-ctl bench list-buckets  ListBuckets (no --bucket needed)
+```
+
+| Option | Default | Range / meaning |
+| --- | --- | --- |
+| `-b, --bucket=<name>` | — | target bucket, created if missing; required except for `list-buckets` |
+| `-j, --concurrency=<n>` | 4 | 1–256 |
+| `-d, --duration-sec=<n>` | 10 | 1–86400 |
+| `-n, --objects=<n>` | 64 | 1–1000000, key pool size |
+| `-s, --size=<sz>` | put/get `1M`, stat/list `4K` | bytes or K/M/G suffix, max 1G |
+| `--prefix=<p>` | `lights3-ctl-bench/` | key prefix |
+| `--max-keys=<n>` | 100 | `list` only |
+| `--keep` | false | keep the objects instead of deleting the pool at the end |
+| `-o, --output=text\|json` | `text` | `json`: stdout carries exactly one JSON object (mode, wall_s, workers, keys, size, ops, errors, ops_per_s, mib_per_s, latency_ms{avg,p50,p90,p99,max}); the per-second table and the prepare/cleanup notes move to stderr — the baseline-comparison input of `scripts/bench_gate.sh` (roadmap §6.2) |
+
+The first error is printed to stderr (`lights3-ctl: bench: first error: …`); later
+ones only increment the err counter. A failure in the prepare phase (bucket
+creation / pre-upload) exits `1` immediately.
+
+```bash
+lights3-ctl bench put --bucket=test --size=4M --concurrency=8 --duration-sec=30
+lights3-ctl bench get -b test -s 4M -j 8 -d 30 --keep
+lights3-ctl bench stat -b test -j 16
+lights3-ctl bench list -b test -n 10000 --max-keys=1000
+lights3-ctl bench list-buckets -j 16
+```
+
+### 3.5 `fsck` — online object verification / server-side scrub
+
+**`--offline <backend>`** (backlog-sequence ③): instead of the S3 API, ask the
+**running gateway** to scrub one backend (duostore manifest/crc/refs
+reconciliation, localfs/xlocalfs ETag full-verify -- the same implementation as
+`lights3 fsck`) through the admin plane:
+
+```text
+POST /-/admin/fsck/<backend>[?max_mbps=N]   root; 202 {"backend","job_id","running":true}
+                                            409 ScrubInProgress = a round is already running there
+                                            404 unknown backend; 400 the type has no offline scrub (memory/cloudproxy/tiered)
+GET  /-/admin/fsck/<backend>                200 {"running","job_id","started_at_ms","max_mbps",
+                                                 after completion also "finished_at_ms","duration_ms","kind","findings","aborted","stats"{…}}
+```
+
+`lights3-ctl fsck --offline <backend> [--max-mbps=N] [--no-wait]` starts a round,
+polls every 0.5 s until it ends and prints the outcome document; exit code 1
+when `findings > 0` (duostore: corrupt + unreadable + refs_missing +
+meta_errors; localfs: etag_mismatches + read_errors) or `aborted`;
+`--no-wait` prints the job id and returns; `lights3-ctl fsck --status <backend>`
+only queries. One job per backend at a time; a gateway shutdown interrupts a
+running scrub (`aborted: true`). Throttling is the offline CLI's
+`scrub_throttle.h`. Audit event `fsck.start`.
+
+```bash
+lights3-ctl fsck --offline duodata --max-mbps=200     # wait, print the JSON outcome
+lights3-ctl fsck --offline localdata --no-wait        # just the job id
+lights3-ctl fsck --status localdata                   # progress / last outcome
+```
+
+The online mode below keeps its semantics:
+
+The online complement of `lights3 fsck` (§2.3): end-to-end verification through
+the S3 API — ListObjectsV2 page by page, then a streaming GET per object with
+the MD5 recomputed client-side and compared against the ETag, which also
+exercises the gateway read path itself. Multipart composite ETags are
+recomputed part by part via `GET ?partNumber=i` (objects the server has no
+recorded layout for return 501 and count as UNVERIFIABLE, never MISMATCH).
+Read-only; any credential that can read the bucket works. The cost is pulling
+every byte over HTTP — the deep check (duostore crc/refs reconciliation) still
+needs server-side `lights3 fsck`.
+
+```text
+lights3-ctl fsck <bucket> [-p|--prefix=<p>] [--max-mbps=<n>]
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `-p, --prefix=<p>` | — | only verify keys under this prefix |
+| `--max-mbps=<n>` | `0` | download throttle in MB/s, `0` = unthrottled |
+
+Prints one `MISMATCH <key>` line per finding (stdout) / transport errors
+(stderr), then a summary line (objects/bytes/mismatches/errors/unverifiable/
+skipped; skipped = objects deleted between list and GET). Exit codes: `0`
+clean; `1` mismatches or errors.
+
+```bash
+lights3-ctl fsck my-bucket --endpoint=https://s3.example.com
+lights3-ctl fsck my-bucket --prefix=photos/ --max-mbps=50
+```
+
+### 3.6 `quota` — bucket quotas
+
+Drives the `?quota` subresource ([multi-tenancy.md §3](../architecture/multi-tenancy.md)).
+`set` replaces the limit as a whole and needs at least one axis > 0; `get`
+works for any credential allowed on the bucket, `set`/`clear` are root only.
+Writes over the limit get `QuotaExceeded` (403).
+
+```text
+lights3-ctl quota get <bucket>                                    print the quota XML (none set: 404 -> exit 1)
+lights3-ctl quota set <bucket> [-b|--max-bytes=<sz>] [-o|--max-objects=<n>]
+                                                            set/replace; sz accepts KiB/MiB/GiB suffixes, 0 = that axis unlimited
+lights3-ctl quota clear <bucket>                                  remove the quota (idempotent)
+```
+
+```bash
+lights3-ctl quota set logs --max-bytes=50GiB --max-objects=1000000
+lights3-ctl quota get logs
+lights3-ctl quota clear logs
+```
+
+### 3.7 `tenant` — tenants and bucket ownership
+
+Drives `/-/admin/tenants` ([multi-tenancy.md §6](../architecture/multi-tenancy.md)).
+Mutations are root only; `list`/`get` also work for a tenant admin on its own
+tenant. The JSON response is printed verbatim.
+
+```text
+lights3-ctl tenant list                                            list tenants (quota, owned buckets, aggregate usage, credential count)
+lights3-ctl tenant get <id>                                        one tenant
+lights3-ctl tenant create <id> [--display-name=<s>] [--max-bytes=<sz>] [--max-objects=<n>] [--max-buckets=<n>]
+                                                             create; id matches [a-z0-9][a-z0-9._-]{0,63}
+lights3-ctl tenant update <id> [--display-name=<s>] [quota flags | --clear-quota]
+                                                             the quota is replaced as a whole: axes not given become unlimited
+lights3-ctl tenant delete <id>                                     refused (409) while it still owns buckets or has credentials
+lights3-ctl tenant assign <id> <bucket> [--force]                  make an existing bucket the tenant's; --force to take it from another tenant
+lights3-ctl tenant unassign <id> <bucket>                          detach (the bucket becomes unowned)
+```
+
+```bash
+lights3-ctl tenant create acme --display-name='ACME Corp' --max-bytes=1TiB --max-buckets=20
+lights3-ctl tenant assign acme legacy-logs
+lights3-ctl tenant get acme
+```
+
+### 3.8 `usage` — usage counters
+
+Reads `/-/admin/usage` ([multi-tenancy.md §2](../architecture/multi-tenancy.md)). Root sees
+every bucket, a tenant admin its own tenant's; `--rescan` runs a synchronous
+full count of one bucket and prints the result (refused when
+`usage.enabled=false`).
+
+```text
+lights3-ctl usage [bucket] [-r|--rescan] [-t|--tenant=<id>]
+```
+
+```bash
+lights3-ctl usage                       # every bucket: objects / bytes / mpu_bytes / scanned_at
+lights3-ctl usage --tenant=acme         # only buckets owned by acme (root)
+lights3-ctl usage logs --rescan         # recount the logs bucket now
+```
+
+### 3.9 `reload` — configuration hot reload
+
+CLI wrapper of `POST /-/admin/config/reload` (root only): the same path as
+`SIGHUP`, but the outcome comes back to the caller — `applied` (in effect now,
+including `backends: added <name> (<type>)` / `backends: removed <name> (closing
+after in-flight requests drain)`) and `requires_restart` (changed on disk, needs
+a restart). A file that fails validation, a new backend that does not construct,
+or removing a backend still referenced by a tiered entry or a running fsck job
+answers 400 and the command exits 1.
+
+```text
+lights3-ctl reload
+```
+
+```bash
+lights3-ctl reload --endpoint=https://s3.example.com
+```
+
+### 3.10 `object` — object internal layout (roadmap §6.2)
+
+CLI wrapper of `GET /-/admin/objects/<bucket>/<key>` (root only): prints where the
+object's bytes live inside the backend it routes to, so troubleshooting no longer
+means reading logs or hexdumps.
+
+```text
+lights3-ctl object inspect <bucket> <key> [-o|--output=json|text]
+```
+
+What each engine reports:
+
+| Engine | attrs | extents |
+| --- | --- | --- |
+| localfs / xlocalfs | `data_path`, `inode`, `on_disk_bytes` vs `logical_size`, `etag`, `content_type`, `last_modified`, `meta_xattr` (present/absent), `sidecar`, `tier` (plus `remote_etag`/`remote_at` for a stub) | one `file` (id = inode) |
+| duostore | `meta_version`, `tier`, extent count, `stored_bytes`, … | per extent: `kind` (chunk/pack/rados), `id` (file/object number), `offset`, `length`, `crc32c` |
+| tiered | the tiering view `tier`/`local_bytes`/`local_mtime` (+ `remote_*`) and `local_engine`, then every attr of the local engine under the `local.` prefix | the local engine's extents |
+| memory / cloudproxy | `layout: null` + `note` | — |
+
+```bash
+lights3-ctl object inspect photos 2026/01/a.jpg              # the server's JSON verbatim
+lights3-ctl object inspect photos 2026/01/a.jpg -o text      # table
+```
+
+### 3.11 `mpu` — zombie multipart cleanup (roadmap §6.2)
+
+Over the standard S3 API (ListMultipartUploads / AbortMultipartUpload): any
+credential allowed on the bucket works, no admin plane involved. `list` walks
+every page and prints one line per upload (initiated, age, uploadId, key);
+`--older-than` / `--prefix` define the selection and `abort --all` acts on the
+same selection.
+
+```text
+lights3-ctl mpu list <bucket> [--prefix=<p>] [--older-than=<dur>] [-o text|json]
+lights3-ctl mpu abort <bucket> <key> <upload-id>
+lights3-ctl mpu abort <bucket> --all [--prefix=<p>] [--older-than=<dur>]
+```
+
+```bash
+lights3-ctl mpu list photos --older-than=1d
+lights3-ctl mpu abort photos --all --older-than=7d          # an already-gone upload (404) counts as done
+```
+
+### 3.12 `duostore` / `tier` — background rounds and quarantine ledgers on a live gateway
+
+The background rounds of §2.4 (duostore GC / orphan scan, tiered scan / GC /
+reconciliation) run once, right now, **inside the running gateway** -- no second
+process: a local meta engine (rocksdb/sqlite) holds a file lock, so the offline
+`lights3 duostore gc` needs downtime, whereas this borrows the gateway's own
+backend instances. Same job model as `fsck --offline` (`app/admin_jobs.h`):
+POST starts, 202 carries the job id, GET polls; **one job per backend at a
+time, whatever the operation** (the rounds share the backend's maintenance
+state, so a running fsck refuses a gc too), 409 code `JobInProgress` (fsck keeps
+`ScrubInProgress`). The quarantine ledgers are read-only here: `release` /
+`purge` / `forget` stay with the offline CLI.
+
+```text
+POST /-/admin/duostore/<backend>/gc|scan            root; 202 {"backend","op","job_id","running":true,"busy":true}
+POST /-/admin/tier/<backend>/scan|gc|reconcile      409 JobInProgress = a job (of any op) already runs on that backend
+                                                    404 unknown backend; 400 no such op in the group / backend of another type
+GET  /-/admin/duostore/<backend>/gc|scan            200 {"backend","op","running","busy","job_id","started_at_ms",
+GET  /-/admin/tier/<backend>/scan|gc|reconcile           after completion also "finished_at_ms","duration_ms","kind","findings","aborted","stats"{…}}
+GET  /-/admin/duostore/<backend>/quarantine         200 {"backend","kind":"duostore","entries":[{"pack_id","live_recs","corrupt_records","quarantined_at_ms","purged"}]}
+GET  /-/admin/tier/<backend>/quarantine             200 {"backend","kind":"tiered","entries":[{"kind","bucket","key","etag","first_seen_ms","last_seen_ms","count"}]}
+```
+
+Every operation keeps its own most recent document (`running` refers to that
+operation, `busy` to any operation on the backend); `stats` mirrors the
+matching `*Stats` struct field by field (`DuoGcStats` / `DuoOrphanStats` /
+`TierScanStats` / `TierGcStats` / `TierReconcileStats`) and `findings` sums its
+loss signals: duostore gc = `records_corrupt + packs_quarantined`, duostore
+scan = `refs_missing + pack_stats_missing`, tier reconcile = `refs_missing`,
+tier scan / gc always 0. A gateway shutdown interrupts a running round
+(`aborted: true`). Audit event `<group>.<op>.start`.
+
+```text
+lights3-ctl duostore gc|scan <backend> [--no-wait | --status]
+lights3-ctl duostore quarantine list <backend>
+lights3-ctl tier scan|gc|reconcile <backend> [--no-wait | --status]
+lights3-ctl tier quarantine list <backend>
+```
+
+The same driver as `fsck --offline` (`lights3_ctl_jobs.cc`): start, poll every
+0.5 s until the job ends, print the outcome document; exit code **1 = the job
+threw / `aborted` / `findings > 0`** (note this differs from the offline
+`lights3 duostore|tier` commands' fixed 0/1 -- the online entry follows the
+fsck verdict convention so scripts can branch on it); `--no-wait` prints the
+202 document and returns; `--status` only queries. `quarantine list` prints
+the ledger JSON verbatim.
+
+```bash
+lights3-ctl duostore gc duodata                   # reclaim space now, print DuoGcStats when done
+lights3-ctl duostore scan duodata --no-wait       # just the job id
+lights3-ctl tier reconcile tierdata               # exit 1 when refs_missing > 0
+lights3-ctl tier scan tierdata --status           # progress / last outcome
+lights3-ctl tier quarantine list tierdata
+```
+
+### 3.13 `tables` — S3 Tables catalog: table buckets, listing, maintenance, diagnostics
+
+The operator's entry to [s3-tables-design.md](../architecture/s3-tables-design.md) (implementation
+notes in [s3-tables-design.md §16 ④](../architecture/s3-tables-design.md)). Catalog calls go to
+`<prefix>/v1/...` (`--catalog-prefix`, default `/iceberg`, i.e. `tables.path_prefix`),
+signed with service `s3`; `plan` / `run` are admin-plane jobs (root credential) on
+the same job model as §3.12 (202 + job id, polled every 0.3 s until done, the
+outcome document printed). Tables are given as `<namespace>.<table>`, nested
+namespaces joined with `.`.
+
+```text
+lights3-ctl tables enable|disable|status <bucket>          PUT / DELETE / GET <prefix>/v1/buckets/<bucket> (enable / disable need root)
+lights3-ctl tables list <bucket> [--namespace=a.b] [--json] one "<namespace>\t<table>" per line; without --namespace the whole tree
+lights3-ctl tables config <bucket> <ns.table> [--set=<json>]
+                                                            GET / PUT …/maintenance/config: effective / table-config / defaults;
+                                                            --set keys: retain_recent_metadata_files delete_enabled max_snapshot_age_ms
+                                                            min_snapshots_to_keep orphan_cleanup (omitted keys fall back to tables.maintenance)
+lights3-ctl tables plan <bucket> <ns.table> [--no-wait]     POST /-/admin/tables/<bucket>/<ns levels>/<table>/plan, read-only; "stats" is the plan
+lights3-ctl tables run <bucket> <ns.table> [--plan-job=<id>] [--yes] [--no-wait]
+                                                            runs the latest plan (or --plan-job): snapshot expiry is an ordinary commit;
+                                                            candidate files are deleted only with delete_enabled, and refused outright
+                                                            without --yes (exit 2); a table that changed since the plan → StalePlan
+lights3-ctl tables purge <bucket> <ns.table> --yes [--no-wait]
+                                                            DELETE …?purgeRequested=true: tombstone first, then the job removes the
+                                                            reserved directory, the location prefix, commit records and the tombstone;
+                                                            irreversible, --yes is mandatory
+lights3-ctl tables diagnose <bucket> <ns.table>            GET …/catalog/diagnostics (③)
+lights3-ctl tables recover <bucket> <ns.table> [--prune]   POST …/catalog/recovery (③)
+```
+
+Exit codes: 0 success; 1 request failed or job `error`; 2 usage error (including
+`run` / `purge` without `--yes`). A table whose plan says `manual-review: true` is
+refused by the server on `run` (400) -- read `notes` first (a ref with its own
+retention rules, table properties conflicting with the maintenance
+configuration, manifest parse failures, ...).
+
+```bash
+lights3-ctl tables enable lake
+lights3-ctl tables list lake
+lights3-ctl tables config lake sales.orders --set='{"delete_enabled":true,"max_snapshot_age_ms":432000000}'
+lights3-ctl tables plan lake sales.orders          # candidates and the snapshots to expire
+lights3-ctl tables run lake sales.orders --yes      # expiry commit + candidate deletion
+lights3-ctl tables purge lake sales.tmp --yes
+```
+
+## 4. Conventions for adding subcommands
+
+- One source file per command group (`lights3_ctl_<group>.cc/.h`, `make_<group>()`
+  returns the group root), added in `lights3_ctl.cc` via `add_subcommand`;
+  connection options are reused through `add_conn_flags` / `read_conn_opts`
+  in `lights3_ctl_common.h`. Groups built on one mechanism may share a file
+  (`duostore` / `tier` live with the `fsck --offline` job driver in
+  `lights3_ctl_jobs.cc`).
+- Callbacks return nothing; the exit code travels through `lights3_ctl::g_exit`
+  following the 0/1/2 convention in §1; positionals are read from `c->args()`
+  and count-checked by the command itself.
+- Server-side ops entry points live in the command tree of the `lights3` binary
+  (e.g. `duostore`), split the same way: `src/main.cc` keeps only the root
+  command and `main`, each command group is one `src/cli/cli_<group>.cc/.h`
+  (`make_<group>()`), and the shared helpers (`--config`, `<backend>` parsing,
+  `g_exit`) sit in `src/cli/cli_common.h`. Groups are registered only inside
+  their compile-time switch (`cli_duostore.cc` is compiled only under
+  `LIGHTS3_DUOSTORE`) so that trimmed builds never expose an unusable command.

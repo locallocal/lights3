@@ -1,4 +1,5 @@
-// L4: process-wide timer thread; the foundation for timeout primitives like with_timeout (docs/concurrency.md §2/§5)
+// L4: process-wide timer thread; the foundation for timeout primitives like with_timeout
+// (docs/architecture/concurrency.md §2/§5)
 #pragma once
 
 #include <array>

@@ -1,5 +1,5 @@
 // L4: blocking-IO thread pool; coroutines hop onto pool threads via
-// co_await pool.schedule() (docs/concurrency.md §3: bounded queue + backpressure,
+// co_await pool.schedule() (docs/architecture/concurrency.md §3: bounded queue + backpressure,
 // depth/wait-time metrics, §5 cancellation)
 #pragma once
 
@@ -95,7 +95,7 @@ public:
         }
     };
     // On token cancellation: tasks still queued are resumed with an
-    // OperationCancelled exception (docs/concurrency.md §5); a blocking section
+    // OperationCancelled exception (docs/architecture/concurrency.md §5); a blocking section
     // already running on a pool thread is not preempted — the caller checks the
     // token after it returns naturally
     ScheduleAwaiter schedule(CancelToken token = {}) { return {*this, std::move(token), nullptr}; }

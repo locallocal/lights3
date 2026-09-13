@@ -1,5 +1,5 @@
 // lights3-ctl `quota` command group: bucket quotas via the ?quota subresource
-// (docs/multi-tenancy.md §3). Implementation in lights3_ctl_quota.cc.
+// (docs/architecture/multi-tenancy.md §3). Implementation in lights3_ctl_quota.cc.
 #pragma once
 
 #include <ccmd.h>

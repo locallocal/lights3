@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Performance baseline matrix (roadmap §4.3, docs/performance-baseline.md):
+# Performance baseline matrix (roadmap §4.3, docs/development/performance-baseline.md):
 # `lights3-ctl bench put|get` against one gateway per (driver × TLS) cell, localfs
 # backend on a scratch directory, results as a Markdown table plus one JSON
 # line per cell. Drivers not compiled into the binary are skipped.

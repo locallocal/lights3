@@ -400,7 +400,7 @@ std::vector<BucketInfo> RocksMetaStore::list_buckets_snap(const rocksdb::Snapsho
     return out;
 }
 
-// ---------- KV facade (docs/s3-tables-design.md §12) ----------
+// ---------- KV facade (docs/architecture/s3-tables-design.md §12) ----------
 
 std::optional<KvItem> RocksMetaStore::kv_get(std::string_view key) {
     auto v = get_raw(kTc, key);

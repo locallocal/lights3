@@ -1,5 +1,5 @@
-// L2: mTLS identity mapping (backlog-sequence ⑥, docs/tls.md §2.1,
-// docs/multi-tenancy.md §4.2) -- two halves in one file:
+// L2: mTLS identity mapping (backlog-sequence ⑥, docs/usage/tls.md §2.1,
+// docs/architecture/multi-tenancy.md §4.2) -- two halves in one file:
 //   1. verify_identity / enforce_tls_tenant: the dispatch-side rules. A verified
 //      client certificate whose selected subject (auth.tls_identity) is bound to
 //      a credential stands in for the SigV4 signature on an unsigned request

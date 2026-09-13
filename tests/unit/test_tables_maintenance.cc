@@ -1,4 +1,4 @@
-// Table maintenance (docs/s3-tables-design.md §9, §13):
+// Table maintenance (docs/architecture/s3-tables-design.md §9, §13):
 // planner (retention set, snapshot expiry, orphans), runner (StalePlan, delete gate,
 // safety window), purge, the periodic runner and the resource-level job framework
 #include <chrono>

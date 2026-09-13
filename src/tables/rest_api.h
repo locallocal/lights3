@@ -1,4 +1,4 @@
-// Iceberg REST catalog surface (docs/s3-tables-design.md §6): path
+// Iceberg REST catalog surface (docs/architecture/s3-tables-design.md §6): path
 // matching, JSON codec, authorization mapping onto (bucket, key, Action) and
 // the error envelope. Independent of s3/service.h -- dispatch injects what it needs
 // through Hooks so the dependency runs service → tables only

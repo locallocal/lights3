@@ -92,7 +92,7 @@ inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
             meta.user_meta[lk.substr(11)] = v;
         }
     }
-    // AWS constraint on the redirect target (docs/static-website.md phase ③): the value is
+    // AWS constraint on the redirect target (docs/usage/static-website.md phase ③): the value is
     // served verbatim as a Location header on the anonymous website plane, so free-form
     // schemes (javascript:, data:) must never get in
     if (!meta.website_redirect.empty() && meta.website_redirect.front() != '/' &&
@@ -237,7 +237,8 @@ inline void require_content_length(const http::HttpRequest& req) {
         throw S3Error(S3ErrorCode::MissingContentLength, "You must provide the Content-Length HTTP header.");
 }
 
-// Read the entire request body (XML requests capped at 1MiB, docs/s3-protocol.md §4); over the cap throws MalformedXML
+// Read the entire request body (XML requests capped at 1MiB, docs/architecture/s3-protocol.md §4); over the cap throws
+// MalformedXML
 inline Task<std::string> read_body(http::HttpRequest& req, size_t max_size = 1024 * 1024) {
     std::string out;
     if (!req.body) co_return out;

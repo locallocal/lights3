@@ -1,4 +1,4 @@
-// L2: /-/admin/tenants and /-/admin/usage (roadmap §3.9 ①③, docs/multi-tenancy.md
+// L2: /-/admin/tenants and /-/admin/usage (roadmap §3.9 ①③, docs/architecture/multi-tenancy.md
 // §6). Tiered admin model:
 //   root (static credential)            everything
 //   tenant admin (role=admin)           read its own tenant, its buckets' usage,

@@ -44,7 +44,7 @@ struct ConnOpts {
     std::string region;
     int timeout_sec = 10;
     bool insecure = false;
-    // Client certificate for mTLS listeners (http.tls_client_auth, docs/tls.md §2.1)
+    // Client certificate for mTLS listeners (http.tls_client_auth, docs/usage/tls.md §2.1)
     std::string client_cert;
     std::string client_key;
 };

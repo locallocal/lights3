@@ -1,5 +1,5 @@
 // lights3-ctl `quota` command group — Get/Put/DeleteBucketQuota against the ?quota
-// subresource (docs/multi-tenancy.md §3). `set`/`clear` need the root credential;
+// subresource (docs/architecture/multi-tenancy.md §3). `set`/`clear` need the root credential;
 // `get` works for any credential admitted to the bucket. Responses print the
 // server's XML verbatim.
 #include "tools/lights3_ctl_quota.h"
@@ -99,7 +99,7 @@ namespace lights3_ctl {
 std::shared_ptr<ccmd::command> make_quota() {
     auto cmd = std::make_shared<ccmd::command>(
         "quota", "lights3-ctl quota set logs --max-bytes=50GiB", "lights3-ctl quota <command> [options]",
-        "Manage per-bucket quotas via the ?quota subresource (docs/multi-tenancy.md §3; "
+        "Manage per-bucket quotas via the ?quota subresource (docs/architecture/multi-tenancy.md §3; "
         "set/clear need the root static credential). Tenant-level quotas are set with "
         "`lights3-ctl tenant create|update`. Options must follow the leaf subcommand as "
         "--name=value.",

@@ -1,4 +1,4 @@
-// L2/L3 boundary: storage backend interface (see docs/storage/storage-backend.md)
+// L2/L3 boundary: storage backend interface (see docs/architecture/storage/storage-backend.md)
 // Error convention: backends throw s3::S3Error and are unaware of HTTP.
 #pragma once
 
@@ -47,7 +47,7 @@ struct ObjectMeta {
     std::string content_language;
     // HTTP-date text stored verbatim
     std::string expires;
-    // Website redirect (docs/static-website.md phase ③): echoed as a header on GET/HEAD
+    // Website redirect (docs/usage/static-website.md phase ③): echoed as a header on GET/HEAD
     // like the fields above; the anonymous website plane additionally answers 301 with
     // it as Location. Value must start with '/', 'http://' or 'https://' (checked at PUT)
     std::string website_redirect;
@@ -163,7 +163,7 @@ struct PutResult {
     std::string checksum_type{};
 };
 
-// Conditional PUT (docs/s3-protocol.md §6): the check and the commit must both happen
+// Conditional PUT (docs/architecture/s3-protocol.md §6): the check and the commit must both happen
 // inside the backend's own atomic commit point (commit critical section / metadata CAS)
 // -- a concurrent write inside an L2-level "head then put" window would break both the
 // overwrite-protection and optimistic-concurrency semantics, and cross-instance it does
@@ -350,7 +350,7 @@ struct IStorageBackend {
     virtual Task<void> delete_object(std::string_view bucket, std::string_view key) = 0;
     virtual Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) = 0;
 
-    // ---- multipart (docs/storage/storage-backend.md §1/§3.2) ----
+    // ---- multipart (docs/architecture/storage/storage-backend.md §1/§3.2) ----
     // Returns upload_id; meta carries the desired content_type/user_meta, applied at complete
     virtual Task<std::string> create_multipart(std::string_view bucket, std::string_view key, ObjectMeta meta) = 0;
     // part_no ∈ [1,10000]; re-uploading the same number is last-write-wins; returns the
@@ -392,7 +392,7 @@ struct IStorageBackend {
     virtual ~IStorageBackend() = default;
 };
 
-// Internal reserved bucket name (credential persistence, docs/credential-management.md §4.1).
+// Internal reserved bucket name (credential persistence, docs/architecture/credential-management.md §4.1).
 // Only validation calls with allow_reserved=true may pass -- i.e. only CredentialStore
 inline constexpr std::string_view kSysBucketName = ".sys";
 

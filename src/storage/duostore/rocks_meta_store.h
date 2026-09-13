@@ -1,4 +1,4 @@
-// L3: RocksDB implementation of IMetaStore (docs/storage/duostore-design.md §4).
+// L3: RocksDB implementation of IMetaStore (docs/architecture/storage/duostore-design.md §4).
 // Commit-type operations = a single WriteBatch (§4.5); compound cross-key
 // invariants are serialized with one std::mutex, while pure reads (get/list, via
 // snapshot) take no lock.
@@ -29,7 +29,7 @@ struct RocksMetaOptions {
     // whether commits WAL-fsync (§6.3 meta_sync)
     bool sync = true;
     size_t block_cache_bytes = 64ull << 20;
-    // Tuning knobs exposed (P5, docs/storage/duostore-design.md §11); defaults = RocksDB's
+    // Tuning knobs exposed (P5, docs/architecture/storage/duostore-design.md §11); defaults = RocksDB's
     // own defaults, so existing deployments keep their behavior. Compression is
     // always off (§13.3) and not exposed
     // memtable capacity per CF
@@ -99,7 +99,7 @@ public:
     // reads run against it. Borrows this store — destroy before close()
     std::unique_ptr<IMetaReadView> snapshot() override;
 
-    // KV facade (column family "tc"; docs/s3-tables-design.md §12)
+    // KV facade (column family "tc"; docs/architecture/s3-tables-design.md §12)
     std::optional<KvItem> kv_get(std::string_view key) override;
     std::string kv_put(std::string_view key, std::string_view value, PutCondition cond) override;
     bool kv_delete(std::string_view key) override;

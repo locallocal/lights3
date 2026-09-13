@@ -1,5 +1,5 @@
 // L3: minimal io_uring wrapper over raw syscalls (no liburing dependency; dependency policy
-// in docs/architecture.md §6). One or more independent rings (roadmap §3.4 ④): each ring
+// in docs/architecture/overview.md §6). One or more independent rings (roadmap §3.4 ④): each ring
 // has its own SQ/CQ, submit-side mutex, in-flight registry and reaper thread; single ops
 // are spread round-robin, multi-op streams (uring_stream.h) pin themselves to one ring
 // because fixed buffer / fixed file indices are ring-scoped. Per ring, io_uring_enter is

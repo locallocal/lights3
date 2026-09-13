@@ -1,9 +1,9 @@
-// CloudProxyBackend implementation (docs/storage/cloudproxy-design.md).
+// CloudProxyBackend implementation (docs/architecture/storage/cloudproxy-design.md).
 // Generic pipeline: build a minimal HttpRequest for signing -> carry over headers ->
 // send via ClientPool -> map errors. The data plane flips the push/pull model between a
 // private pump thread and the handler coroutine through http/pushpull.h's BlockQueue;
 // short control-plane requests call synchronously on shared pool threads
-// (docs/storage/cloudproxy-design.md §2.3).
+// (docs/architecture/storage/cloudproxy-design.md §2.3).
 #include "storage/cloudproxy/cloudproxy_backend.h"
 #include "storage/request_stats.h"
 
@@ -41,7 +41,7 @@ namespace {
 bool is_md5_hex(const std::string& s) { return util::from_hex(s).size() == 16; }
 
 // The key's path segment ("/key" after encoding); the bucket segment is carried by
-// Target::prefix ("/<rb>" for path-style, empty for vhost, docs/storage/cloudproxy-design.md §7)
+// Target::prefix ("/<rb>" for path-style, empty for vhost, docs/architecture/storage/cloudproxy-design.md §7)
 std::string key_path(std::string_view key) { return "/" + util::aws_uri_encode(key, /*encode_slash=*/false); }
 
 std::string qv(std::string_view v) { return util::aws_uri_encode(v, /*encode_slash=*/true); }
@@ -132,7 +132,7 @@ ObjectMeta meta_from_response(std::string_view key, const httplib::Response& res
 }
 
 // Payload delivered to the waiting coroutine once the GET headers arrive
-// (docs/storage/cloudproxy-design.md §3.1 step 1)
+// (docs/architecture/storage/cloudproxy-design.md §3.1 step 1)
 struct GetHead {
     ObjectMeta meta;
     std::optional<ByteRange> range;
@@ -191,7 +191,7 @@ struct TransferAbort {
 };
 
 // Destruction = cancel + interrupt the in-flight transfer + join the pump: aborts the
-// remote transfer on client disconnect / handler exception (docs/storage/cloudproxy-design.md §3.1)
+// remote transfer on client disconnect / handler exception (docs/architecture/storage/cloudproxy-design.md §3.1)
 class PumpBodyReader final : public http::BodyReader {
 public:
     PumpBodyReader(std::shared_ptr<http::BlockQueue> q, std::optional<uint64_t> len,
@@ -228,7 +228,7 @@ std::string resource_of(std::string_view bucket, std::string_view key = "") {
     return r;
 }
 
-// The total-ETag rule reuses combined_etag (used by docs/storage/cloudproxy-design.md §5.2
+// The total-ETag rule reuses combined_etag (used by docs/architecture/storage/cloudproxy-design.md §5.2
 // complete ambiguity resolution)
 std::string expected_total_etag(std::span<const PartInfo> parts) {
     std::vector<std::string> md5s;
@@ -262,7 +262,7 @@ CloudProxyBackend::CloudProxyBackend(CloudProxyConfig cfg, std::shared_ptr<Threa
 
 CloudProxyBackend::~CloudProxyBackend() = default;
 
-// Execution environment for control-plane blocking sections (docs/storage/cloudproxy-design.md
+// Execution environment for control-plane blocking sections (docs/architecture/storage/cloudproxy-design.md
 // §2.3): by default switch to a shared pool thread (each occupancy ~ one remote round trip
 // + retry backoff); control_in_pump=true spawns a one-shot private thread (same family as
 // the data-plane pump), and on completion the continuation resumes via the pool executor --
@@ -383,7 +383,7 @@ std::string CloudProxyBackend::remote_bucket(std::string_view bucket) const {
     return rb;
 }
 
-// ---------- Bucket operations (docs/storage/cloudproxy-design.md §4.3) ----------
+// ---------- Bucket operations (docs/architecture/storage/cloudproxy-design.md §4.3) ----------
 
 Task<void> CloudProxyBackend::create_bucket(std::string_view bucket) {
     auto rb = remote_bucket(bucket);
@@ -434,7 +434,7 @@ Task<bool> CloudProxyBackend::bucket_exists(std::string_view bucket) {
     if (res->status == 404) co_return false;
     if (res->status == 403) {
         // AWS HeadBucket semantics: exists-but-unauthorized is also 403; treat as existing
-        // (docs/storage/cloudproxy-design.md §4.3)
+        // (docs/architecture/storage/cloudproxy-design.md §4.3)
         LOG_WARN("cloudproxy: HEAD bucket {} returned 403, treating as exists", rb);
         co_return true;
     }
@@ -471,7 +471,7 @@ Task<std::vector<BucketInfo>> CloudProxyBackend::list_buckets() {
     co_return out;
 }
 
-// ---------- Object data plane (docs/storage/cloudproxy-design.md §3) ----------
+// ---------- Object data plane (docs/architecture/storage/cloudproxy-design.md §3) ----------
 
 Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::string_view key,
                                                  std::optional<ByteRange> range) {
@@ -913,7 +913,7 @@ Task<ObjectMeta> CloudProxyBackend::head_object(std::string_view bucket, std::st
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status == 200) co_return meta_from_response(key, *res);
     // HEAD has no error body: a 404 gets NoSuchKey filled in from context
-    // (docs/storage/cloudproxy-design.md §4.1/§5.1)
+    // (docs/architecture/storage/cloudproxy-design.md §4.1/§5.1)
     ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key, resource_of(bucket, key));
 }
 
@@ -1020,7 +1020,7 @@ Task<void> CloudProxyBackend::delete_object(std::string_view bucket, std::string
     ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key, resource_of(bucket, key));
 }
 
-// ---------- list (docs/storage/cloudproxy-design.md §4.2: always paginate with start-after) ----------
+// ---------- list (docs/architecture/storage/cloudproxy-design.md §4.2: always paginate with start-after) ----------
 
 Task<ListResult> CloudProxyBackend::list_objects(std::string_view bucket, const ListOptions& opt) {
     auto rb = remote_bucket(bucket);
@@ -1068,7 +1068,7 @@ Task<ListResult> CloudProxyBackend::list_objects(std::string_view bucket, const 
     co_return out;
 }
 
-// ---------- multipart passthrough (docs/storage/cloudproxy-design.md §4.4) ----------
+// ---------- multipart passthrough (docs/architecture/storage/cloudproxy-design.md §4.4) ----------
 
 Task<std::string> CloudProxyBackend::create_multipart(std::string_view bucket, std::string_view key, ObjectMeta meta) {
     validate_object_key(key);
@@ -1202,7 +1202,7 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket, s
         try {
             if (res->status != 200) ctx_->throw_remote_error(res->status, res->body, ErrCtx::Upload, resource);
             // S3 quirk: a long-running complete returns 200 first with the error in the
-            // body (docs/storage/cloudproxy-design.md §4.4)
+            // body (docs/architecture/storage/cloudproxy-design.md §4.4)
             s3::XmlNode root;
             try {
                 root = s3::xml_parse(res->body);
@@ -1227,7 +1227,7 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket, s
             }
         } catch (const S3Error& e) {
             // NoSuchUpload after a retry: the previous attempt may have actually
-            // succeeded -> verify with HEAD (docs/storage/cloudproxy-design.md §5.2)
+            // succeeded -> verify with HEAD (docs/architecture/storage/cloudproxy-design.md §5.2)
             if (e.code == S3ErrorCode::NoSuchUpload && retried) {
                 outcome.ambiguous = std::current_exception();
                 break;

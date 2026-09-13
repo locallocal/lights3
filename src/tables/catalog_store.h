@@ -1,4 +1,4 @@
-// Catalog entities and the store boundary (docs/s3-tables-design.md §4.2). The interface
+// Catalog entities and the store boundary (docs/architecture/s3-tables-design.md §4.2). The interface
 // is semantic (entities, not raw KV) so a duostore-meta implementation can map listing
 // onto ordered iteration and CAS onto transactions (design §12). Every mutating read
 // returns the entry with its ETag; writes take the storage PutCondition verbatim and
@@ -56,7 +56,7 @@ struct TableEntry {
     int64_t updated_unix = 0;
 };
 
-// Iceberg view (docs/s3-tables-design.md §6.3): the same shape as TableEntry
+// Iceberg view (docs/architecture/s3-tables-design.md §6.3): the same shape as TableEntry
 // minus the format / rename fields; views are format-version 1 only
 struct ViewEntry {
     int version = 1;
@@ -102,7 +102,7 @@ struct RenameIntent {
 const char* rename_stage_name(RenameIntent::Stage s);
 std::optional<RenameIntent::Stage> rename_stage_from_name(std::string_view s);
 
-// Per-table maintenance settings (docs/s3-tables-design.md §9); every field
+// Per-table maintenance settings (docs/architecture/s3-tables-design.md §9); every field
 // optional -- unset falls back to tables.maintenance / the table's Iceberg properties
 struct MaintenanceConfig {
     int version = 1;

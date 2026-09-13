@@ -3,7 +3,7 @@
 # service, chunk data in the ceph demo cluster (the combination the design supports
 # for multi-gateway deployments). read_lease on so every gateway publishes its
 # in-flight read / write floors; gc_enabled is set per instance from the environment
-# (exactly one gateway runs GC / orphan scans, docs/storage/duostore-data-rados-design.md §8.3)
+# (exactly one gateway runs GC / orphan scans, docs/architecture/storage/duostore-data-rados-design.md §8.3)
 http:
   driver: builtin
   bind: 0.0.0.0

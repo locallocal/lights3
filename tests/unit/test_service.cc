@@ -1,4 +1,4 @@
-// L2 pure-logic tests: mock HttpRequest + memory backend through the full dispatch (docs/architecture.md §2)
+// L2 pure-logic tests: mock HttpRequest + memory backend through the full dispatch (docs/architecture/overview.md §2)
 #include <set>
 
 #include "core/semaphore.h"
@@ -72,7 +72,7 @@ bool contains(const std::string& s, const std::string& sub) { return s.find(sub)
 
 // A body that never yields data but can be cancelled: read() parks on a semaphore with no
 // permits; the request timeout's cooperative cancellation breaks it out of this suspension
-// point (the cancellation wiring of docs/concurrency.md §5)
+// point (the cancellation wiring of docs/architecture/concurrency.md §5)
 class HangingReader final : public http::BodyReader {
 public:
     Task<size_t> read(std::span<std::byte>) override {
@@ -227,7 +227,7 @@ TEST(service_delete_semantics) {
 TEST(service_not_implemented_apis) {
     auto svc = make_service_noauth();
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
-    // Explicitly unsupported subresources (docs/s3-protocol.md §1) get an explicit 501 instead of
+    // Explicitly unsupported subresources (docs/architecture/s3-protocol.md §1) get an explicit 501 instead of
     // falling into the List/Get catch-all (lifecycle/tagging graduated with roadmap §2.4/§2.5)
     for (auto* sub : {"acl", "policy", "versioning", "encryption", "replication"}) {
         auto resp = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{sub, ""}})));
@@ -322,7 +322,7 @@ TEST(service_aws_aligned_edge_semantics) {
     sync_wait(svc.dispatch(make_req("PUT", "/bkt/k", "0123456789")));
 
     // Multipart Range: AWS doesn't support it; the whole header is ignored → 200 full object
-    // (docs/s3-protocol.md §6)
+    // (docs/architecture/s3-protocol.md §6)
     auto multi = make_req("GET", "/bkt/k");
     multi.headers.add("Range", "bytes=0-1,3-4");
     auto resp = sync_wait(svc.dispatch(std::move(multi)));
@@ -364,7 +364,7 @@ TEST(service_with_auth) {
     CHECK_EQ(hz.status, 200);
 }
 
-// Static website hosting phase 1 (docs/static-website.md): anonymous GET/HEAD object
+// Static website hosting phase 1 (docs/usage/static-website.md): anonymous GET/HEAD object
 // reads on listed buckets only; everything else keeps requiring a signature
 TEST(service_website_anonymous_read) {
     AuthConfig acfg;
@@ -430,7 +430,7 @@ TEST(service_website_anonymous_read) {
     CHECK(part.status != 200);
 }
 
-// Static website hosting phase 2 (docs/static-website.md): index/error document
+// Static website hosting phase 2 (docs/usage/static-website.md): index/error document
 // semantics for anonymous requests; signed requests keep XML errors
 TEST(service_website_index_and_error_documents) {
     AuthConfig acfg;
@@ -513,7 +513,7 @@ TEST(service_website_index_and_error_documents) {
     CHECK_EQ(lt.status, 501);
 }
 
-// Static website hosting phase 3 (docs/static-website.md §4): ?website dynamic API —
+// Static website hosting phase 3 (docs/usage/static-website.md §4): ?website dynamic API —
 // root-only, persisted to .sys/website/<bucket>, multi-instance sync
 TEST(service_bucket_website_api) {
     auto backend = std::make_shared<storage::MemoryBackend>();
@@ -642,7 +642,7 @@ TEST(service_website_redirect_location) {
     CHECK(contains(bresp.small_body, "InvalidArgument"));
 }
 
-// ---------- Additional coverage for docs/s3-protocol.md ----------
+// ---------- Additional coverage for docs/architecture/s3-protocol.md ----------
 
 TEST(service_multipart_flow) {
     auto svc = make_service_noauth();
@@ -785,7 +785,7 @@ TEST(service_conditional_requests) {
     ius.headers.add("If-Unmodified-Since", "Mon, 01 Jan 2001 00:00:00 GMT");
     CHECK_EQ(sync_wait(svc.dispatch(std::move(ius))).status, 412);
 
-    // PUT If-None-Match:* prevents overwrites (docs/s3-protocol.md §6)
+    // PUT If-None-Match:* prevents overwrites (docs/architecture/s3-protocol.md §6)
     auto pin = make_req("PUT", "/bkt/c.txt", "v2");
     pin.headers.add("If-None-Match", "*");
     CHECK_EQ(sync_wait(svc.dispatch(std::move(pin))).status, 412);

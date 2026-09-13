@@ -1,4 +1,4 @@
-// L3: DuoStore backend facade (docs/storage/duostore-design.md): S3 semantics, ETag/MD5,
+// L3: DuoStore backend facade (docs/architecture/storage/duostore-design.md): S3 semantics, ETag/MD5,
 // pump loops; metadata/data split into the two pluggable interfaces IMetaStore /
 // IDataStore, with DataRef as the single coupling point.
 // P1: RocksDB meta + chunk data path; P2: pack aggregation (threshold routing +
@@ -270,12 +270,13 @@ Task<uint64_t> migrate_pack_records(IMetaStore& meta, IDataStore& data, PinTable
 
 }  // namespace duostore
 
-// meta engine selection (docs/storage/duostore-meta-redis-design.md §8 / docs/storage/duostore-meta-sqlite-design.md §8
-// / docs/storage/duostore-meta-tikv-design.md §9): redis / sqlite / tikv require the corresponding compile-time option,
-// otherwise from_params throws "not compiled in"
+// meta engine selection (docs/architecture/storage/duostore-meta-redis-design.md §8 /
+// docs/architecture/storage/duostore-meta-sqlite-design.md §8 / docs/architecture/storage/duostore-meta-tikv-design.md
+// §9): redis / sqlite / tikv require the corresponding compile-time option, otherwise from_params throws "not compiled
+// in"
 enum class DuoMetaKind { kRocksDb, kRedis, kSqlite, kTikv };
 
-// data engine selection (docs/storage/duostore-data-rados-design.md §10, dual of meta_kind):
+// data engine selection (docs/architecture/storage/duostore-data-rados-design.md §10, dual of meta_kind):
 // rados requires the compile-time option LIGHTS3_DUOSTORE_RADOS_DATA
 enum class DuoDataKind { kFs, kRados };
 
@@ -303,7 +304,7 @@ struct DuoStoreConfig {
     // meta=sqlite: backup chain dir for incremental backups
     // (backlog-sequence ⑧); empty = full backups only
     std::filesystem::path sqlite_wal_archive;
-    // required when meta=tikv (docs/storage/duostore-meta-tikv-design.md §9)
+    // required when meta=tikv (docs/architecture/storage/duostore-meta-tikv-design.md §9)
     std::vector<std::string> pd_endpoints;
     // key prefix (multi-instance/test isolation)
     std::string tikv_prefix = "duo:";
@@ -318,7 +319,7 @@ struct DuoStoreConfig {
     // safepoint retention window (now − retention)
     int tikv_gc_retention_sec = 600;
     DuoDataKind data_kind = DuoDataKind::kFs;
-    // data=rados keys (docs/storage/duostore-data-rados-design.md §10)
+    // data=rados keys (docs/architecture/storage/duostore-data-rados-design.md §10)
     std::string rados_conf = "/etc/ceph/ceph.conf";
     std::string rados_client = "client.admin";
     // required when data=rados
@@ -357,7 +358,7 @@ struct DuoStoreConfig {
     // highest-yield packs go first and the rest continue next round. 0 = unlimited
     int gc_compact_max_packs = 16;
     uint64_t gc_compact_max_bytes = 1ull << 30;
-    // Multi-gateway deployment (docs/storage/duostore-data-rados-design.md §8.3): GC/orphan scan
+    // Multi-gateway deployment (docs/architecture/storage/duostore-data-rados-design.md §8.3): GC/orphan scan
     // must run on a single instance; set false on non-designated gateways (no
     // background worker scheduled; the manual hooks remain for tests/ops).
     // Concurrent GC over shared meta/data would step on itself (duplicate
@@ -375,7 +376,7 @@ struct DuoStoreConfig {
     // default costs nothing there. Keep well below gc_grace (staleness of the
     // published value adds to reclaim latency, never to risk)
     int read_lease_sec = 5;
-    // Object metadata cache (roadmap §3.8; docs/storage/duostore-core.md §7.1): budget
+    // Object metadata cache (roadmap §3.8; docs/architecture/storage/duostore-core.md §7.1): budget
     // in objects, 0 = off. Exact on local engines (rocksdb/sqlite: every write to the
     // meta goes through this process and invalidates). On shared engines (redis/tikv)
     // a peer gateway's write is invisible until the entry expires, so a TTL is
@@ -402,7 +403,7 @@ struct DuoStoreConfig {
     int rocksdb_max_write_buffers = 2;
     int rocksdb_max_background_jobs = 2;
 
-    // Centralized parsing + range validation (docs/storage/duostore-design.md §11);
+    // Centralized parsing + range validation (docs/architecture/storage/duostore-design.md §11);
     // configuration errors throw std::runtime_error
     static DuoStoreConfig from_params(const std::string& name, const std::map<std::string, std::string>& params);
     // "rocksdb" | "sqlite" | "redis" | "tikv" (manifest engine tag, log labels)
@@ -428,7 +429,7 @@ public:
     // the injected data engine — it determines the extent kind the orphan scan
     // unlinks (the rados engine only accepts kRados)
     // The meta engine (the S3 Tables catalog's KV backing when tables.catalog_backing =
-    // duostore, docs/s3-tables-design.md §12); valid until close()
+    // duostore, docs/architecture/s3-tables-design.md §12); valid until close()
     duostore::IMetaStore& meta() { return *meta_; }
     DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool, std::unique_ptr<duostore::IMetaStore> meta,
                     std::unique_ptr<duostore::IDataStore> data, MetricsScope metrics = {});
@@ -504,7 +505,7 @@ public:
     Task<duostore::MetaDumpStats> run_meta_dump(std::ostream& out);
     Task<duostore::MetaDumpStats> run_meta_load(std::istream& in);
 
-    // Backup chain in dir (backlog-sequence ⑧, docs/storage/duostore-core.md §11.1):
+    // Backup chain in dir (backlog-sequence ⑧, docs/architecture/storage/duostore-core.md §11.1):
     // appends one manifest entry. Engines with a gateway-side physical mechanism
     // (sqlite WAL segments, rocksdb BackupEngine) write their payload through
     // IMetaStore::backup_physical; the others (redis, tikv) get a logical dump of

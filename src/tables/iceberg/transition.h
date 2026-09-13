@@ -1,4 +1,4 @@
-// Transition invariants current → next (docs/s3-tables-design.md §7.3): the last line of
+// Transition invariants current → next (docs/architecture/s3-tables-design.md §7.3): the last line of
 // defence when concurrent writers bypass requirements. Failure → 409
 #pragma once
 

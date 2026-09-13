@@ -52,7 +52,7 @@ void throw_errno(const std::string& what) {
     throw S3Error(S3ErrorCode::InternalError, what + ": " + std::strerror(errno));
 }
 
-// Durability switch (docs/storage/storage-backend.md §3.1): on by default -- a write already
+// Durability switch (docs/architecture/storage/storage-backend.md §3.1): on by default -- a write already
 // acknowledged with 200 surviving power loss is part of S3 semantics. Throughput-first
 // deployments can turn it off with LIGHTS3_FSYNC=0 (test fixtures also use it for speed)
 bool fsync_enabled() {
@@ -172,7 +172,7 @@ static void write_sidecar(const fs::path& sidecar, const ObjectMeta& meta, const
     write_tsv(sidecar, staging_dir, meta_kv(meta, tier));
 }
 
-// Metadata committed atomically together with the data file (docs/storage/storage-backend.md
+// Metadata committed atomically together with the data file (docs/architecture/storage/storage-backend.md
 // §3.1): write the sidecar's TSV into the data file's extended attribute as well, so one
 // rename commits data and metadata at once -- sidecar and data are two renames, and a
 // crash in between leaves an inconsistent object of "new etag + old data" (or vice versa),
@@ -361,7 +361,7 @@ void check_put_condition(const fs::path& data_path, const PutCondition& cond, st
     }
 }
 
-// ---- Tiered storage extensions (docs/storage/tiered-design.md §4) ----
+// ---- Tiered storage extensions (docs/architecture/storage/tiered-design.md §4) ----
 
 // Metadata TSV parsing (xattr and sidecar share the same format)
 static void parse_meta_tsv(std::istream& in, ObjectMeta& meta, TierInfo& tier, uint64_t& declared_size) {

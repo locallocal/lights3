@@ -59,8 +59,10 @@ Task<LifecycleRunner::PassStats> LifecycleRunner::run_once() {
     if (!snap) co_return stats;
     for (auto& [bucket, rules] : *snap) {
         if (skip_ && skip_(bucket)) {
-            LOG_WARN("lifecycle: bucket {} is a table bucket, its rules are ignored (docs/s3-tables-design.md §8.2)",
-                     bucket);
+            LOG_WARN(
+                "lifecycle: bucket {} is a table bucket, its rules are ignored (docs/architecture/s3-tables-design.md "
+                "§8.2)",
+                bucket);
             continue;
         }
         try {

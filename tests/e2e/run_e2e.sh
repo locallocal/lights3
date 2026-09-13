@@ -4,8 +4,8 @@ set -u
 
 BIN="${1:?usage: run_e2e.sh <path-to-lights3-binary> [driver] [backend-type]}"
 DRIVER="${2:-builtin}"
-# localfs | xlocalfs | tiered (localfs+memory, docs/storage/tiered-design.md)
-# | cloudproxy | tiered-cloudproxy (two instances: instance B acts as the "cloud", docs/storage/cloudproxy-design.md §10)
+# localfs | xlocalfs | tiered (localfs+memory, docs/architecture/storage/tiered-design.md)
+# | cloudproxy | tiered-cloudproxy (two instances: instance B acts as the "cloud", docs/architecture/storage/cloudproxy-design.md §10)
 # | tiered-duostore (duostore as the cloud) | tiered-duolocal (duostore as the local/hot side, roadmap §3.6 ⑥)
 BACKEND="${3:-localfs}"
 AK=E2EACCESSKEY
@@ -33,9 +33,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ---------- duostore-redis scenario: spawn a private redis (docs/storage/duostore-meta-redis-design.md §9) ----------
+# ---------- duostore-redis scenario: spawn a private redis (docs/architecture/storage/duostore-meta-redis-design.md §9) ----------
 # LIGHTS3_TEST_REDIS_URI=redis://host:port points at an external instance instead
-# (docker compose --profile e2e, docs/deployment.md §4): the run isolates itself with
+# (docker compose --profile e2e, docs/usage/deployment.md §4): the run isolates itself with
 # a unique key prefix and leaves the instance running
 REDIS_PID=""
 REDIS_URI=""
@@ -65,7 +65,7 @@ if [[ "$BACKEND" == "duostore-redis" && -z "$REDIS_URI" ]]; then
     REDIS_URI="unix://$WORK/redis.sock"
 fi
 
-# ---------- duostore-rados scenario: probe for a real cluster (docs/storage/duostore-data-rados-design.md §11) ----------
+# ---------- duostore-rados scenario: probe for a real cluster (docs/architecture/storage/duostore-data-rados-design.md §11) ----------
 # A cluster cannot be spun up casually like redis (full mon+osd+cephx dependency set);
 # runs only when both env vars LIGHTS3_TEST_RADOS_CONF + LIGHTS3_TEST_RADOS_POOL are set, otherwise explicit SKIP
 RADOS_NS=""
@@ -78,14 +78,14 @@ if [[ "$BACKEND" == "duostore-rados" ]]; then
     echo "rados: conf=$LIGHTS3_TEST_RADOS_CONF pool=$LIGHTS3_TEST_RADOS_POOL ns=$RADOS_NS"
 fi
 
-# ---------- duostore-tikv scenario: probe for a real cluster (docs/storage/duostore-meta-tikv-design.md §10) ----------
+# ---------- duostore-tikv scenario: probe for a real cluster (docs/architecture/storage/duostore-meta-tikv-design.md §10) ----------
 # PD+TiKV cannot be spun up casually (tiup/multi-process dependencies); runs only when
 # LIGHTS3_TEST_PD_ADDR is set, otherwise explicit SKIP.
 # Cluster-side residue: TxnKV has no client-reachable delete-by-prefix (tikv-ctl is not
 # assumed present); the keys left per run are bounded and prefix-unique -- the cases
 # delete their own buckets/objects, so the residue is only schema, counters, and version
 # garbage of already-settled gcq entries, reclaimed as the cluster GC safepoint advances
-# (docs/storage/duostore-meta-tikv-design.md §7.3)
+# (docs/architecture/storage/duostore-meta-tikv-design.md §7.3)
 TIKV_PREFIX=""
 if [[ "$BACKEND" == "duostore-tikv" ]]; then
     if [[ -z "${LIGHTS3_TEST_PD_ADDR:-}" ]]; then
@@ -433,7 +433,7 @@ check "CopyObject" "0" \
        | grep -q 'CopyObjectResult'; echo $?)"
 check "Copy content matches" "y" "$(s3curl "$BASE/mybucket/copy.txt")"
 
-# Multipart: two 5MiB parts (real flow, docs/s3-protocol.md §8). 5MiB is AWS's minimum
+# Multipart: two 5MiB parts (real flow, docs/architecture/s3-protocol.md §8). 5MiB is AWS's minimum
 # for non-final parts (docs/archive/gaps.md §5.7) -- 3MiB was used before, which real AWS would reject too
 dd if=/dev/urandom of="$WORK/p1" bs=1M count=5 2>/dev/null
 dd if=/dev/urandom of="$WORK/p2" bs=1M count=5 2>/dev/null
@@ -457,7 +457,7 @@ check "Multipart download content matches" \
     "$(cat "$WORK/p1" "$WORK/p2" | md5sum | cut -d' ' -f1)" \
     "$(md5sum "$WORK/mpu.out" | cut -d' ' -f1)"
 
-# UploadPartCopy (docs/s3-protocol.md §1): full-object copy + range copy, then assemble
+# UploadPartCopy (docs/architecture/s3-protocol.md §1): full-object copy + range copy, then assemble
 INIT2=$(s3curl -X POST "$BASE/mybucket/upc.bin?uploads")
 UPC_ID=$(echo "$INIT2" | sed -n 's/.*<UploadId>\(.*\)<\/UploadId>.*/\1/p')
 UPC1=$(s3curl -X PUT -H 'x-amz-copy-source: /mybucket/mpu.bin' \
@@ -550,7 +550,7 @@ s3curl -o /dev/null -X DELETE "$BASE/mybucket/dir/small.txt"
 s3curl -o /dev/null -X DELETE "$BASE/mybucket/top.txt"
 check "DeleteBucket" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/mybucket")"
 
-# ---------- Dynamic credential management (docs/credential-management.md) ----------
+# ---------- Dynamic credential management (docs/architecture/credential-management.md) ----------
 json_field() {  # json_field <key> -- extract a string field from the indented JSON on stdin
     sed -n "s/.*\"$1\": \"\([^\"]*\)\".*/\1/p" | head -1
 }
@@ -677,7 +677,7 @@ check "static credential SK not returned via admin" "0" \
     "$(s3curl "$BASE/-/admin/credentials/$AK?show-secret=true" | grep -q '"secret_key"' && echo 1 || echo 0)"
 s3curl -o /dev/null -X DELETE "$BASE/credbkt/keep/a"
 
-# ---------- roadmap §6.1: static website hosting e2e (docs/static-website.md) ----------
+# ---------- roadmap §6.1: static website hosting e2e (docs/usage/static-website.md) ----------
 # The static entry e2esite comes from config.yaml; the anonymous plane is the
 # security-sensitive face: reads of listed buckets only, never listing / writes /
 # other buckets; the index/error documents and the object-level 301 all through
@@ -792,7 +792,7 @@ if [[ -x "$LIGHTS3_CTL" ]]; then
             s3curl -o /dev/null -X DELETE "$BASE/fsckbkt"
         fi
     fi
-    # docs/cli.md §3.12: the background rounds on demand and the quarantine
+    # docs/usage/cli.md §3.12: the background rounds on demand and the quarantine
     # ledgers through the admin plane (same job model as fsck; the group must
     # match the backend type: 400 otherwise, 404 for an unknown backend)
     check "admin jobs: unsigned refused" "403" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/tier/tierdata/scan")"
@@ -864,7 +864,7 @@ if [[ -x "$LIGHTS3_CTL" ]]; then
     s3curl -o /dev/null -X DELETE "$BASE/admbench"
 fi
 
-# ---------- roadmap §3.9: usage accounting / quotas / tenants (docs/multi-tenancy.md) ----------
+# ---------- roadmap §3.9: usage accounting / quotas / tenants (docs/architecture/multi-tenancy.md) ----------
 json_num() {  # json_num <key> -- extract a numeric field from the indented JSON on stdin
     sed -n "s/.*\"$1\": \([0-9]*\).*/\1/p" | head -1
 }
@@ -933,7 +933,7 @@ s3curl -o /dev/null -X DELETE "$BASE/qbkt/ten"
 s3curl -o /dev/null -X DELETE "$BASE/qbkt/second"
 s3curl -o /dev/null -X DELETE "$BASE/qbkt"
 
-# ---------- roadmap §4.4: config hot reload (SIGHUP + lights3-ctl reload, docs/config-reload.md) ----------
+# ---------- roadmap §4.4: config hot reload (SIGHUP + lights3-ctl reload, docs/usage/config-reload.md) ----------
 sed -i 's/^  level: info$/  level: debug/' "$WORK/config.yaml"
 kill -HUP "$SRV_PID"
 for _ in $(seq 1 50); do
@@ -960,7 +960,7 @@ check "invalid config refused on reload" "400" \
 sed -i '/^  idle_timeout: 0s$/d' "$WORK/config.yaml"
 sed -i '/^  request_timeout: 600s$/d' "$WORK/config.yaml"  # restore for the restart phase
 
-# ---------- backlog-sequence ⑦: backend instances added / removed on reload (docs/config-reload.md §3) ----------
+# ---------- backlog-sequence ⑦: backend instances added / removed on reload (docs/usage/config-reload.md §3) ----------
 # A memory backend "hot" joins the running instance with a hot-* rule; then it is
 # removed while a rate-limited GET still streams from it: the removal applies at
 # once (routing, metrics, admin view) and the instance closes only after the stream
@@ -1064,7 +1064,7 @@ check "access log carries remote/bucket/ttfb slots" "0" \
 check "access log: streaming GET reports the bytes sent" "0" \
     "$(grep -q 'access .* GET "/mybucket/dir/big.bin" 200 [1-9][0-9]* .* api=GetObject ' "$WORK/server.log"; echo $?)"
 
-# ---------- S3 Tables step ①: Iceberg REST catalog over the live server (docs/s3-tables-design.md §13) ----------
+# ---------- S3 Tables step ①: Iceberg REST catalog over the live server (docs/architecture/s3-tables-design.md §13) ----------
 # The catalog answers JSON on the /iceberg/v1 prefix; namespace levels are joined with %1F
 TB="$BASE/iceberg/v1"
 TNS="$TB/tbe2e/namespaces/e2e%1Fdemo"
@@ -1108,7 +1108,7 @@ check "tables: a missing manifest list is refused" "409" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"requirements":[],"updates":[{"action":"add-snapshot","snapshot":{"snapshot-id":2,"sequence-number":2,"timestamp-ms":1757600001000,"manifest-list":"s3://tbe2e/e2e/demo/orders/metadata/nope.avro","summary":{"operation":"append"}}}]}' "$TNS/tables/orders")"
 check "tables: load table shows the snapshot" "1" \
     "$(s3curl "$TNS/tables/orders" | jq_field 'j["metadata"]["current-snapshot-id"]')"
-# step ③ (docs/s3-tables-design.md §7.4): deep validation, ETag, diagnostics / recovery
+# step ③ (docs/architecture/s3-tables-design.md §7.4): deep validation, ETag, diagnostics / recovery
 check "tables: the snapshot was validated down to the data files" "deep" \
     "$(s3curl "$TNS/tables/orders" | jq_field 'j["config"]["lights3.snapshot-validation"]')"
 s3curl -o /dev/null -X DELETE "$BASE/tbe2e/e2e/demo/orders/data/f1.parquet"
@@ -1146,7 +1146,7 @@ check "tables: the old name is gone" "404" "$(s3curl -o /dev/null -w '%{http_cod
 check "tables: DeleteBucket refuses a non-empty table bucket" "409" "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/tbe2e")"
 check "tables: purgeRequested must be a boolean" "400" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$TNS/tables/orders2?purgeRequested=maybe")"
-# step ④ (docs/s3-tables-design.md §9): settings, plan / run jobs, purge, lights3-ctl tables
+# step ④ (docs/architecture/s3-tables-design.md §9): settings, plan / run jobs, purge, lights3-ctl tables
 check "tables: maintenance settings default to no deletion" "false" \
     "$(s3curl "$TNS/tables/orders2/maintenance/config" | jq_field 'str(j["effective"]["delete_enabled"]).lower()')"
 check "tables: a table-level setting is stored and takes effect" "1" \
@@ -1192,7 +1192,7 @@ if [[ -x "$LIGHTS3_CTL" ]]; then
         "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/tbe2e/${TMP_ML#s3://tbe2e/}")"
     check "tables: the purged table is gone from the catalog" "404" "$(s3curl -o /dev/null -w '%{http_code}' -I "$TNS/tables/tmp")"
 fi
-# step ⑥ (docs/s3-tables-design.md §14 ⑥): the /_iceberg alias, views, reportMetrics
+# step ⑥ (docs/architecture/s3-tables-design.md §14 ⑥): the /_iceberg alias, views, reportMetrics
 check "tables: the compat prefix reaches the same catalog" "tbe2e" \
     "$(s3curl "$BASE/_iceberg/v1/config?warehouse=tbe2e" | jq_field 'j["overrides"]["prefix"]')"
 check "tables: /config advertises the compat prefix" "/_iceberg/v1" \
@@ -1224,7 +1224,7 @@ check "tables: drop namespace" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X
 check "tables: the catalog prefix's first segment is not a bucket name" "400" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X PUT "$BASE/iceberg")"
 check "tables: commits are counted" "0" "$(curl -s "$BASE/-/metrics" | grep -q 'lights3_tables_commits_total{feature="tables",result="ok"} 1'; echo $?)"
-# step ② (docs/s3-tables-design.md §6.2, §8.4): s3tables signing name, vended credentials, lifecycle exclusion
+# step ② (docs/architecture/s3-tables-design.md §6.2, §8.4): s3tables signing name, vended credentials, lifecycle exclusion
 tcurl() {  # sign the catalog request with credential scope service "s3tables"
     curl -sS --aws-sigv4 "aws:amz:$REGION:s3tables" --user "$AK:$SK" "$@"
 }
@@ -1275,7 +1275,7 @@ wait "$SRV_PID" 2>/dev/null
 check "clean shutdown exit code" "0" "$?"  # roadmap §4.5: unclean teardown would exit 3
 SRV_PID=""
 
-# ---------- Restart: dynamic credential persistence check (docs/credential-management.md §8) ----------
+# ---------- Restart: dynamic credential persistence check (docs/architecture/credential-management.md §8) ----------
 # Restart with a master key: v1 plaintext objects are upgraded in place to v2 encrypted
 # at load time (§10.1), signature verification keeps working
 MASTER_KEY=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
@@ -1308,7 +1308,7 @@ kill -TERM "$SRV_PID"
 wait "$SRV_PID" 2>/dev/null
 SRV_PID=""
 
-# ---------- roadmap §4.1: TLS smoke on the same driver (docs/tls.md) ----------
+# ---------- roadmap §4.1: TLS smoke on the same driver (docs/usage/tls.md) ----------
 # A second instance with an openssl-CLI self-signed certificate: SigV4 over HTTPS
 # end to end through curl, plus a plaintext probe refused on the TLS port
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 \
@@ -1349,7 +1349,7 @@ fi
 kill -TERM "$TLS_PID" 2>/dev/null
 wait "$TLS_PID" 2>/dev/null
 
-# ---------- backlog-sequence ⑥: mTLS client certificate -> credential identity (docs/tls.md §2.1) ----------
+# ---------- backlog-sequence ⑥: mTLS client certificate -> credential identity (docs/usage/tls.md §2.1) ----------
 # A private client CA signs two client certificates; the instance requires client
 # auth and maps the subject CN (auth.tls_identity: subject-cn). Root binds one CN
 # to a readonly dynamic credential through lights3-ctl; unsigned requests over that
@@ -1417,7 +1417,7 @@ fi
 kill -TERM "$MTLS_PID" 2>/dev/null
 wait "$MTLS_PID" 2>/dev/null
 
-# ---------- backlog-sequence ④: STS sessions shared across gateways (docs/s3-protocol.md §3.5) ----------
+# ---------- backlog-sequence ④: STS sessions shared across gateways (docs/architecture/s3-protocol.md §3.5) ----------
 # A second gateway on the SAME localfs root (.sys included): a session minted by the
 # first is honored by the second at first sight (read-through), with the token checked
 if [[ "$BACKEND" == "localfs" || "$BACKEND" == "xlocalfs" ]]; then
@@ -1571,7 +1571,7 @@ print(hashlib.md5(b"".join(bytes.fromhex(p) for p in parts)).hexdigest() + "-%d"
     wait "$MGA_PID" 2>/dev/null; wait "$MGB_PID" 2>/dev/null
 fi
 
-# ---------- backlog-sequence ②: separate admin listener (docs/http-adapter.md §2.1) ----------
+# ---------- backlog-sequence ②: separate admin listener (docs/architecture/http-adapter.md §2.1) ----------
 # A third instance with http.admin_port: the /-/ face moves to the admin port, the
 # data-plane port answers 404 for it, probes stay on both, lights3-ctl points at the admin port
 sed -e "s#^  port: 0#  port: 0\n  admin_port: 0#" \
@@ -1616,7 +1616,7 @@ wait "$ADM_PID" 2>/dev/null
 for _ in $(seq 1 50); do grep -q "lights3 exited cleanly" "$WORK/server-admin.log" && break; sleep 0.1; done
 check "admin-port instance exited cleanly" "0" "$(grep -q "lights3 exited cleanly" "$WORK/server-admin.log"; echo $?)"
 
-# ---------- roadmap §6.1: fault injection through the whole stack (docs/testing.md §4) ----------
+# ---------- roadmap §6.1: fault injection through the whole stack (docs/development/testing.md §4) ----------
 # A second instance armed via LIGHTS3_FAULTS: the first staging write fails with
 # EIO -> the PUT answers 500 InternalError, the object does not exist, the retry
 # succeeds, and the backend error shows up on /-/metrics. Only backends with a

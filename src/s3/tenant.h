@@ -1,4 +1,4 @@
-// L2: tenant entity + bucket ownership (roadmap §3.9 ③, docs/multi-tenancy.md §4).
+// L2: tenant entity + bucket ownership (roadmap §3.9 ③, docs/architecture/multi-tenancy.md §4).
 // A tenant is a named account that owns buckets and credentials. The model stays
 // entirely at L2 — nothing in the storage layer or the meta schema knows tenants:
 //   .sys/tenants/<id>   the tenant record (display name, quota, creation time)

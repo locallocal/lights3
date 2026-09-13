@@ -1,7 +1,7 @@
 # 分期保留项的实施顺序（已归档）
 
 > **归档说明（2026-09-06）**：十项已全部完成（记账见 §6；⑨ 本仓侧完成，上游合入后的
-> 收尾步骤记在 [../todo.md](../todo.md)），文件从 `docs/` 移至此处，内容不再更新。
+> 收尾步骤记在 [../todo.md](../development/todo.md)），文件从 `docs/` 移至此处，内容不再更新。
 > 源码/文档注释里的 `backlog-sequence ①…⑩` 指本文件 §1–§5 的对应小节。
 
 对 [backlog.md §1](backlog.md) 十个"分期保留"条目给出先后顺序。排序依据只有
@@ -44,8 +44,8 @@ D 阶段建议等 B 落地后再动 ⑦。
   直接画 used / high_watermark，逐出速率面板保留）；`deploy/prometheus/lights3.rules.yml`
   加一条"接近高水位"告警。
 - **验收**：`test_tiered.cc` 断言 gauge 在场且写入后单调；ctest `monitoring_assets`
-  通过（dashboard 必须由生成器重新生成，逐字节一致）；[monitoring.md](../monitoring.md)、
-  [tiered-design.md](../storage/tiered-design.md) 各补一行。
+  通过（dashboard 必须由生成器重新生成，逐字节一致）；[monitoring.md](../usage/monitoring.md)、
+  [tiered-design.md](../architecture/storage/tiered-design.md) 各补一行。
 
 ### ② 独立 admin 端口
 
@@ -58,7 +58,7 @@ D 阶段建议等 B 落地后再动 ⑦。
   `src/core/config.{h,cc}` 校验（admin 端口不得与数据面相同）。
 - **验收**：单测起两端口，断言数据面 404 / admin 面 200；`config-reload` 不覆盖
   admin 端口（列入 `requires_restart`）；`s3adm` 的 `--endpoint` 文档说明 admin 命令
-  改指 admin 端口；[http-adapter.md §2.1](../http-adapter.md)、[cli.md §3.1](../cli.md)。
+  改指 admin 端口；[http-adapter.md §2.1](../architecture/http-adapter.md)、[cli.md §3.1](../usage/cli.md)。
 
 ### ③ scrub / fsck 的 admin 端点
 
@@ -69,7 +69,7 @@ D 阶段建议等 B 落地后再动 ⑦。
 - **入口**：`src/s3/service.cc` 的 admin 路由表、`src/storage/*/run_scrub_once`、
   `src/tools/s3adm_fsck.cc`；限速沿用 `scrub_throttle.h`。
 - **验收**：e2e 起 localfs 网关触发一轮、轮询到完成、篡改一个对象后再跑能报出
-  发现；并发第二次触发返回 409；[cli.md §3.5](../cli.md)、[storage/localfs.md §11](../storage/localfs.md)。
+  发现；并发第二次触发返回 409；[cli.md §3.5](../usage/cli.md)、[storage/localfs.md §11](../architecture/storage/localfs.md)。
 
 ## 2. 阶段 B：多实例一致性（合计约 1.5 周）
 
@@ -84,7 +84,7 @@ D 阶段建议等 B 落地后再动 ⑦。
   `src/s3/handlers/sts.cc`；持久化格式沿用凭证对象的 JSON 与 `rev` 计数。
 - **验收**：单测——实例 A 签发、实例 B 验证通过、过期后两边都拒绝；e2e 增"两网关
   共享 localfs root 的 STS"段（复用 cloudproxy 双实例脚手架的写法）；
-  [credential-management.md](../credential-management.md) §STS 与 [s3-protocol.md](../s3-protocol.md) 更新。
+  [credential-management.md](../architecture/credential-management.md) §STS 与 [s3-protocol.md](../architecture/s3-protocol.md) 更新。
 
 ### ⑤ 跨网关元数据缓存失效协议
 
@@ -98,8 +98,8 @@ D 阶段建议等 B 落地后再动 ⑦。
   `duostore_backend.cc` 的缓存接线与配置校验。
 - **验收**：`test_duostore_redis.cc`（有实例才跑）——两个 backend 实例共享一个 redis，
   A 写 B 读命中新值；订阅连接被 kill 后 B 清缓存并恢复；e2e `duostore-redis`
-  段增两实例用例；[storage/duostore-core.md §7.1](../storage/duostore-core.md)、
-  [duostore-meta-redis-design.md](../storage/duostore-meta-redis-design.md)。
+  段增两实例用例；[storage/duostore-core.md §7.1](../architecture/storage/duostore-core.md)、
+  [duostore-meta-redis-design.md](../architecture/storage/duostore-meta-redis-design.md)。
 
 ## 3. 阶段 C：身份（约 2–3 天）
 
@@ -115,7 +115,7 @@ D 阶段建议等 B 落地后再动 ⑦。
   的分支、`credential_store` 的映射表（`SysConfigStore` 模板直接可用）。
 - **验收**：`test_tls.cc` + `test_service.cc`：未签名 + 有效证书通过、无证书 401、
   证书租户与签名租户不符 403；e2e 用 openssl 生成客户端证书跑一遍 builtin/beast；
-  [tls.md](../tls.md) §mTLS、[multi-tenancy.md](../multi-tenancy.md)。
+  [tls.md](../usage/tls.md) §mTLS、[multi-tenancy.md](../architecture/multi-tenancy.md)。
 
 ## 4. 阶段 D：运维纵深（合计约 2 周，可拆）
 
@@ -130,7 +130,7 @@ D 阶段建议等 B 落地后再动 ⑦。
   `storage/bucket_router.h`、`storage/metered_backend.h`。
 - **验收**：`test_reload.cc`：增一个 memory 后端并路由过去、删掉它、删被引用的返回
   `requires_restart`；e2e 在流式 GET 进行中删后端，请求完成后才 close；
-  [config-reload.md](../config-reload.md) 的可热更新矩阵更新。
+  [config-reload.md](../usage/config-reload.md) 的可热更新矩阵更新。
 
 ### ⑧ duostore meta 增量备份 / PITR
 
@@ -140,7 +140,7 @@ D 阶段建议等 B 落地后再动 ⑦。
   （BR/CDC 属集群侧，网关只导出"当前 TSO"作恢复点）。统一 CLI：`lights3 duostore
   backup <backend> --incremental --to <dir>`、`restore --to-ts`。
 - **入口**：`src/storage/duostore/*_meta_store.cc` 的 `snapshot()` 旁增 `export_since`、
-  `src/main.cc` duostore 子命令、[storage/duostore-core.md §11](../storage/duostore-core.md)。
+  `src/main.cc` duostore 子命令、[storage/duostore-core.md §11](../architecture/storage/duostore-core.md)。
 - **验收**：每引擎一条"全量 + 两次增量 + 恢复到中间点"的单测（有实例才跑的按既有
   SKIP 约定）；对应 meta 文档各加一节。
 
@@ -171,7 +171,7 @@ D 阶段建议等 B 落地后再动 ⑦。
     空 push 一律丢弃（零长块会被 pop 当作 EOF）。
   - 驱动压测（`bench_matrix.sh`，httplib 明文，localfs）：4 MiB PUT 1077→1114 ops/s，
     GET 与 16 KiB 小对象持平——与 backlog 当初"绝对量小"的判断一致。
-  - 细节见 [http-adapter.md §2.4 ⑧](../http-adapter.md)、[cloudproxy-design.md §3](../storage/cloudproxy-design.md)。
+  - 细节见 [http-adapter.md §2.4 ⑧](../architecture/http-adapter.md)、[cloudproxy-design.md §3](../architecture/storage/cloudproxy-design.md)。
 
 ## 6. 记账
 

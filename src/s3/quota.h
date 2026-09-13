@@ -1,4 +1,4 @@
-// L2: bucket quota configuration (roadmap §3.9 ②, docs/multi-tenancy.md §3).
+// L2: bucket quota configuration (roadmap §3.9 ②, docs/architecture/multi-tenancy.md §3).
 // Persisted as .sys/quota/<bucket> through SysConfigStore; managed by the ?quota
 // subresource (root credential) and read by the enforcement gate in the write
 // handlers. Enforcement itself needs live counters and therefore lives next to

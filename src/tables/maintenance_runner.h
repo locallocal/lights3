@@ -1,4 +1,4 @@
-// Periodic table maintenance (docs/s3-tables-design.md §9): the LifecycleRunner
+// Periodic table maintenance (docs/architecture/s3-tables-design.md §9): the LifecycleRunner
 // skeleton (TimerQueue tick → BackgroundTaskGroup → one pass, rounds never overlap) over
 // every table bucket: each Active table is planned and run with its effective settings,
 // tombstones past tombstone_ttl are dropped, stranded rename intents are driven. With

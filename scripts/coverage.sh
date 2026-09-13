@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Line-coverage report (roadmap §6.1, docs/testing.md §7). Builds the coverage
+# Line-coverage report (roadmap §6.1, docs/development/testing.md §7). Builds the coverage
 # variant (build-cov: -O0 --coverage via build.sh --coverage), runs the unit
 # tests (add --e2e for the e2e suites too), then reports with whichever tool is
 # installed: gcovr (HTML + summary) > lcov/genhtml > plain gcov aggregation of

@@ -1,4 +1,4 @@
-// Identifier rules and path helpers for the table catalog (docs/s3-tables-design.md §4.5).
+// Identifier rules and path helpers for the table catalog (docs/architecture/s3-tables-design.md §4.5).
 // Segments are ^[a-z0-9]([a-z0-9_-]{0,62}[a-z0-9])?$ so a namespace level or table name
 // is always a safe object-key segment and never collides with the reserved segments
 // ("_ns.json", "tbl") of the catalog layout

@@ -228,7 +228,7 @@ int parse_duration_sec(const std::string& s) {
         mult = 60;
     else if (unit == "h")
         mult = 3600;
-    // tiered storage's cold_after (docs/storage/tiered-design.md §8)
+    // tiered storage's cold_after (docs/architecture/storage/tiered-design.md §8)
     else if (unit == "d")
         mult = 86400;
     else
@@ -296,7 +296,7 @@ std::optional<std::string> tables_deployment_warning(const Config& cfg) {
     std::string kind = def->type + (meta.empty() ? "" : " meta=" + meta);
     return "tables: catalog state lives on default backend '" + def->name + "' (" + kind +
            ") which is single-gateway; multi-gateway signals present (" + joined +
-           ") -- table commits will not converge across gateways (docs/s3-tables-design.md §5.5)";
+           ") -- table commits will not converge across gateways (docs/architecture/s3-tables-design.md §5.5)";
 }
 
 bool parse_bool(const std::string& s) {

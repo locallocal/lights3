@@ -1,6 +1,6 @@
 // L3: request-scoped payload that travels on the cancellation token
 // (CancelSource::set_data at dispatch, CancelToken::data<RequestBackendStats>()
-// down the handler chain, docs/concurrency.md §5). Two consumers:
+// down the handler chain, docs/architecture/concurrency.md §5). Two consumers:
 //   - the metering decorator (metered_backend.h) accumulates the backend share of
 //     the request's latency into it for the access log (roadmap §5.1);
 //   - outbound hops (cloudproxy) read the request's trace context from it and

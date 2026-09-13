@@ -16,7 +16,7 @@ fi
 if [ "$run_server" -eq 1 ]; then
     if [ -z "${LIGHTS3_SECRET_1:-}" ] && ! grep -q '^\s*credentials_file:' "$CONFIG" 2>/dev/null; then
         echo "lights3: LIGHTS3_SECRET_1 is not set; the root credential AKIDEXAMPLE would reject every request." >&2
-        echo "         docker run -e LIGHTS3_SECRET_1=... (docs/deployment.md §4)" >&2
+        echo "         docker run -e LIGHTS3_SECRET_1=... (docs/usage/deployment.md §4)" >&2
         exit 2
     fi
     exec lights3 --config="$CONFIG" "$@"

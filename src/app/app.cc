@@ -76,13 +76,13 @@ void Application::start_server() {
     metered_ = storage::meter_backends(backends_, metrics_);
     auto router = storage::BucketRouter::build(cfg_.buckets, metered_);
     auto auth = s3::SigV4Authenticator::build(cfg_.auth);
-    // Dynamic credentials (docs/credential-management.md): loaded from the default backend, replacing the static lookup
-    // table
+    // Dynamic credentials (docs/architecture/credential-management.md): loaded from the default backend, replacing the
+    // static lookup table
     cred_store_ = sync_wait(s3::CredentialStore::load(router.default_backend(), cfg_.auth));
     auth.set_provider(cred_store_);
     bool auth_enabled = auth.enabled();
     if (!auth_enabled) LOG_WARN("no credentials configured: authentication is DISABLED");
-    // Static website hosting (docs/static-website.md): the store always exists — even
+    // Static website hosting (docs/usage/static-website.md): the store always exists — even
     // with an empty YAML list, PUT ?website can add sites at runtime. Static names get
     // the same validation gate as user requests (reserved names fail startup)
     for (auto& w : cfg_.website.buckets) storage::validate_bucket_name(w.bucket);
@@ -90,7 +90,7 @@ void Application::start_server() {
     // CORS rules (roadmap §2.1): dynamic-only (?cors API), persisted next to the
     // website entries in .sys
     cors_store_ = sync_wait(s3::CorsStore::load(router.default_backend()));
-    // mTLS identity bindings (backlog-sequence ⑥, docs/tls.md §2.1): the table is
+    // mTLS identity bindings (backlog-sequence ⑥, docs/usage/tls.md §2.1): the table is
     // always loaded (root may prepare bindings before switching the mode on)
     tls_identity_store_ = sync_wait(s3::TlsIdentityStore::load(router.default_backend()));
     // Lifecycle rules (roadmap §2.4): stored next to cors/website; the runner gets its
@@ -100,7 +100,7 @@ void Application::start_server() {
     // remove (roadmap §4.4, backlog-sequence ⑦) reach the runner and the usage
     // tracker through the same snapshot the service resolves against
     lifecycle_runner_ = std::make_unique<s3::LifecycleRunner>(router, lifecycle_store_);
-    // roadmap §3.9 (docs/multi-tenancy.md): audit file, usage counters, quotas,
+    // roadmap §3.9 (docs/architecture/multi-tenancy.md): audit file, usage counters, quotas,
     // tenants + bucket ownership. All persisted next to the other .sys records
     audit_ = s3::AuditLog::open(cfg_.audit);
     usage_ = sync_wait(s3::UsageTracker::load(router, cfg_.usage, metrics_));
@@ -111,7 +111,7 @@ void Application::start_server() {
     lifecycle_runner_->set_usage_tracker(usage_);
     if (!cfg_.usage.enabled) LOG_WARN("usage accounting is disabled: bucket/tenant quotas are not enforced");
 #ifdef LIGHTS3_TABLES
-    // S3 Tables / Iceberg REST catalog (docs/s3-tables-design.md §3):
+    // S3 Tables / Iceberg REST catalog (docs/architecture/s3-tables-design.md §3):
     // table-bucket markers next to the other .sys records, catalog state on the
     // default backend, the REST surface and the S3-plane guard on the service
     if (auto w = tables_deployment_warning(cfg_)) LOG_WARN("{}", *w);
@@ -185,11 +185,11 @@ void Application::start_server() {
         LOG_WARN(
             "website: buckets configured but authentication is disabled; "
             "all buckets are already anonymously accessible");
-    // Phase-2 background tasks (docs/credential-management.md
+    // Phase-2 background tasks (docs/architecture/credential-management.md
     // §10.2/§10.3): credentials_file hot-reload polling + periodic
     // multi-instance incremental sync (both gated by config)
     cred_store_->start_background(pool_);
-    // Website/CORS entries share the same multi-instance sync knob (docs/static-website.md §4)
+    // Website/CORS entries share the same multi-instance sync knob (docs/usage/static-website.md §4)
     website_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
     cors_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
     tls_identity_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
@@ -214,7 +214,7 @@ void Application::start_server() {
 #endif
 
     server_ = http::HttpServerFactory::create(cfg_.http.driver, cfg_.http);
-    // Dispatch-entry admission control (docs/concurrency.md §6):
+    // Dispatch-entry admission control (docs/architecture/concurrency.md §6):
     // over-limit requests queue on the semaphore instead of being
     // rejected; waiters are woken via the pool executor, avoiding running
     // an entire request coroutine chain inline on the releasing call stack
@@ -402,7 +402,7 @@ void Application::start_server() {
         service_->set_rate_limiters(std::move(ip), std::move(ak));
     }
     // Process shutdown broadcast (the third cancel source of
-    // docs/concurrency.md §5): fired after run() returns, so in-flight
+    // docs/architecture/concurrency.md §5): fired after run() returns, so in-flight
     // requests converge from their nearest cancellable suspension point
     // instead of waiting out their individual request_timeouts
     shutdown_src_ = std::make_shared<CancelSource>();
@@ -539,7 +539,7 @@ int Application::run() {
     return rc;
 }
 
-// ---------- Config hot reload (roadmap §4.4, docs/config-reload.md) ----------
+// ---------- Config hot reload (roadmap §4.4, docs/usage/config-reload.md) ----------
 
 namespace {
 

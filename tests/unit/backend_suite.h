@@ -1,6 +1,6 @@
-// Backend conformance suite (docs/storage/storage-backend.md §6): the same set of cases runs parameterized over all
-// IStorageBackend implementations. Extracted from test_storage.cc, reused by test_cloudproxy.cc
-// (docs/storage/cloudproxy-design.md §10).
+// Backend conformance suite (docs/architecture/storage/storage-backend.md §6): the same set of cases runs parameterized
+// over all IStorageBackend implementations. Extracted from test_storage.cc, reused by test_cloudproxy.cc
+// (docs/architecture/storage/cloudproxy-design.md §10).
 #pragma once
 
 #include <unistd.h>
@@ -289,7 +289,7 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
     CHECK(!p3.is_truncated);
     CHECK(p1.objects[1].key < p2.objects[0].key);
 
-    // multipart: part upload - assembly - overall ETag rule (docs/storage/storage-backend.md §1/§3.2)
+    // multipart: part upload - assembly - overall ETag rule (docs/architecture/storage/storage-backend.md §1/§3.2)
     ObjectMeta mmeta;
     mmeta.content_type = "application/x-mpu";
     mmeta.user_meta["origin"] = "suite";
@@ -329,7 +329,7 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
     CHECK_THROWS_S3(sync_wait(b.complete_multipart("suite-bkt", "other.bin", uid, std::vector<PartInfo>{{1, r1.etag}})),
                     S3ErrorCode::NoSuchUpload);
 
-    // list_parts / list_multipart_uploads (backing docs/s3-protocol.md ListParts)
+    // list_parts / list_multipart_uploads (backing docs/architecture/s3-protocol.md ListParts)
     auto lparts = sync_wait(b.list_parts("suite-bkt", "mp/joined.bin", uid, {}));
     CHECK_EQ(lparts.parts.size(), size_t(2));
     CHECK(!lparts.is_truncated);

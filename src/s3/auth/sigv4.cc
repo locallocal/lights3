@@ -195,7 +195,7 @@ struct DeclaredTrailer {
     size_t bytes;
 };
 
-// aws-chunked de-framing decorator (docs/s3-protocol.md §3.2/§3.3):
+// aws-chunked de-framing decorator (docs/architecture/s3-protocol.md §3.2/§3.3):
 // parses "<hex-size>[;chunk-signature=<sig>]\r\n<data>\r\n" chunk by chunk, exposing only pure data downstream.
 // signed mode verifies the signature chain: sig_n = HMAC(key, "AWS4-HMAC-SHA256-PAYLOAD" \n amz_date \n scope
 //                                   \n sig_{n-1} \n sha256("") \n sha256(chunk_data))；
@@ -472,7 +472,7 @@ public:
     std::optional<CredentialLookup> lookup(std::string_view ak) const override {
         auto it = creds_.find(ak);
         if (it == creds_.end()) return std::nullopt;
-        // Static credentials are always unrestricted (root semantics, docs/credential-management.md §3)
+        // Static credentials are always unrestricted (root semantics, docs/architecture/credential-management.md §3)
         return CredentialLookup{it->second, std::nullopt};
     }
     bool has_credentials() const override { return !creds_.empty(); }
@@ -598,8 +598,8 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req, std::sp
     auto t = util::parse_amz_date(f.amz_date);
     if (!t) malformed("cannot parse x-amz-date");
     if (f.presigned) {
-        // presigned validity is judged by X-Amz-Expires (docs/s3-protocol.md §3.4). Expiry only constrains the
-        // past side; the issue time must not lead the server by more than 15min (prevents future timestamps from
+        // presigned validity is judged by X-Amz-Expires (docs/architecture/s3-protocol.md §3.4). Expiry only constrains
+        // the past side; the issue time must not lead the server by more than 15min (prevents future timestamps from
         // extending validity indefinitely)
         if (*t - clock() > std::chrono::seconds(kMaxClockSkewSec))
             throw S3Error(S3ErrorCode::AccessDenied, "Request is not valid yet");
@@ -684,7 +684,7 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req, std::sp
                       "The request signature we calculated does not match the signature you "
                       "provided.");
 
-    // x-amz-trailer declaration (docs/s3-protocol.md §3.3). Validated regardless of body presence:
+    // x-amz-trailer declaration (docs/architecture/s3-protocol.md §3.3). Validated regardless of body presence:
     // a declaration the payload type cannot carry, or one naming a checksum this implementation
     // cannot verify, must fail loudly rather than upload with silently-skipped integrity
     std::vector<DeclaredTrailer> declared_trailers;
@@ -702,7 +702,7 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req, std::sp
         declared_trailers.push_back({std::move(name), spec->algo, spec->bytes});
     }
 
-    // Streaming payload verification (docs/s3-protocol.md §3.2/§3.3)
+    // Streaming payload verification (docs/architecture/s3-protocol.md §3.2/§3.3)
     if ((chunked_signed || chunked_unsigned) && req.body) {
         // AWS mandates this header for streaming variants; without it the decoded length is unknown, the
         // "verify when fully read" trigger cannot fire, and the length cannot be reported to the backend

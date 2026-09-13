@@ -1,5 +1,5 @@
 // Fuzz target: aws-chunked de-framing (the streaming body reader installed by
-// SigV4 verification for STREAMING-* payloads, docs/s3-protocol.md §3.2/§3.3).
+// SigV4 verification for STREAMING-* payloads, docs/architecture/s3-protocol.md §3.2/§3.3).
 // A correctly signed request header set is built once; the fuzz bytes are the
 // body. Both the unsigned-trailer and the signed-chunk variants are driven, so
 // chunk-size lines, chunk-signature fields, trailers and the terminal chunk are

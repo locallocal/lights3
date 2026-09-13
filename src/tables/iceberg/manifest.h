@@ -1,4 +1,4 @@
-// Iceberg manifest-list / manifest records (docs/s3-tables-design.md
+// Iceberg manifest-list / manifest records (docs/architecture/s3-tables-design.md
 // §7.4): the fields the deep snapshot check needs, lifted from the Avro JSON the reader
 // produces. Field names follow the Iceberg spec; v1 files lacking the v2 fields read as 0.
 // A missing or mistyped required field is a 409 CommitFailedException

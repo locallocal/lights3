@@ -1,5 +1,5 @@
 // lights3-ctl `cred` command group — credential operations against
-// /-/admin/credentials (docs/credential-management.md §2/§3).
+// /-/admin/credentials (docs/architecture/credential-management.md §2/§3).
 // Each subcommand (cred list / get / create / delete) has its own option set —
 // ccmd's root options do not propagate down, connection options must follow
 // the leaf subcommand (lights3-ctl cred list --endpoint=...), and long options only
@@ -113,7 +113,7 @@ std::shared_ptr<ccmd::command> make_create() {
                 auto policy = c->var<std::string>("policy");
                 if (!comment.empty()) body["comment"] = comment;
                 if (!policy.empty()) body["policy"] = json::parse(load_policy_arg(policy));
-                // Tenancy (docs/multi-tenancy.md §4): a tenant admin may omit --tenant
+                // Tenancy (docs/architecture/multi-tenancy.md §4): a tenant admin may omit --tenant
                 // (the server pins its own tenant); root names the tenant explicitly
                 auto tenant = c->var<std::string>("tenant");
                 auto role = c->var<std::string>("role");
@@ -126,7 +126,7 @@ std::shared_ptr<ccmd::command> make_create() {
         });
     cmd->varp<std::string>("comment", "c", "", "credential comment.");
     cmd->varp<std::string>("policy", "p", "", "policy JSON, or @file to read from a file.");
-    cmd->varp<std::string>("tenant", "t", "", "owning tenant id (docs/multi-tenancy.md).");
+    cmd->varp<std::string>("tenant", "t", "", "owning tenant id (docs/architecture/multi-tenancy.md).");
     cmd->varp<std::string>("role", "r", "", "user (default) | admin: tenant admin role.");
     lights3_ctl::add_conn_flags(cmd);
     return cmd;
@@ -146,7 +146,7 @@ std::shared_ptr<ccmd::command> make_delete() {
     return cmd;
 }
 
-// ---- mTLS bindings (backlog-sequence ⑥, docs/tls.md §2.1): /-/admin/tls-identities ----
+// ---- mTLS bindings (backlog-sequence ⑥, docs/usage/tls.md §2.1): /-/admin/tls-identities ----
 
 constexpr const char* kTlsBase = "/-/admin/tls-identities";
 
@@ -235,7 +235,7 @@ std::shared_ptr<ccmd::command> make_cred() {
     auto cmd = std::make_shared<ccmd::command>(
         "cred", "lights3-ctl cred list --endpoint=http://127.0.0.1:9000", "lights3-ctl cred <command> [options]",
         "Manage tenant credentials via /-/admin/credentials with the root (static) "
-        "access/secret key (docs/credential-management.md). Credentials come from each "
+        "access/secret key (docs/architecture/credential-management.md). Credentials come from each "
         "subcommand's --ak=/--sk= or from env LIGHTS3_ADMIN_AK/LIGHTS3_ADMIN_SK. "
         "Options must follow the leaf subcommand; long options take values as "
         "--name=value.",

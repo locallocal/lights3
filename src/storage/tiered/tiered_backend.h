@@ -1,4 +1,4 @@
-// L3: tiered-storage composite backend (docs/storage/tiered-design.md)
+// L3: tiered-storage composite backend (docs/architecture/storage/tiered-design.md)
 // Composes a local hot side behind tier::ITierLocal (localfs/xlocalfs or duostore) with a
 // cloud side (any IStorageBackend): cold objects are uploaded to the cloud and stubbed
 // locally, then transparently read back on access and cached back to local.
@@ -37,7 +37,7 @@ struct TierRule {
 };
 
 struct TieredConfig {
-    // coldness threshold (docs/storage/tiered-design.md §5.1)
+    // coldness threshold (docs/architecture/storage/tiered-design.md §5.1)
     int64_t cold_after_sec = 30 * 24 * 3600;
     // 0 = disable the background task (manual hook for tests)
     int64_t scan_interval_sec = 3600;
@@ -52,7 +52,7 @@ struct TieredConfig {
     int max_concurrent_transfers = 4;
     // 0 = logical quota disabled
     uint64_t quota_bytes = 0;
-    // Exponential backoff for failed GC entries (docs/storage/tiered-design.md §9): delay =
+    // Exponential backoff for failed GC entries (docs/architecture/storage/tiered-design.md §9): delay =
     // base x 2^attempts, clamped to cap; persisted per entry (attempts/retry_at land in the
     // TSV, not reset by restart)
     int64_t gc_retry_base_sec = 60;
@@ -95,7 +95,7 @@ struct TierGcStats {
     uint64_t failed = 0;
 };
 
-// Bidirectional reconciliation statistics for run_reconcile_once() (docs/storage/tiered-design.md §9)
+// Bidirectional reconciliation statistics for run_reconcile_once() (docs/architecture/storage/tiered-design.md §9)
 struct TierReconcileStats {
     // objects visited in the cloud walk
     uint64_t cloud_objects = 0;
@@ -166,7 +166,7 @@ public:
     Task<bool> bucket_exists(std::string_view bucket) override;
     Task<std::vector<BucketInfo>> list_buckets() override;
 
-    // ---- object: tier-aware (docs/storage/tiered-design.md §6/§7) ----
+    // ---- object: tier-aware (docs/architecture/storage/tiered-design.md §6/§7) ----
     Task<ObjectStream> get_object(std::string_view bucket, std::string_view key,
                                   std::optional<ByteRange> range) override;
     Task<PutResult> put_object(std::string_view bucket, std::string_view key, ObjectMeta meta, http::BodyReader& body,
@@ -196,7 +196,7 @@ public:
     // registry and possibly routed to directly at the same time)
     Task<void> close() override;
 
-    // ---- Background tasks and test hooks (docs/storage/tiered-design.md §10 P1 "manual trigger") ----
+    // ---- Background tasks and test hooks (docs/architecture/storage/tiered-design.md §10 P1 "manual trigger") ----
     // Single-object demotion: local -> remote (upload + stubbing) or cached -> remote
     // (zero-traffic stubbing). Returns silently when preconditions fail (already remote /
     // task in flight); if beaten by a concurrent write, the cloud replica goes to GC
@@ -214,7 +214,7 @@ public:
     // delete a live replica); failed entries are rescheduled with exponential backoff
     // (attempts/retry_at persisted in the entry TSV, not reset by restart)
     Task<TierGcStats> run_gc_once();
-    // Bidirectional reconciliation (docs/storage/tiered-design.md §9, low-frequency, daily by
+    // Bidirectional reconciliation (docs/architecture/storage/tiered-design.md §9, low-frequency, daily by
     // default): cloud has it, local does not -> rebuild the stub from lights3-* redundant
     // headers (default) or delete (reconcile_delete_orphans); local remote, cloud missing
     // -> warn, never delete the stub. GC queue snapshot + inflight guards prevent
@@ -259,8 +259,8 @@ private:
         ~OpGuard() { self->record_op(op, ok); }
     };
 
-    // ---- per-key locks (docs/storage/tiered-design.md §7.3): striped async mutexes, protecting only the state-commit
-    // section ----
+    // ---- per-key locks (docs/architecture/storage/tiered-design.md §7.3): striped async mutexes, protecting only the
+    // state-commit section ----
     static constexpr size_t kLockStripes = 64;
     AsyncSemaphore& key_lock(std::string_view bucket, std::string_view key);
 
@@ -272,7 +272,7 @@ private:
         return std::string(bucket) + "/" + std::string(key);
     }
 
-    // ---- Access records + time wheel (docs/storage/tiered-design.md §4.3 / §5.1) ----
+    // ---- Access records + time wheel (docs/architecture/storage/tiered-design.md §4.3 / §5.1) ----
     struct Touch {
         int64_t atime = 0;
         // touches since the last flush (merged into the stored count)
@@ -306,7 +306,7 @@ private:
     Task<void> consider(ScanCtx& cx, const std::string& bucket, const std::string& key, int64_t from_slot);
     double evict_score(const tier::AccessRec& a, uint64_t size, int64_t now) const;
 
-    // ---- GC queue (docs/storage/tiered-design.md §7.2): <state>/gc/<seq>, one TSV per entry ----
+    // ---- GC queue (docs/architecture/storage/tiered-design.md §7.2): <state>/gc/<seq>, one TSV per entry ----
     void enqueue_gc(std::string_view bucket, std::string_view key, std::string_view remote_etag);
 
     // ---- Quarantine ledger (④): <state>/quarantine/<md5(kind|bucket|key)> ----
@@ -323,7 +323,7 @@ private:
     // same remote version, then commit the fill as cached
     Task<void> commit_cache_fill(std::string bucket, std::string key, ObjectMeta expect, tier::TierInfo expect_tier,
                                  tier::ICacheFill& fill);
-    // statvfs headroom precheck (docs/storage/tiered-design.md §6.2 step 2)
+    // statvfs headroom precheck (docs/architecture/storage/tiered-design.md §6.2 step 2)
     bool cache_space_ok(uint64_t size) const { return local_->cache_space_ok(size, cfg_.min_free_bytes); }
 
     // Background coroutine management: core/background.h wait group (spawn counting +
@@ -336,7 +336,7 @@ private:
     Task<void> demote_quiet(std::string bucket, std::string key);
     Task<void> promote_quiet(std::string bucket, std::string key);
     Task<void> scan_and_gc();
-    // Incremental quota maintenance (docs/archive/gaps.md §6.3 / docs/storage/tiered-design.md):
+    // Incremental quota maintenance (docs/archive/gaps.md §6.3 / docs/architecture/storage/tiered-design.md):
     // PUT/DELETE adjust the estimate in place and kick an early scan round past the
     // watermark; the full scan recalibrates against measured values
     void note_local_delta(int64_t delta);
@@ -384,7 +384,7 @@ private:
     // on the HTTP response thread" (docs/archive/gaps.md §2.4)
     ThreadPoolExecutor pool_exec_{*pool_};
     std::vector<std::unique_ptr<AsyncSemaphore>> key_locks_;
-    // max_concurrent_transfers throttle (docs/storage/tiered-design.md §5.1)
+    // max_concurrent_transfers throttle (docs/architecture/storage/tiered-design.md §5.1)
     AsyncSemaphore transfers_;
 
     std::mutex inflight_m_;

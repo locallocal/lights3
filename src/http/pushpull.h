@@ -1,5 +1,5 @@
 // Shared by L1/L3: push-model <-> pull-model inversion components
-// (docs/storage/cloudproxy-design.md §3.1, extracted from the httplib driver).
+// (docs/architecture/storage/cloudproxy-design.md §3.1, extracted from the httplib driver).
 // BlockQueue: bounded buffer capped by bytes, single-producer/single-consumer;
 // the capacity is the backpressure. Producer push returning false means the
 // consumer has cancelled; consumer pop returning 0 means EOF, and pop after

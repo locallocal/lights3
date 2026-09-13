@@ -4,7 +4,7 @@
 > `docs/` 删除；因源码/文档注释以 `docs/archive/issues.md TN` 形式引用其中的
 > 论证，现从 git 历史恢复归档于此。内容不再更新；接续的规划底账
 > [roadmap.md](roadmap.md) 也已于 2026-09-05 收口归档于此，当前待办见
-> [../todo.md](../todo.md)。
+> [../todo.md](../development/todo.md)。
 >
 > 生成日期：2026-08-13
 > 方法：并行通读 `src/core`、`src/storage`、`src/s3`、`src/http`、`src/main.cc`、`tests/` 全部源码；
@@ -165,7 +165,7 @@
 
 ### ~~【中】T10. 四驱动的超时 / 连接上限契约完全无测试~~ ✅ 已补齐（2026-08-14）
 - 对照：`src/core/config.h:38-50`（`request_timeout_sec`、`transfer_stall_timeout_sec`、
-  `max_connections` 拒新连、`idle_timeout_sec` 空闲关连）与 `docs/http-adapter.md:201`
+  `max_connections` 拒新连、`idle_timeout_sec` 空闲关连）与 `docs/architecture/http-adapter.md:201`
   （shutdown 须在"在途完成**或超时**"后返回）
 - 盲区：`grep` 全 tests/ 对 `request_timeout` / `transfer_stall` / `max_connections` **零命中**；
   `idle_timeout` 只在夹具里被设置从未被断言；shutdown 只测了快乐路径。而这组行为的要点恰是
@@ -190,7 +190,7 @@
 - 严重度：**中**
 
 ### ~~【中】T11. `runtime.max_inflight_requests` 入口限流（含 Permit 系进流式响应体）无行为测试~~ ✅ 已补齐（2026-08-14）
-- 对照：`docs/concurrency.md:281`（全局限流、超限排队、Permit 系在 `stream_body`、读完/断连才归还、
+- 对照：`docs/architecture/concurrency.md:281`（全局限流、超限排队、Permit 系在 `stream_body`、读完/断连才归还、
   关停按 `available()` 判在途）；实现在 `src/main.cc` 装配层
 - 盲区：现有覆盖仅 config 解析（`test_config.cc:154`）与 metrics 渲染桩（假数据）。限流本体——
   超限排队、流式 GET 未读完时许可是否仍被占、断连时许可是否归还（泄漏一个就永久少一个额度）——

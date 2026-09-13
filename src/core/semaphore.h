@@ -1,4 +1,4 @@
-// L4: coroutine-based async semaphore (docs/concurrency.md §6)
+// L4: coroutine-based async semaphore (docs/architecture/concurrency.md §6)
 // Used for max_inflight_requests throttling at the dispatch entry point and for
 // multipart part-level concurrency control.
 // An over-limit acquire() suspends and queues (FIFO) instead of being rejected.

@@ -1,4 +1,4 @@
-// XML parser (docs/s3-protocol.md §4: shallow-structure request XML)
+// XML parser (docs/architecture/s3-protocol.md §4: shallow-structure request XML)
 #include "s3/errors.h"
 #include "s3/xml.h"
 #include "unit/mini_test.h"

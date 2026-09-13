@@ -1,4 +1,4 @@
-// L2: ?quota subresource (roadmap §3.9 ②, docs/multi-tenancy.md §3). No AWS
+// L2: ?quota subresource (roadmap §3.9 ②, docs/architecture/multi-tenancy.md §3). No AWS
 // equivalent — the XML shape is this gateway's own. GET is open to any credential
 // dispatch admitted to the bucket (a tenant may read its own limit); PUT/DELETE are
 // operator decisions and stay root-only like ?cors / ?lifecycle / ?website.

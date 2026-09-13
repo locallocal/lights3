@@ -1,5 +1,5 @@
 // L2: the background rounds on demand and the quarantine ledgers of a live
-// gateway (docs/cli.md §3.12, `lights3-ctl duostore|tier ...`), the same job
+// gateway (docs/usage/cli.md §3.12, `lights3-ctl duostore|tier ...`), the same job
 // model as admin_fsck.cc (one job per backend, POST starts, GET polls):
 //   POST/GET /-/admin/duostore/<backend>/gc|scan
 //   POST/GET /-/admin/tier/<backend>/scan|gc|reconcile

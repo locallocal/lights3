@@ -1,4 +1,4 @@
-// Catalog + ObjectCatalogStore on MemoryBackend (docs/s3-tables-design.md §4–§5,
+// Catalog + ObjectCatalogStore on MemoryBackend (docs/architecture/s3-tables-design.md §4–§5,
 // §13): namespaces, tables, the commit protocol,
 // idempotent replay, crash windows, rename, drop
 #include <nlohmann/json.hpp>

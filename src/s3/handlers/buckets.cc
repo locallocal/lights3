@@ -18,13 +18,14 @@ Task<http::HttpResponse> S3Service::list_buckets(const RequestAuth& auth) {
     for (auto& [_, backend] : *backends) {
         auto part = co_await backend->list_buckets();
         for (auto& b : part) {
-            // Internal reserved names never appear in the user-visible list (docs/credential-management.md §4.1)
+            // Internal reserved names never appear in the user-visible list (docs/architecture/credential-management.md
+            // §4.1)
             if (b.name == storage::kSysBucketName) continue;
             // Filter by policy (docs/archive/gaps.md §5.10): not filtering was previously a documented trade-off
             // ("only bucket names leak"), but bucket names are exactly step one of an attack chain -- restricted
             // credentials should not see that buckets outside their allowlist exist
             if (auth.policy && !auth.policy->allows_bucket(b.name)) continue;
-            // Tenant credentials see only their tenant's buckets (docs/multi-tenancy.md §4.3)
+            // Tenant credentials see only their tenant's buckets (docs/architecture/multi-tenancy.md §4.3)
             if (!auth.tenant.empty() && tenants_ && tenants_->owner_of(b.name) != auth.tenant) continue;
             bool dup = false;
             for (auto& e : all)
@@ -86,10 +87,10 @@ Task<http::HttpResponse> S3Service::create_bucket(http::HttpRequest& req, std::s
     }
     auto& backend = router_.resolve(bucket);
 #ifdef LIGHTS3_TABLES
-    // The Iceberg catalog path prefix would shadow such a bucket (docs/s3-tables-design.md §6.1)
+    // The Iceberg catalog path prefix would shadow such a bucket (docs/architecture/s3-tables-design.md §6.1)
     if (table_guard_) table_guard_->check_create_bucket(bucket);
 #endif
-    // Tenant credential (docs/multi-tenancy.md §4.3): the bucket becomes the tenant's.
+    // Tenant credential (docs/architecture/multi-tenancy.md §4.3): the bucket becomes the tenant's.
     // An existing unowned name must not be claimable — dispatch admitted the request
     // because no owner record exists, so the existence check happens here
     if (!auth.tenant.empty() && tenants_) {
@@ -161,7 +162,7 @@ Task<http::HttpResponse> S3Service::head_bucket(std::string bucket) {
 
 Task<http::HttpResponse> S3Service::delete_bucket(std::string bucket, const RequestAuth& auth) {
 #ifdef LIGHTS3_TABLES
-    // Table buckets (docs/s3-tables-design.md §8.1): refuse while the catalog or the
+    // Table buckets (docs/architecture/s3-tables-design.md §8.1): refuse while the catalog or the
     // reserved prefix is non-empty; afterwards the catalog state dies with the bucket
     if (table_guard_) co_await table_guard_->check_delete_bucket(bucket, router_.resolve(bucket));
 #endif
@@ -196,8 +197,8 @@ Task<http::HttpResponse> S3Service::delete_bucket(std::string bucket, const Requ
     co_return resp;
 }
 
-// GetBucketLocation: echoes the configured region (docs/s3-protocol.md §1: LocationConstraint carries no region
-// constraint)
+// GetBucketLocation: echoes the configured region (docs/architecture/s3-protocol.md §1: LocationConstraint carries no
+// region constraint)
 Task<http::HttpResponse> S3Service::get_bucket_location(std::string bucket) {
     bool exists = co_await router_.resolve(bucket).bucket_exists(bucket);
     if (!exists) throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist", bucket);

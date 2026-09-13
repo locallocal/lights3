@@ -3,7 +3,7 @@
 > **归档说明（2026-08-27）**：本清单已于 2026-08-12 全部清零并从 `docs/` 删除；
 > 因全仓 300+ 处源码/文档注释以 `docs/archive/gaps.md §N` 形式引用其中的论证
 > （"为什么这么写"），现从 git 历史恢复归档于此。内容不再更新，行号对应清零
-> 时的快照；接续的规划底账 [roadmap.md](roadmap.md) 也已于 2026-09-05 收口归档于此，当前待办见 [../todo.md](../todo.md)。
+> 时的快照；接续的规划底账 [roadmap.md](roadmap.md) 也已于 2026-09-05 收口归档于此，当前待办见 [../todo.md](../development/todo.md)。
 >
 > 生成时间：2026-08-02。方法：按子系统并行深读全部 23k 行源码（core / http / s3 /
 > storage 通用与本地系 / duostore / cloudproxy），逐条对照 `docs/` 各设计文档的承诺
@@ -223,7 +223,7 @@ local（stub sidecar 为权威）、cloudproxy 把 `If-None-Match`/`If-Match` �
 
 ### 2.7 [✅已修复] localfs LIST 无 prefix/delimiter 剪枝（文档声称有）
 
-**位置**：`src/storage/localfs/localfs_backend.cc:250-277`——不论 prefix/delimiter 是什么，一律 `recursive_directory_iterator` 全桶遍历 + 全部 key 收进 vector + 全排序。而 `docs/storage/storage-backend.md:148-150` 明确声称"prefix 剪枝（prefix 含 `/` 时直接定位起始目录）；delimiter=`/` 时目录即 common prefix，无需展开其内部"。
+**位置**：`src/storage/localfs/localfs_backend.cc:250-277`——不论 prefix/delimiter 是什么，一律 `recursive_directory_iterator` 全桶遍历 + 全部 key 收进 vector + 全排序。而 `docs/architecture/storage/storage-backend.md:148-150` 明确声称"prefix 剪枝（prefix 含 `/` 时直接定位起始目录）；delimiter=`/` 时目录即 common prefix，无需展开其内部"。
 
 **后果**：`?max-keys=1&prefix=a/b/c` 在 1000 万对象的桶上要 stat 1000 万次、构造 ~1GB 字符串、做一次 O(n log n) 排序，只为返回 1 个 key。并发 LIST 直接打爆 IO 池与内存。
 
@@ -328,7 +328,7 @@ prewrite 之前抛出（语义上明确未提交）。回归用例：`duostore_t
 
 ### 3.1 [✅已修复] 取消体系整体是死代码
 
-`docs/concurrency.md §5` 声称取消源有三（客户端断连、请求超时、进程 shutdown），实际一个都没接线：`src/s3/service.cc:123` 的 `RequestContext.cancel` 恒为默认"永不取消" token 且 `ctx` 不传给 route/handler/后端；40+ 处 `pool_->schedule()` 无一传 token；`with_timeout`（`task.h:361`）零生产调用点。
+`docs/architecture/concurrency.md §5` 声称取消源有三（客户端断连、请求超时、进程 shutdown），实际一个都没接线：`src/s3/service.cc:123` 的 `RequestContext.cancel` 恒为默认"永不取消" token 且 `ctx` 不传给 route/handler/后端；40+ 处 `pool_->schedule()` 无一传 token；`with_timeout`（`task.h:361`）零生产调用点。
 
 关联问题：(a) `AsyncSemaphore::acquire()` **没有任何取消入口**，而 `max_inflight_requests` 排队正是请求最可能长时间挂起的地方——即便接上 `with_timeout` 也打不断它；(b) `thread_pool.cc:93-126` 整套取消竞态机制（Slot 共享块、认领、注册后补检）永远走不到，却每次调度都实打实付出一次 `make_shared` 的代价。
 
@@ -369,7 +369,7 @@ pool_->schedule()` 一处未改即获得请求级取消。dispatch 建 per-reque
 
 ### 3.4 [✅已修复] SSE / tagging / object-lock / ACL 的**请求头**被静默吞掉
 
-`src/s3/service.cc:75-90` 只按 query 子资源拒绝，`src/s3/handlers/common.h:25-34` 的元数据提取只认 `Content-Type` 与 `x-amz-meta-*`。于是 `x-amz-server-side-encryption`、SSE-C 的三个头、`x-amz-tagging`、`x-amz-object-lock-*`、`x-amz-acl: public-read` 全部返回 200 但语义未兑现。`docs/s3-protocol.md:15-17` 承诺这些返回 `NotImplemented`——只对子资源做到了，对头没有。
+`src/s3/service.cc:75-90` 只按 query 子资源拒绝，`src/s3/handlers/common.h:25-34` 的元数据提取只认 `Content-Type` 与 `x-amz-meta-*`。于是 `x-amz-server-side-encryption`、SSE-C 的三个头、`x-amz-tagging`、`x-amz-object-lock-*`、`x-amz-acl: public-read` 全部返回 200 但语义未兑现。`docs/architecture/s3-protocol.md:15-17` 承诺这些返回 `NotImplemented`——只对子资源做到了，对头没有。
 
 **静默接受比报错危险得多**：合规场景下客户端会据此认为对象已加密/已锁定。
 
@@ -399,7 +399,7 @@ query key（flag 键与 presigned 签名参数族、SDK 的 `x-id` 全局放行�
 
 ### 3.6 [✅已修复] 条件写在多实例部署下无原子性，与文档承诺不符
 
-`docs/s3-protocol.md:126-130` 把 If-Match / If-None-Match 列为"对客户端的承诺"，但判定发生在网关内存里。两个实例并发处理同 key 的 `If-None-Match: *` 时各自 head 都得到 NoSuchKey，两者都 put。而 `docs/credential-management.md §10.3` 刚为多实例补齐了凭证同步——项目已把多实例当作支持形态，这条限制不再是理论问题。
+`docs/architecture/s3-protocol.md:126-130` 把 If-Match / If-None-Match 列为"对客户端的承诺"，但判定发生在网关内存里。两个实例并发处理同 key 的 `If-None-Match: *` 时各自 head 都得到 NoSuchKey，两者都 put。而 `docs/architecture/credential-management.md §10.3` 刚为多实例补齐了凭证同步——项目已把多实例当作支持形态，这条限制不再是理论问题。
 
 **建议**：短期在文档明写限制并在 `auth.sync_interval > 0` 时启动打 WARN；中期按 2.6 下推到后端。
 
@@ -625,7 +625,7 @@ GLACIER 再原样回显等于替存储层撒谎（对象根本没进任何归档
 
 ### 5.4 [✅已修复] CreateBucket 从不读请求体（中）
 
-`src/s3/handlers/buckets.cc:46-51` 连 `HttpRequest&` 参数都没有，`LocationConstraint` 从未解析。而 `docs/s3-protocol.md:93-95` 明确列出"需要解析请求 XML 的三处"包含 CreateBucket。后果：跨 region 的建桶请求静默成功，随后 `GetBucketLocation` 回显的却是本地配置 region。AWS 此时返回 `InvalidLocationConstraint`（错误码表里也没有这个码）。
+`src/s3/handlers/buckets.cc:46-51` 连 `HttpRequest&` 参数都没有，`LocationConstraint` 从未解析。而 `docs/architecture/s3-protocol.md:93-95` 明确列出"需要解析请求 XML 的三处"包含 CreateBucket。后果：跨 region 的建桶请求静默成功，随后 `GetBucketLocation` 回显的却是本地配置 region。AWS 此时返回 `InvalidLocationConstraint`（错误码表里也没有这个码）。
 
 **✅已修复**（2026-08-09）：`create_bucket` 补 `HttpRequest&` 参数并解析
 `CreateBucketConfiguration/LocationConstraint`，与本端 region 不符即
@@ -731,7 +731,7 @@ ListBuckets 改为按 policy 过滤：原取舍写的是"只泄露桶名，不�
 静态凭证的明文 SK 不再经 admin API 回传（按建议），掩码收紧为只留前 4 位，任何
 `?show-secret=true` 都记 WARN 审计日志。CopyObject 的源侧授权顺带补齐为
 源桶 + 源 key（加了前缀粒度后只校验桶就漏了）。
-docs/credential-management.md §10.4 重写并新增 §10.5，中英同步；顺带修掉两处早已
+docs/architecture/credential-management.md §10.4 重写并新增 §10.5，中英同步；顺带修掉两处早已
 失真的描述——执行点写的是 `authorize(ak,bucket,is_write)`，而实际自 §3.7 起就是对
 验签快照判定。
 **残留**：policy 创建后仍不可改（无 update API）。补 update 会牵动多实例增量同步
@@ -900,7 +900,7 @@ docs/credential-management.md §10.4 重写并新增 §10.5，中英同步；顺
 | **无 TLS/HTTPS**（高） | 四驱动均无，`HttpConfig` 也没有承接字段。而 SigV4 的 `UNSIGNED-PAYLOAD` 路径的完整性完全依赖传输层 TLS，文档自己也这么论证——作为服务端却只能跑明文，该论断在入站方向不成立。项目已链 OpenSSL，httplib 已定义 `CPPHTTPLIB_OPENSSL_SUPPORT`（客户端侧），接入成本不高。建议先在 httplib/beast 落地，builtin/seastar 标注不支持并在配置了 TLS 时直接抛错，避免"配了但静默跑明文" |
 | **无 CI 配置** | 仓库无 `.github/`、无任何 CI 描述文件。四个构建变体（主/TSan/sqlite/redis）+ 12 个 ctest 套件目前全靠人工在本地跑 |
 | **localfs / xlocalfs / tiered 三个后端零指标** | 只有 duostore 与 cloudproxy 接了 `MetricsScope`——**默认部署的后端反而没有任何可观测性** |
-| **线程池等待直方图采集了却从不输出** | `thread_pool.cc:83` 写入、`s3/metrics.cc:73-81` 只渲染三个 gauge。而 `docs/concurrency.md §3.1` 把"等待时长直方图右移"作为开启 per-backend 独立池的**唯一判据**——文档推荐的容量决策流程当前无法执行 |
+| **线程池等待直方图采集了却从不输出** | `thread_pool.cc:83` 写入、`s3/metrics.cc:73-81` 只渲染三个 gauge。而 `docs/architecture/concurrency.md §3.1` 把"等待时长直方图右移"作为开启 per-backend 独立池的**唯一判据**——文档推荐的容量决策流程当前无法执行 |
 | **入口限流的排队深度不可观测** | `AsyncSemaphore::available()/waiting()` 零调用者。`inflight` 是全进程唯一准入闸门，排了多少人、还剩多少额度，`/-/metrics` 一个字都没有——压测时无法区分"卡在准入"还是"卡在池" |
 | **关停挂死无线索** | `BackgroundTaskGroup::wait_idle()` 是无超时、无日志、无计数暴露的裸 `cv_.wait`；`TimerQueue` 无可控停机语义（停机后 `add()` 仍返回"有效但永不触发"的 id） |
 | **定时器线程无耗时观测** | 单线程串行执行全部回调，回调超时会连锁推迟 tiered 扫描 / duostore GC / 凭证同步，而目前没有任何指标或日志能发现"定时器被某个回调堵了 3 秒" |
@@ -1064,15 +1064,15 @@ docs/credential-management.md §10.4 重写并新增 §10.5，中英同步；顺
 
 | 位置 | 问题 | 严重度 |
 | --- | --- | --- |
-| `docs/en/storage/storage-backend.md:134-135` | 写着 `meta first, then data`——**正是被判定会造成静默损坏的旧实现**（中文版已改为"先数据后 sidecar"，`fs_util.cc:172-174` 的注释直接点名这一反序是静默损坏的成因）。照英文文档移植或新写后端会重新引入该缺陷 | **高** |
-| `docs/en/storage/storage-backend.md` §3.1 | 整段缺失中文版新增的三条要点：元数据随数据 xattr 同批提交、提交段 per-key 锁、fsync 持久性。其中 **`LIGHTS3_FSYNC` 开关在英文文档里 0 处提及**（中文 1 处 + 代码 2 处）——这是唯一一处"一方有配置开关另一方完全没有"的漂移，且因为它是环境变量而非 yaml 键，机械比对抓不到 | **高** |
-| `docs/en/storage/storage-backend.md:144-146` | GET 段仍写 `open + fstat + read sidecar`，缺 xattr 优先与"绝不对路径二次 stat"的铁律（对应 2.2 的修复） | 中 |
-| `docs/object-read-write-flow.md:109-117` 与 `docs/en/*:130-143` | **中英双方**都还写着"sidecar 先于数据文件落位"，与同仓 `storage-backend.md:129` 直接矛盾 | 中 |
+| `docs/en/architecture/storage/storage-backend.md:134-135` | 写着 `meta first, then data`——**正是被判定会造成静默损坏的旧实现**（中文版已改为"先数据后 sidecar"，`fs_util.cc:172-174` 的注释直接点名这一反序是静默损坏的成因）。照英文文档移植或新写后端会重新引入该缺陷 | **高** |
+| `docs/en/architecture/storage/storage-backend.md` §3.1 | 整段缺失中文版新增的三条要点：元数据随数据 xattr 同批提交、提交段 per-key 锁、fsync 持久性。其中 **`LIGHTS3_FSYNC` 开关在英文文档里 0 处提及**（中文 1 处 + 代码 2 处）——这是唯一一处"一方有配置开关另一方完全没有"的漂移，且因为它是环境变量而非 yaml 键，机械比对抓不到 | **高** |
+| `docs/en/architecture/storage/storage-backend.md:144-146` | GET 段仍写 `open + fstat + read sidecar`，缺 xattr 优先与"绝不对路径二次 stat"的铁律（对应 2.2 的修复） | 中 |
+| `docs/architecture/object-read-write-flow.md:109-117` 与 `docs/en/*:130-143` | **中英双方**都还写着"sidecar 先于数据文件落位"，与同仓 `storage-backend.md:129` 直接矛盾 | 中 |
 | `docs/README.md:71-72` | 称 sidecar 用「`.meta` **JSON**」，实际是 `.lights3-meta` **TSV**（`fs_util.h:19`，`storage-backend.md:118` 自己就写对了）。英文 README 因措辞含糊反而没错 | 中 |
-| 全仓 16 处 | `docs/todo.md` 与 `docs/en/todo.md` 已删除，但正文引用残留 ZH 8 处 + EN 8 处（concurrency / architecture / cloudproxy-backend×2 / storage-backend×2 / s3-protocol / duostore-tikv-meta，中英各一份） | 低 |
+| 全仓 16 处 | `docs/development/todo.md` 与 `docs/en/development/todo.md` 已删除，但正文引用残留 ZH 8 处 + EN 8 处（concurrency / architecture / cloudproxy-backend×2 / storage-backend×2 / s3-protocol / duostore-tikv-meta，中英各一份） | 低 |
 | `docs/README.zh-CN.md` | 缺仓库根 `README.md:184-205` 那段文档索引表；其余技术事实逐项一致 | 低 |
 
-**建议**：以 `docs/storage/storage-backend.md` §3.1 为唯一参照，一次性同步 `docs/en/storage/storage-backend.md` 与中英两份 `object-read-write-flow.md`；`todo.md` 的残留引用统一改为自述式描述。
+**建议**：以 `docs/architecture/storage/storage-backend.md` §3.1 为唯一参照，一次性同步 `docs/en/architecture/storage/storage-backend.md` 与中英两份 `object-read-write-flow.md`；`todo.md` 的残留引用统一改为自述式描述。
 
 **✅已修复**（2026-08-12，逐行）：
 

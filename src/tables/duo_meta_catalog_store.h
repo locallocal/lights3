@@ -1,4 +1,4 @@
-// ITableCatalogStore on a duostore meta engine's KV facade (docs/s3-tables-design.md
+// ITableCatalogStore on a duostore meta engine's KV facade (docs/architecture/s3-tables-design.md
 // §12): the same key layout as ObjectCatalogStore (so
 // `lights3 tables export|import` moves state between the two backings byte for byte)
 // over IMetaStore::kv_*. CAS is the engine's own transaction, and a commit writes the

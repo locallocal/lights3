@@ -1,4 +1,4 @@
-// L3: CloudProxyBackend -- proxy backend mapping onto a public cloud (docs/storage/cloudproxy-design.md).
+// L3: CloudProxyBackend -- proxy backend mapping onto a public cloud (docs/architecture/storage/cloudproxy-design.md).
 // Self-signed SigV4 + vendored httplib connecting directly to a remote S3-compatible
 // endpoint; this header exposes no httplib types (all httplib details are contained inside
 // remote_client.h/.cc).
@@ -32,13 +32,13 @@ struct CloudProxyConfig {
     std::string secret_key;
     // remote bucket = prefix + local name
     std::string bucket_prefix;
-    // false = virtual-hosted style (docs/storage/cloudproxy-design.md §7): connection and SNI always
+    // false = virtual-hosted style (docs/architecture/storage/cloudproxy-design.md §7): connection and SNI always
     // point at the endpoint; only Host/signature and path vary per bucket -- requires the
     // remote to accept vhost Hosts under the endpoint certificate (the common shape for AWS
     // regional endpoints / S3-compatible gateways)
     bool force_path_style = true;
     // Short control-plane requests use a private thread instead of the shared pool
-    // (docs/storage/cloudproxy-design.md §2.3): a high-RTT remote does not hold a pool thread; the
+    // (docs/architecture/storage/cloudproxy-design.md §2.3): a high-RTT remote does not hold a pool thread; the
     // cost = one thread creation per control request. Benchmarks say default false (see §2.3)
     bool control_in_pump = false;
     bool tls_verify = true;
@@ -68,7 +68,7 @@ struct CloudProxyConfig {
     // EC2 metadata service base URL for the credential chain (overridable for tests /
     // IMDS proxies); used only when access_key/secret_key are not configured
     std::string imds_endpoint = "http://169.254.169.254";
-    // docs/storage/cloudproxy-design.md §6: single-part PUT compares MD5 against the remote
+    // docs/architecture/storage/cloudproxy-design.md §6: single-part PUT compares MD5 against the remote
     // ETag
     bool verify_etag = true;
     // data-plane BlockQueue capacity (backpressure watermark)
@@ -91,7 +91,7 @@ struct RemoteContext;
 
 class CloudProxyBackend final : public IStorageBackend {
 public:
-    // metrics defaults to an empty scope (docs/storage/cloudproxy-design.md §8.2): tests construct
+    // metrics defaults to an empty scope (docs/architecture/storage/cloudproxy-design.md §8.2): tests construct
     // directly without wiring, counts land on orphan instances
     CloudProxyBackend(CloudProxyConfig cfg, std::shared_ptr<ThreadPool> pool, MetricsScope metrics = {});
     ~CloudProxyBackend() override;
@@ -136,7 +136,7 @@ private:
     // Local-name validation + prefix mapping; throws InvalidBucketName if the mapped name
     // exceeds 63 bytes
     std::string remote_bucket(std::string_view bucket) const;
-    // Execution environment for control-plane blocking sections (docs/storage/cloudproxy-design.md
+    // Execution environment for control-plane blocking sections (docs/architecture/storage/cloudproxy-design.md
     // §2.3): pool thread by default; control_in_pump=true uses a one-shot private thread.
     // Defined in the .cc (used only in that TU)
     template <class Fn>
@@ -157,7 +157,7 @@ private:
     // Background work (tiered demotion, GC) carries no request: nothing is added
     using Extra = std::vector<std::pair<std::string, std::string>>;
     Task<Extra> trace_extra(Extra extra = {});
-    // Streaming upload shared by PUT / upload_part (docs/storage/cloudproxy-design.md §3.2).
+    // Streaming upload shared by PUT / upload_part (docs/architecture/storage/cloudproxy-design.md §3.2).
     // resource is the client-view "/bucket/key" (goes into the error XML; does not leak the
     // prefixed remote path); multipart_ctx decides the semantic fallback for a body-less 404
     // (Upload / Bucket)

@@ -1,6 +1,6 @@
 // L1: builtin driver — zero-dependency POSIX socket HTTP/1.1, thread-per-connection synchronous model.
 // Demonstrates how a synchronous driver plugs into the adapter layer (coroutines bridged via sync_wait; see
-// docs/http-adapter.md §3.0, docs/concurrency.md §4.2).
+// docs/architecture/http-adapter.md §3.0, docs/architecture/concurrency.md §4.2).
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -119,7 +119,8 @@ struct ConnReader {
 
 // Body-read state belongs to the connection (after the handler's reader is
 // destroyed, the connection still needs to drain leftover bytes).
-// Contract (docs/http-adapter.md §4): normal EOF returns 0; client disconnect / bad chunked propagate as exceptions.
+// Contract (docs/architecture/http-adapter.md §4): normal EOF returns 0; client disconnect / bad chunked propagate as
+// exceptions.
 struct BodyState {
     ConnReader* conn = nullptr;
     Io* io = nullptr;
@@ -146,7 +147,7 @@ struct BodyState {
     size_t read_some(std::byte* dst, size_t want) {
         if (error) fail("read after connection error");
         // Deferred 100-continue: the client is told to send only once the
-        // handler decides it wants the body (docs/http-adapter.md §3.1);
+        // handler decides it wants the body (docs/architecture/http-adapter.md §3.1);
         // cases like auth failure can reject outright without receiving the body
         if (need_continue) {
             need_continue = false;
@@ -413,7 +414,7 @@ bool write_response(Io& io, HttpResponse& resp, bool head_request, bool keep_ali
     if (auto r = sendfile_body(io, resp, chunked, sendfile_enabled, counters)) return *r;
 
     // Streaming response: pulled in http.io_chunk_size chunks
-    // (docs/architecture.md request lifecycle), one read ahead of the socket
+    // (docs/architecture/overview.md request lifecycle), one read ahead of the socket
     PumpExecutor exec;
     return sync_wait_pumping(exec, stream_body(io, resp, chunked, io_chunk, exec, counters));
 }

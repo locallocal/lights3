@@ -1,4 +1,4 @@
-// lights3-ctl maintenance jobs through the admin plane (docs/cli.md §3.5 / §3.12):
+// lights3-ctl maintenance jobs through the admin plane (docs/usage/cli.md §3.5 / §3.12):
 // the shared start / poll / print driver behind `fsck --offline`, and the
 // `duostore gc|scan|quarantine` and `tier scan|gc|reconcile|quarantine` command
 // groups that run the background rounds on a live gateway. Implementation in

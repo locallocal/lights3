@@ -1,5 +1,5 @@
 // lights3-ctl `website` command group: manages per-bucket static website configuration
-// via the ?website subresource (docs/static-website.md phase ③, root credential
+// via the ?website subresource (docs/usage/static-website.md phase ③, root credential
 // only). Implementation in lights3_ctl_website.cc.
 #pragma once
 

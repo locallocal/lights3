@@ -1,4 +1,4 @@
-// roadmap §4.4: configuration hot reload (docs/config-reload.md) — the runtime
+// roadmap §4.4: configuration hot reload (docs/usage/config-reload.md) — the runtime
 // primitives (semaphore capacity, router table swap), the Application-level
 // reload with its applied / requires-restart report, and the admin endpoint
 #include <unistd.h>

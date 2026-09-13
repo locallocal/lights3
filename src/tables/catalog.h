@@ -1,4 +1,4 @@
-// Catalog: the business layer of the table catalog (docs/s3-tables-design.md §5,
+// Catalog: the business layer of the table catalog (docs/architecture/s3-tables-design.md §5,
 // §6.5) -- namespace / table lifecycle and the
 // single-table commit protocol on top of ITableCatalogStore + PutCondition CAS. Storage
 // agnostic: the table bucket is reached through the router, catalog state through the

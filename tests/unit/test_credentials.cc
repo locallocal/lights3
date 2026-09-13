@@ -1,5 +1,5 @@
-// docs/credential-management.md: CredentialStore persistence / two-tier permissions + the full /-/admin/credentials
-// flow
+// docs/architecture/credential-management.md: CredentialStore persistence / two-tier permissions + the full
+// /-/admin/credentials flow
 // + phase two (§10): at-rest encryption / per-credential policy / file hot reload / multi-instance incremental sync
 #include <unistd.h>
 
@@ -235,7 +235,7 @@ TEST(admin_api_method_not_allowed) {
     CHECK_EQ(env.call("DELETE", "/-/admin/credentials", root).status, 405);
 }
 
-// ---------- Phase two (docs/credential-management.md §10) ----------
+// ---------- Phase two (docs/architecture/credential-management.md §10) ----------
 
 namespace {
 
@@ -395,8 +395,8 @@ TEST(admin_api_policy_flow) {
     CHECK(lb.small_body.find("<Name>logs-a</Name>") != std::string::npos);
     CHECK(lb.small_body.find("<Name>private</Name>") == std::string::npos);
 
-    // copy-source is also policy-constrained (sealing the read side channel, docs/credential-management.md §10.4): a
-    // writable scoped credential copying from a bucket outside the allowlist -> 403, inside -> 200
+    // copy-source is also policy-constrained (sealing the read side channel, docs/architecture/credential-management.md
+    // §10.4): a writable scoped credential copying from a bucket outside the allowlist -> 403, inside -> 200
     auto j2 = body_json(env.call("POST", "/-/admin/credentials", root, {}, R"({"policy":{"buckets":["logs-*"]}})"));
     Credential dyn2{j2.at("access_key").get<std::string>(), j2.at("secret_key").get<std::string>()};
     CHECK_EQ(env.call("PUT", "/logs-a/stolen", dyn2, {}, "", {{"x-amz-copy-source", "/private/k"}}).status, 403);
@@ -973,7 +973,7 @@ TEST(sts_session_policy_and_expiry) {
     CHECK_THROWS_S3(shifted.verify(req2), S3ErrorCode::ExpiredToken);
 }
 
-// ---- docs/s3-tables-design.md §8.4: narrowed session policies ----
+// ---- docs/architecture/s3-tables-design.md §8.4: narrowed session policies ----
 
 TEST(policy_narrowing_for_vended_sessions) {
     CredentialPolicy narrow;

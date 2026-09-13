@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Soak / long-stability run (roadmap §6.1, docs/testing.md §5): loops lights3-ctl bench
+# Soak / long-stability run (roadmap §6.1, docs/development/testing.md §5): loops lights3-ctl bench
 # rounds (put / get / stat / list / multipart-heavy put) against a gateway while
 # sampling the process's RSS, open fds and a few convergence gauges from
 # /-/metrics. At the end it asserts:

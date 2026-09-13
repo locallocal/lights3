@@ -1,8 +1,8 @@
-// L1: Boost.Beast driver — asynchronous model (docs/http-adapter.md §3.1).
+// L1: Boost.Beast driver — asynchronous model (docs/architecture/http-adapter.md §3.1).
 // N threads share one io_context; one session coroutine per connection (one
 // strand per connection). Session coroutines use the project's own Task<void>
 // directly: asio async operations are adapted to suspend/resume via awaiters,
-// matching the junction-point semantics of docs/concurrency.md §4.1 (the
+// matching the junction-point semantics of docs/architecture/concurrency.md §4.1 (the
 // handler's continuation runs back on the connection strand), just without
 // converting between the asio::awaitable and Task coroutine types.
 #include <sys/eventfd.h>
@@ -174,7 +174,7 @@ public:
         co_await ResumeOn{ctx_->stream->get_executor()};
         if (ctx_->errored) throw std::runtime_error("http body: read after connection error");
         // Deferred 100-continue: the client is told to send only once the handler decides it wants the body
-        // (docs/http-adapter.md §3.1)
+        // (docs/architecture/http-adapter.md §3.1)
         if (ctx_->need_100) {
             ctx_->need_100 = false;
             bhttp::response<bhttp::empty_body> cont{bhttp::status::continue_, 11};
@@ -564,7 +564,8 @@ private:
             co_return !ec;
         }
 
-        // Streaming response: serializer + buffer_body, pulled in 64KiB chunks (docs/architecture.md request lifecycle)
+        // Streaming response: serializer + buffer_body, pulled in 64KiB chunks (docs/architecture/overview.md request
+        // lifecycle)
         bhttp::response<bhttp::buffer_body> res;
         res.result(static_cast<unsigned>(resp.status));
         res.version(11);

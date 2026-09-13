@@ -1,4 +1,4 @@
-// Step ⑥ (docs/s3-tables-design.md §14 ⑥): the catalog store suite over both backings,
+// Step ⑥ (docs/architecture/s3-tables-design.md §14 ⑥): the catalog store suite over both backings,
 // Iceberg views through the Catalog, transactional commits on the duostore-meta backing,
 // compaction candidates in the maintenance plan, the catalog_backing configuration
 #include <nlohmann/json.hpp>

@@ -138,7 +138,7 @@ TEST(sigv4_detects_payload_mismatch) {
     CHECK(thrown);
 }
 
-// ---------- docs/s3-protocol.md §3.2/§3.4: aws-chunked and presigned ----------
+// ---------- docs/architecture/s3-protocol.md §3.2/§3.4: aws-chunked and presigned ----------
 
 namespace {
 
@@ -226,7 +226,7 @@ TEST(sigv4_chunked_rejects_tampered_chunk) {
     CHECK(thrown);
 }
 
-// ---------- docs/s3-protocol.md §3.3: -TRAILER variants (trailing checksums) ----------
+// ---------- docs/architecture/s3-protocol.md §3.3: -TRAILER variants (trailing checksums) ----------
 
 namespace {
 
@@ -631,8 +631,8 @@ TEST(sigv4_presigned_url_expiry) {
     auto expired = make();
     CHECK_THROWS_S3(auth.verify(expired), S3ErrorCode::AccessDenied);
 
-    // Issued in the future (docs/s3-protocol.md §3.4): X-Amz-Date 16min later than now -> rejected as not yet
-    // effective; clock skew within 15min is allowed
+    // Issued in the future (docs/architecture/s3-protocol.md §3.4): X-Amz-Date 16min later than now -> rejected as not
+    // yet effective; clock skew within 15min is allowed
     auth.clock = [] { return *util::parse_amz_date("20260713T234400Z"); };
     auto future = make();
     CHECK_THROWS_S3(auth.verify(future), S3ErrorCode::AccessDenied);

@@ -7,7 +7,7 @@
 //     rare and are the ones an investigation needs to be durable.
 //   - data plane (audit.data_plane = true): one record per S3 request with the
 //     actor, tenant, bucket, key, action, status and bytes. Flushed periodically.
-// Field names are stable (docs/multi-tenancy.md §5); unknown values are omitted,
+// Field names are stable (docs/architecture/multi-tenancy.md §5); unknown values are omitted,
 // never rendered as empty strings, so consumers can rely on presence checks.
 #pragma once
 

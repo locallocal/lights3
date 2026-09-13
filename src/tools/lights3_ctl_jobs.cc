@@ -1,6 +1,6 @@
 // lights3-ctl `duostore gc|scan|quarantine` / `tier scan|gc|reconcile|quarantine`
-// (docs/cli.md §3.12): the background rounds the offline `lights3 duostore|tier`
-// commands run in a separate process (docs/cli.md §2.4), here triggered on the
+// (docs/usage/cli.md §3.12): the background rounds the offline `lights3 duostore|tier`
+// commands run in a separate process (docs/usage/cli.md §2.4), here triggered on the
 // running gateway through the admin plane and polled to completion -- the same
 // job model as `fsck --offline` (one job per backend, 202 + job id, GET status),
 // whose driver lives here as well. The duostore quarantine ledger's mutating

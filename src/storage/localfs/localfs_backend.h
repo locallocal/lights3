@@ -1,4 +1,4 @@
-// L3: local filesystem backend (see docs/storage/storage-backend.md §3)
+// L3: local filesystem backend (see docs/architecture/storage/storage-backend.md §3)
 // Layout: <root>/<bucket>/<key path>, sidecar metadata <data>.lights3-meta,
 // PUT writes via <staging>/put/<uuid> then lands atomically with rename.
 #pragma once
@@ -59,7 +59,7 @@ struct LocalFsOptions {
     // 0 = scan only at startup
     int mpu_scan_interval_sec = 6 * 3600;
 
-    // ---- roadmap §3.5 (docs/storage/localfs.md §2/§3/§6/§12) ----
+    // ---- roadmap §3.5 (docs/architecture/storage/localfs.md §2/§3/§6/§12) ----
     // Fail at construction (and on every write) when the root filesystem cannot store the
     // metadata xattr, instead of degrading to the two-rename sidecar consistency model
     bool require_xattr = false;
@@ -77,7 +77,7 @@ struct LocalFsOptions {
     // data file; listing self-heals only the directories it visits). 0 = off
     int sidecar_scan_interval_sec = 24 * 3600;
 
-    // ---- Object metadata cache (roadmap §3.8; docs/storage/localfs.md §5.1) ----
+    // ---- Object metadata cache (roadmap §3.8; docs/architecture/storage/localfs.md §5.1) ----
     // Budget in objects (0 = off). A hit spares the getxattr / sidecar read + TSV decode;
     // with meta_cache_validate a HEAD still costs one stat(2) (GET already holds an fstat)
     // and a stamp mismatch refetches, so the cache stays correct under writes made by
@@ -154,7 +154,7 @@ public:
     Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) override;
 
     // multipart: parts land in <staging>/mpu/<upload_id>/part.NNNNN, complete concatenates
-    // and then takes the same atomic rename commit as PUT (docs/storage/storage-backend.md §3.2)
+    // and then takes the same atomic rename commit as PUT (docs/architecture/storage/storage-backend.md §3.2)
     Task<std::string> create_multipart(std::string_view bucket, std::string_view key, ObjectMeta meta) override;
     using IStorageBackend::upload_part;
     Task<PutResult> upload_part(std::string_view bucket, std::string_view key, std::string_view upload_id, int part_no,
@@ -182,7 +182,7 @@ public:
     // periodically (sidecar_scan_interval) and is exposed for tests/tools
     Task<uint64_t> run_sidecar_sweep_once();
 
-    // Observability hooks for tests (docs/storage/localfs.md §10)
+    // Observability hooks for tests (docs/architecture/storage/localfs.md §10)
     const fsutil::MetaXattrPolicy& xattr_policy() const { return xattr_; }
     fsutil::DirListCache::Stats list_cache_stats() const { return dir_cache_->stats(); }
     MetaCacheStats meta_cache_stats() const { return meta_cache_->stats(); }
@@ -196,7 +196,7 @@ public:
     static constexpr const char* kSidecarSuffix = fsutil::kSidecarSuffix;
     static constexpr const char* kBucketMarker = fsutil::kBucketMarker;
 
-    // ---- Layout access needed by composite backends (tiered, docs/storage/tiered-design.md §2) ----
+    // ---- Layout access needed by composite backends (tiered, docs/architecture/storage/tiered-design.md §2) ----
     const std::filesystem::path& root() const { return root_; }
     const std::filesystem::path& staging() const { return staging_; }
     const std::shared_ptr<ThreadPool>& pool() const { return pool_; }

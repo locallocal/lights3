@@ -10,7 +10,7 @@
 // ETIMEDOUT, ECONNRESET, ...) or numeric (default EIO). The check on the hot
 // path is one relaxed atomic load when nothing is armed; an armed point costs a
 // mutex-guarded lookup. Off by default, no build flag: the same binary that runs
-// in production is the one the fault tests exercise (docs/testing.md §4)
+// in production is the one the fault tests exercise (docs/development/testing.md §4)
 #pragma once
 
 #include <atomic>
@@ -59,7 +59,7 @@ constexpr std::string_view kPoints[] = {
     "redis.command",
     // rados_aio_* submission: returns -errno
     "rados.submit",
-    // table catalog commit (docs/s3-tables-design.md §5.4): after the STAGED record,
+    // table catalog commit (docs/architecture/s3-tables-design.md §5.4): after the STAGED record,
     // before the pointer CAS
     "tables.commit.after_stage",
     // after the pointer CAS, before the record is finalized

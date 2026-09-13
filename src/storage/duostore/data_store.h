@@ -1,4 +1,4 @@
-// L3: DuoStore data-side interface (docs/storage/duostore-design.md §3.3). Coroutine Task<T>;
+// L3: DuoStore data-side interface (docs/architecture/storage/duostore-design.md §3.3). Coroutine Task<T>;
 // each implementation decides for itself whether to hop to a pool thread internally.
 #pragma once
 
@@ -32,7 +32,7 @@ struct DataWriter {
     virtual ~DataWriter() = default;
 };
 
-// Result statistics of the P4 compaction sequential scan (docs/storage/duostore-design.md §9.2)
+// Result statistics of the P4 compaction sequential scan (docs/architecture/storage/duostore-design.md §9.2)
 struct GcRewrite {
     // records fully parsed (including crc pass)
     uint64_t scanned = 0;
@@ -137,7 +137,7 @@ struct IDataStore {
     virtual Task<uint64_t> seal_aged_packs(int64_t /*max_age_ms*/) { co_return 0; }
     // Orphan-scan enumeration (§9.3): iterates all chunk-like entities on the data
     // plane (fs = the chunks/ directory, rados = namespace object listing,
-    // docs/storage/duostore-data-rados-design.md §8.2 — the interface was finalized in P4, the
+    // docs/architecture/storage/duostore-data-rados-design.md §8.2 — the interface was finalized in P4, the
     // rados implementation is scheduled for C4), calling back
     // (file_id, mtime_ms, size_bytes) for each. Orphan determination
     // (refs reverse-lookup/grace/pin) is the caller's (DuoStoreBackend's) job —

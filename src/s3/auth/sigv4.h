@@ -1,4 +1,4 @@
-// L2: AWS Signature V4 authentication (see docs/s3-protocol.md §3)
+// L2: AWS Signature V4 authentication (see docs/architecture/s3-protocol.md §3)
 // Self-implemented verification + signing (the signing side is reused by unit tests and later by cloudproxy
 // forwarding).
 #pragma once
@@ -20,11 +20,12 @@
 
 namespace lights3::s3 {
 
-// Credential lookup interface (docs/s3-protocol.md §3.5, docs/credential-management.md §5.2): called synchronously on
-// the verification hot path; implementations must be thread-safe. build() wraps a static-table implementation by
-// default; CredentialStore implements this interface and is injected via set_provider. A single lookup returns both the
-// SK and a policy snapshot (docs/archive/gaps.md §3.7): querying the store again for the policy after verify risks the
-// credential having been deleted by sync/remove -- a miss then is not "unrestricted" but a race window
+// Credential lookup interface (docs/architecture/s3-protocol.md §3.5, docs/architecture/credential-management.md §5.2):
+// called synchronously on the verification hot path; implementations must be thread-safe. build() wraps a static-table
+// implementation by default; CredentialStore implements this interface and is injected via set_provider. A single
+// lookup returns both the SK and a policy snapshot (docs/archive/gaps.md §3.7): querying the store again for the policy
+// after verify risks the credential having been deleted by sync/remove -- a miss then is not "unrestricted" but a race
+// window
 struct CredentialLookup {
     // wiped on destruction (docs/archive/gaps.md §4)
     util::SecretString secret_key;
@@ -117,13 +118,13 @@ public:
     // If payload verification is needed after passing, wrap req.body in a streaming verifying reader:
     //  - hex digest -> SHA256 verification (mismatch at EOF throws XAmzContentSHA256Mismatch)
     //  - STREAMING-AWS4-HMAC-SHA256-PAYLOAD[-TRAILER] -> aws-chunked de-framing +
-    //    per-chunk signature chain verification (docs/s3-protocol.md §3.2)
+    //    per-chunk signature chain verification (docs/architecture/s3-protocol.md §3.2)
     //  - STREAMING-UNSIGNED-PAYLOAD-TRAILER -> de-framing only
     VerifiedIdentity verify(http::HttpRequest& req) const {
         std::string_view one[] = {service_};
         return verify_impl(req, one, nullptr);
     }
-    // Iceberg REST catalog paths (docs/s3-tables-design.md §6.2): the credential scope may
+    // Iceberg REST catalog paths (docs/architecture/s3-tables-design.md §6.2): the credential scope may
     // name any of `services` (e.g. "s3" and "s3tables"); everything else is verify()
     VerifiedIdentity verify_any(http::HttpRequest& req, std::span<const std::string_view> services) const {
         return verify_impl(req, services, nullptr);

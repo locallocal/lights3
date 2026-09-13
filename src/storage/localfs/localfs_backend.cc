@@ -1,4 +1,5 @@
 #include "storage/localfs/localfs_backend.h"
+#include "storage/pipelined_md5.h"
 
 #include "core/fault.h"
 #include "core/util/time.h"
@@ -334,14 +335,16 @@ Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_
     tmp.fd = ::open(tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (tmp.fd < 0) throw_errno("open staging tmp");
 
-    util::HashStream md5(util::HashStream::Algo::Md5);
+    // MD5 of chunk k overlaps the write of k and the read of k+1 (pipelined_md5.h)
+    PipelinedMd5 md5(pool_.get());
+    auto bufs = PipelinedMd5::make_buffers();
     uint64_t total = 0;
-    std::byte buf[64 * 1024];
-    for (;;) {
-        size_t n = co_await body.read(std::span(buf));
+    for (size_t cur = 0;; cur ^= 1) {
+        std::span<std::byte> buf(bufs.get() + cur * PipelinedMd5::kChunk, PipelinedMd5::kChunk);
+        size_t n = co_await body.read(buf);
         if (n == 0) break;
-        md5.update(std::span(reinterpret_cast<const uint8_t*>(buf), n));
-        const char* p = reinterpret_cast<const char*>(buf);
+        co_await md5.feed(std::span<const std::byte>(buf.data(), n));
+        const char* p = reinterpret_cast<const char*>(buf.data());
         size_t left = n;
         while (left > 0) {
             if (int fe = fault::check("localfs.write")) {
@@ -361,7 +364,7 @@ Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_
 
     meta.key = std::string(key);
     meta.size = total;
-    meta.etag = md5.final_hex();
+    meta.etag = co_await md5.final_hex();
     meta.last_modified = std::chrono::system_clock::now();
 
     // 2. Conflict check + data rename + sidecar commit. Per-key lock: the commit section
@@ -1107,13 +1110,14 @@ Task<PutResult> LocalFsBackend::upload_part(std::string_view bucket, std::string
     tmp.fd = ::open(tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (tmp.fd < 0) throw_errno("open part tmp");
 
-    util::HashStream md5(util::HashStream::Algo::Md5);
-    std::byte buf[64 * 1024];
-    for (;;) {
-        size_t n = co_await body.read(std::span(buf));
+    PipelinedMd5 md5(pool_.get());
+    auto bufs = PipelinedMd5::make_buffers();
+    for (size_t cur = 0;; cur ^= 1) {
+        std::span<std::byte> buf(bufs.get() + cur * PipelinedMd5::kChunk, PipelinedMd5::kChunk);
+        size_t n = co_await body.read(buf);
         if (n == 0) break;
-        md5.update(std::span(reinterpret_cast<const uint8_t*>(buf), n));
-        const char* p = reinterpret_cast<const char*>(buf);
+        co_await md5.feed(std::span<const std::byte>(buf.data(), n));
+        const char* p = reinterpret_cast<const char*>(buf.data());
         size_t left = n;
         while (left > 0) {
             if (int fe = fault::check("localfs.write")) {
@@ -1127,11 +1131,11 @@ Task<PutResult> LocalFsBackend::upload_part(std::string_view bucket, std::string
             left -= static_cast<size_t>(w);
         }
     }
+    std::string etag = co_await md5.final_hex();
     // part data persisted first: only then is .md5's presence evidence of durable data
     fsutil::fsync_file(tmp.fd);
     ::close(tmp.fd);
     tmp.fd = -1;
-    std::string etag = md5.final_hex();
 
     // Order: data rename first, .md5 written after (same-number re-upload is
     // last-write-wins, rename overwrites). In the reverse order (old implementation),

@@ -97,9 +97,105 @@ edges: "round" p50 values such as 6.15 or 12.29 are bucket widths). A single
 - Across drivers: plaintext large GET seastar > builtin (sendfile) > beast ≈
   httplib; under TLS builtin ≈ seastar ≈ httplib > beast. **beast's TLS clearly
   lags** (GET 1.5k vs 3.0k) and deserves its own investigation (asio ssl record
-  handling and strand hops) -- left as a follow-up, not addressed here.
+  handling and strand hops) -- closed in §3 (2026-09-13).
 
-## 3. Reproducing
+## 3. 2026-09-13 re-run: closing the two issues the baseline found
+
+The two follow-ups left in §2.3 (beast's TLS GET lagging, the request-body path
+not optimized symmetrically) are done; implementation in
+[http-adapter.md §2.4 ⑩–⑬](../architecture/http-adapter.md). Method as in §1
+(same machine, same script, `Release` + `-DLIGHTS3_DUOSTORE=OFF
+-DLIGHTS3_CLOUDPROXY=OFF`, seastar rebuilt incrementally in `build-seastar`);
+"before" is the "after" column of §2 (the 2026-09-05 tree), "after" is this run.
+
+### 3.1 How the causes were found
+
+- **beast TLS GET**: `strace -c` over one 4 MiB TLS GET: beast ~655 `futex`, 258
+  `sendmsg` (one per 16 KiB TLS record), 105 `epoll_wait`; builtin for the same
+  request 260 `write` and ~220 `futex` (the latter is the thread pool's per-chunk
+  scheduling, common to all four drivers). beast's extra futex calls are the cost
+  of eight io threads sharing one `io_context`: every record's completion goes
+  through the global queue and wakes another thread. One `io_context` per thread
+  took TLS GET from 1560 to 2406 ops/s; `strace` then showed 263 `timerfd_settime`
+  left (`beast::basic_stream` arms and cancels a timer around every socket
+  operation) plus one composed operation per record. The per-session watchdog
+  removed the timer traffic (throughput within noise, p99 14.4 → 8.1 ms); CPU per
+  op was still 0.5 ms above builtin (3.95 vs 3.44 ms), rooted in
+  `asio::ssl::stream`'s 17 KiB buffers splitting every 64 KiB chunk into four
+  async rounds. The driver's own memory-BIO `TlsStream`, encrypting a whole chunk
+  at once, took TLS GET from 2469 to 3069 ops/s, level with builtin.
+- **PUT**: `openssl speed -evp md5` gives 1.26 GB/s per stream, ~3.3 ms for 4 MiB;
+  with 8 workers the gateway spent 6.15 ms CPU per 4 MiB PUT and kept 6.6 cores
+  busy, so PUT is capped by the serial recv + MD5 + write CPU path and a
+  driver-side "prefetch" cannot help (there is nothing to overlap the next read
+  with). The symmetric optimization is pipelining MD5 against the write and the
+  next read: with `PipelinedMd5` p50 went 7.2 → 6.2 ms while CPU per op rose to
+  7.1 ms (the thread hops); 128 KiB and 256 KiB chunks measured the same, so the
+  hops are not what remains. The rest is kernel copies (recv, tmpfs write) and the
+  commit path; the 3.3 ms single-stream MD5 is a floor that cannot be lowered.
+
+### 3.2 4 MiB objects (8 workers)
+
+| Driver | TLS | Mode | ops/s before | ops/s after | Δ | MiB/s after | p50 ms before→after | p99 ms before→after |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| builtin | off | put | 1065 | 1221 | **+15%** | 4883 | 7.20→6.18 | 16.14→11.27 |
+| builtin | off | get | 5709 | 5876 | **+3%** | 23503 | 1.52→1.50 | 2.05→2.04 |
+| builtin | on | put | 927 | 1073 | **+16%** | 4293 | 7.62→6.38 | 16.19→15.59 |
+| builtin | on | get | 3076 | 3067 | **-0%** | 12267 | 2.80→2.83 | 4.08→4.08 |
+| beast | off | put | 914 | 1202 | **+32%** | 4808 | 10.67→6.16 | 16.27→8.18 |
+| beast | off | get | 4568 | 5547 | **+21%** | 22188 | 1.58→1.52 | 3.84→2.60 |
+| beast | on | put | 727 | 1127 | **+55%** | 4509 | 12.29→6.26 | 16.31→14.78 |
+| beast | on | get | 1511 | 2913 | **+93%** | 11651 | 6.15→2.75 | 8.15→7.15 |
+| httplib | off | put | 1082 | 1209 | **+12%** | 4837 | 7.37→6.15 | 16.16→8.17 |
+| httplib | off | get | 4561 | 5709 | **+25%** | 22837 | 1.71→1.51 | 4.03→2.04 |
+| httplib | on | put | 879 | 1202 | **+37%** | 4807 | 10.01→6.20 | 16.33→13.33 |
+| httplib | on | get | 3005 | 2882 | **-4%** | 11528 | 2.71→2.87 | 4.40→6.59 |
+| seastar | off | put | 1031 | 1220 | **+18%** | 4881 | 6.77→6.15 | 16.03→8.17 |
+| seastar | off | get | 6070 | 6183 | **+2%** | 24731 | 1.55→1.54 | 3.11→2.04 |
+| seastar | on | put | 880 | 1034 | **+17%** | 4135 | 12.24→6.36 | 16.31→15.51 |
+| seastar | on | get | 3005 | 2940 | **-2%** | 11762 | 3.13→3.14 | 7.50→7.60 |
+
+### 3.3 16 KiB objects (16 workers)
+
+| Driver | TLS | Mode | ops/s before | ops/s after | Δ | MiB/s after | p50 ms before→after | p99 ms before→after |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| builtin | off | put | 80364 | 77626 | **-3%** | 1213 | 0.20→0.20 | 0.47→0.48 |
+| builtin | off | get | 151198 | 142186 | **-6%** | 2222 | 0.10→0.10 | 0.25→0.25 |
+| builtin | on | put | 70845 | 67801 | **-4%** | 1059 | 0.21→0.21 | 0.50→0.50 |
+| builtin | on | get | 124612 | 115981 | **-7%** | 1812 | 0.13→0.15 | 0.25→0.26 |
+| beast | off | put | 77474 | 75710 | **-2%** | 1183 | 0.20→0.20 | 0.48→0.49 |
+| beast | off | get | 127500 | 136053 | **+7%** | 2126 | 0.11→0.11 | 0.25→0.25 |
+| beast | on | put | 65572 | 63523 | **-3%** | 993 | 0.22→0.24 | 0.60→0.51 |
+| beast | on | get | 112165 | 111144 | **-1%** | 1737 | 0.17→0.14 | 0.26→0.29 |
+| httplib | off | put | 41920 | 39433 | **-6%** | 616 | 0.19→0.20 | 0.47→0.49 |
+| httplib | off | get | 93214 | 89673 | **-4%** | 1401 | 0.09→0.09 | 0.13→0.13 |
+| httplib | on | put | 33409 | 33407 | **-0%** | 522 | 0.23→0.23 | 0.51→0.51 |
+| httplib | on | get | 67307 | 64591 | **-4%** | 1009 | 0.12→0.12 | 0.25→0.25 |
+| seastar | off | put | 82243 | 80632 | **-2%** | 1260 | 0.19→0.19 | 0.43→0.40 |
+| seastar | off | get | 155199 | 151413 | **-2%** | 2366 | 0.10→0.10 | 0.23→0.24 |
+| seastar | on | put | 71420 | 69156 | **-3%** | 1081 | 0.20→0.20 | 0.50→0.50 |
+| seastar | on | get | 121683 | 116146 | **-5%** | 1815 | 0.13→0.13 | 0.26→0.26 |
+
+### 3.4 Reading the numbers
+
+- **beast's TLS GET is level with the other drivers** (around 3.0k) and its TLS
+  PUT went from last to tied; plaintext GET stays seastar > builtin (sendfile) >
+  beast ≈ httplib, with beast's gap to builtin down to the sendfile share.
+- **4 MiB PUT improves 12–18% on all drivers** (more for httplib TLS, whose
+  2026-09-05 number was a low jitter run, and for beast, which also gets the
+  driver-side changes): that is `PipelinedMd5`, independent of the driver, and
+  its ceiling is single-stream MD5 speed.
+- **Small objects**: 16 KiB stays under `PipelinedMd5`'s inline threshold
+  (256 KiB), so the request-body path is unchanged. This run's 16 KiB numbers sit
+  2–7% below 2026-09-05 across the board, including the untouched seastar and
+  builtin GET cells -- the day's noise floor, not a regression; beast plaintext
+  GET +7%, TLS level with the asio version (the memory-BIO stream was 15% slower
+  while it closed a record per buffer; coalescing small buffers removed that, see
+  http-adapter.md §2.4 ⑫).
+- No follow-up remains: the "found by the performance baseline" section of the
+  todo list was deleted with this.
+
+## 4. Reproducing
 
 ```bash
 ./build.sh -B build-rel -DCMAKE_BUILD_TYPE=Release -DLIGHTS3_DUOSTORE=OFF -DLIGHTS3_CLOUDPROXY=OFF -DLIGHTS3_BUILD_TESTS=OFF
@@ -114,8 +210,9 @@ mode, size, concurrency, duration_s, result}`, where `result` is the
 `lights3-ctl bench --output=json` object. Make sure the machine is idle and no stray
 `lights3` process is around (`pgrep -x lights3`) before running.
 
-## 4. History
+## 5. History
 
 | Date | Change | Summary |
 | --- | --- | --- |
 | 2026-09-05 | §4.3 data-plane work (prefetch, buffer pool, sendfile, pumping, ResumeOn fast path, per-bucket metrics without the lock, beast read-buffer reserve) | large-object GET +14 to +52%, beast PUT 3.5 to 10× |
+| 2026-09-13 | beast per-thread io_context, session watchdog, memory-BIO TlsStream; PipelinedMd5 request-body hashing (http-adapter.md §2.4 ⑩–⑬) | beast TLS GET 4 MiB +93% (level with the other drivers), 4 MiB PUT +12 to +55% on all drivers, p50 7.2 → 6.2 ms |

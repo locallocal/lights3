@@ -300,7 +300,7 @@ TEST(tiered_gc_never_deletes_live_copy) {
 }
 
 // GC with the cloud unreachable: entries back off exponentially (attempts/retry_at persisted in the TSV, not reset on
-// restart), and resume liquidation once due (todo §3.4; docs/architecture/storage/tiered-design.md §9)
+// restart), and resume liquidation once due (docs/architecture/storage/tiered-design.md §9)
 TEST(tiered_gc_retry_exponential_backoff) {
     Fixture f;
     sync_wait(f.tiered->create_bucket("bkt"));

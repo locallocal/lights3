@@ -980,7 +980,7 @@ Trino:      iceberg.catalog.type=rest  iceberg.rest-catalog.uri=…  .warehouse=
 **⑥ 可选项（#125）**
 
 - views：rename 是"先写目标、再把源改墓碑"两步，无 intent；replace 不写 commit 记录；两种后备
-  的目录判空都认得 `view/`；fsck / diagnostics 不覆盖 view（todo §4）；`location` 默认
+  的目录判空都认得 `view/`；fsck / diagnostics 不覆盖 view（todo §3）；`location` 默认
   `s3://<bucket>/<ns>/<name>`。
 - 别名：`RestApi::matched_prefix` 决定 dispatch 跳过的段数（首段在 ① 就已保留）。
 - `reportMetrics` 解析后经 `Hooks::audit` 记 `tables.metrics`（≤ 64 KiB）。
@@ -988,5 +988,5 @@ Trino:      iceberg.catalog.type=rest  iceberg.rest-catalog.uri=…  .warehouse=
 - duostore-meta：`kv_*` 加在 `IMetaStore` 上带默认 `NotImplemented`；app 取原始后端实例（不是
   计量装饰器）做 `dynamic_cast`；`Catalog::commit_table` 按 `supports_atomic_commit()` 跳过
   STAGED 写与 `tables.commit.*` 故障点；`--check-config` 对 `catalog_backing: duostore` + 非
-  duostore 默认后端报错；KV 调用在调用线程同步执行（todo §4）；TiKV 的 get 把空值当不存在，
+  duostore 默认后端报错；KV 调用在调用线程同步执行（todo §3）；TiKV 的 get 把空值当不存在，
   tikv 的 KV 面给每个值加一字节标记；tikv 在 tiup playground 上通过。

@@ -1,4 +1,5 @@
 #include "storage/xlocalfs/xlocalfs_backend.h"
+#include "storage/pipelined_md5.h"
 
 #include "core/fault.h"
 
@@ -102,11 +103,15 @@ XLocalFsBackend::XLocalFsBackend(fs::path root, fs::path staging, std::shared_pt
 
 Task<void> XLocalFsBackend::drain_to_tmp(http::BodyReader& body, UringWriteStream& ws, uint64_t& total_out,
                                          std::string& etag_out) {
-    util::HashStream md5(util::HashStream::Algo::Md5);
+    // MD5 of block k overlaps its write and the read of k+1 (pipelined_md5.h). The
+    // stream never hands the held-back block out again, and a block older than
+    // that is only reacquired after feed() awaited its hash, so the pipeline's
+    // reuse order satisfies the hasher's two-buffer contract
+    PipelinedMd5 md5(pool_.get());
     uint64_t total = 0;
     for (;;) {
         // The body is read straight into the pipeline's block (a registered fixed buffer
-        // when available) -- no bounce copy; MD5 runs on the pool thread as before
+        // when available) -- no bounce copy
         std::span<std::byte> buf = co_await ws.acquire();
         size_t n = co_await body.read(buf);
         if (n == 0) {
@@ -119,12 +124,12 @@ Task<void> XLocalFsBackend::drain_to_tmp(http::BodyReader& body, UringWriteStrea
             throw s3::S3Error(s3::S3ErrorCode::InternalError,
                               std::string("write staging tmp (uring): ") + std::strerror(fe));
         }
-        md5.update(std::span(reinterpret_cast<const uint8_t*>(buf.data()), n));
+        co_await md5.feed(std::span<const std::byte>(buf.data(), n));
         ws.commit(n);
         total += n;
     }
     total_out = total;
-    etag_out = md5.final_hex();
+    etag_out = co_await md5.final_hex();
 }
 
 Task<void> XLocalFsBackend::sync_dir(fs::path dir) {

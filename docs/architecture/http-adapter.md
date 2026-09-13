@@ -207,8 +207,9 @@ ratelimit:
 
 ### 2.4 数据面性能（roadmap §4.3）
 
-流式响应路径的四项改动，全部在 L1 内、不改 `BodyReader` 的串行单消费者契约；
-基线数据见 [performance-baseline.md](../development/performance-baseline.md)。
+响应路径的四项改动（①②④⑤）全部在 L1 内、不改 `BodyReader` 的串行单消费者契约；
+后续按基线跑出的问题补做的 ⑨–⑬ 见表末。基线数据见
+[performance-baseline.md](../development/performance-baseline.md)。
 
 | # | 项 | 实现 |
 | --- | --- | --- |
@@ -216,10 +217,14 @@ ratelimit:
 | ② | **缓冲池** | `IoBuffer`：thread_local 空闲表（每线程最多 16 块），`new std::byte[n]` 默认初始化——不再每个响应构造一个**清零**的 64KiB `std::vector`。跨线程归还无妨（只是缓存） |
 | ④ | **sendfile** | `BodyReader::try_as_file()` 返回 `FileSpan{fd, offset, length}`（剩余字节恰是一段连续文件区间时），驱动内核态搬运后经 `file_bytes_sent(n)` 回报，reader 位置与计数装饰器保持一致。实现方：localfs `FdStreamReader`（含 Range）；L2 `CountingBodyReader` 转发两者（字节仍进指标与访问日志）；校验和/tee 类装饰器保持默认（无快路径）。**只有 builtin 驱动接**：定长 + 明文 + `http.sendfile: true`（默认）；TLS、chunked、非文件 body 一律走 `read()`；首次调用被 `EINVAL/ENOSYS` 拒绝也回退。beast 不接——strand 线程上的 sendfile 会因文件冷读阻塞 I/O 线程；httplib 无 socket 句柄；seastar 原生栈无 sendfile |
 | ⑤ | **builtin 流式写进 pumping** | 整个 body 循环是一个协程，由 `sync_wait_pumping` 驱动（此前每 64KiB 一次裸 `sync_wait`：condvar + 两次线程跳转，1GiB = 16384 次）；每块前 `co_await resume_on(exec)` 把续体拉回连接线程发送（慢客户端不占共享池），`PumpExecutor::running_in_this_thread()` 已在本线程时内联继续 |
-| ⑥ | **beast `ResumeOn` 快路径** | 连接 executor 都是 `make_strand` 出的 `strand<io_context::executor_type>`；`any_io_executor::target<Strand>()` 探到后 `running_in_this_thread()` 为真即 `await_ready`，省一次 `asio::post`。seastar 的 `ResumeOnShard` 本就有同样判断 |
+| ⑥ | **beast `ResumeOn` 快路径** | 连接 executor 是所在 io 线程 `io_context` 的普通 executor（⑩ 之后不再有 strand）；`any_io_executor::target<io_context::executor_type>()` 探到后 `running_in_this_thread()` 为真即 `await_ready`，省一次 `asio::post`。seastar 的 `ResumeOnShard` 本就有同样判断 |
 | ⑦ | **per-bucket 指标去锁** | `CountingBodyReader` 每块只加全局原子计数（`add_bytes_*_total`），桶维度累计到流末或每 16MiB 才 `add_bucket_bytes` 进一次互斥锁（此前每 64KiB 一次全局锁） |
 | ⑧ | **HeaderMap 预筛 / BlockQueue 块整形**（backlog-sequence ⑩，2026-09-06 补做） | `HeaderMap` 仍是保序 vector，每项旁存一个 8 位 tag（名字长度 + 小写首尾字符折叠，O(1)——整名 FNV 哈希的代价与它省下的扫描相当，实测反让命中变慢）+ 256 位"在场 tag"集合：未命中（L2 探测的可选头多数不在请求里）不扫描直接返回，命中先比 tag 再做大小写折叠比较。微基准（25 个头、-O2）：未命中 15→1.8 ns，命中 8.3→8.0 ns。`BlockQueue`：借用缓冲的 push（httplib 的 16 KiB 片）拼进同一尾块（≤256 KiB），消费方按块而不是按片 pop（16384→约 4.6K 次/256 MiB）；`push(std::string&&)` 整块移交（cloudproxy 出方向上传每轮读进新分配的 64 KiB string 后移入，锁内不再拷贝）。空 push 被丢弃（零长块会被 pop 当作 EOF）。绝对量仍小，与 backlog 当初的判断一致 |
 | ⑨ | **beast 请求体读粒度**（基线跑出的发现） | 会话的 `flat_buffer` 不预留容量时，beast 的 `read_size = max(512, capacity − size)` 让每次 socket 读只取 512 字节：4 MiB 请求体 = 8192 次 `recvmsg` + 同样多次 `timerfd_settime`（每次 `expires_after`）+ 7.7 万次 futex，单次 PUT 40 ms 对 builtin 6 ms。修复：`buffer.reserve(io_chunk_size)`，PUT 4 MiB 91 → 914 ops/s |
+| ⑩ | **beast 每 io 线程一个 `io_context`**（todo 条目 "beast TLS GET 明显落后"，2026-09-13 做完删除） | 此前 N 个 io 线程共跑一个 `io_context`：任何 socket 完成回调都要经全局队列唤醒别的线程，`strace -c` 实测一次 4 MiB TLS GET 约 655 次 futex（每条 16 KiB TLS 记录约 2.5 对唤醒/等待）。现在每个 io 线程独占一个 `io_context`（并发提示 1），连接在 accept 时轮询钉到某个线程、不再需要 strand，完成回调全是同线程续体；控制面（acceptor / 停机 eventfd / grace、force 定时器）留在 `io_[0]` 的 strand 上，force 停机与 `finish()` 遍历全部上下文。池线程经 `ResumeOn` 投递回 io 线程仍是跨线程 post（每块一次，不是每记录一次）。TLS GET 1560 → 2406 ops/s，明文 GET +21%，PUT +13～19% |
+| ⑪ | **beast 会话级看门狗替换逐操作超时** | `beast::basic_stream` 一旦设了 expiry，每次 `async_read_some` / `async_write_some` 都要 `timer.async_wait` 再 `cancel`——TLS 下就是每条记录两次定时器操作（实测每次 4 MiB GET 263 次 `timerfd_settime`）。请求体读、排空与全部响应写改为 `expires_never()`，由 `Session` 上一个 `steady_timer` 兜底：`wd_begin()` 只记录在飞操作的起点与阶段，定时器整个会话只武装一次，到期时在飞操作超时则计数该阶段并 `close()`（操作以错误结束），未超时按剩余时间续武装，无在飞操作则休眠到下次 `wd_begin()`。头部读与握手仍用流 expiry（单次操作，且要区分 header/idle 两类超时）。吞吐变化在噪声内，TLS GET p99 14.4 → 8.1 ms |
+| ⑫ | **beast 内存 BIO 的 `TlsStream`** | `asio::ssl::stream` 经 17 KiB 的 BIO 对与 17 KiB 输出缓冲驱动 OpenSSL：beast 交给它的每个 64 KiB 块要拆成 4 轮 `async_write_some`（每条记录一轮组合操作 + 一次完成），这笔每记录固定成本让 beast 的 TLS GET 每 op 多 0.5 ms CPU（3.95 对 builtin 3.44 ms）。驱动内自写 `TlsStream`（`AsyncReadStream`/`AsyncWriteStream` 形状，可直接喂 `bhttp::async_read/async_write`）：`SSL_set_bio` 一对 `BIO_s_mem`，`async_write_some` 把缓冲序列加密后抽出密文，一次 `asio::async_write` 发出（内存 BIO 会增长）——注意每次 `SSL_write` 都封一条记录，而 beast 交出的响应头是每个字段名/值/CRLF 各一小段（典型 S3 响应 15 段），逐段写就是 15 条微型记录，实测 16 KiB TLS GET 服务端每请求多 6 µs、客户端多 45 µs（asio 用先拷贝拼成 17 KiB 连续块规避）；所以小缓冲先拼进 16 KiB 暂存区再写，只有自身不短于一条记录的缓冲（64 KiB 块）直接零拷贝 `SSL_write`；`async_read_some` 先 `SSL_read`，`WANT_READ` 时读一个 io 块的密文喂入再重试（写 BIO 里若有 TLS 1.3 票据等后握手消息先发出）；握手、close_notify 是协程循环；发起路径上的完成一律 `post`（不在发起函数内回调）。证书回调/SNI/mTLS 仍来自共享 `tls::Holder` 配置的 `SSL_CTX`，`peer_identity(native_handle())` 不变。TLS GET 2469 → 3069 ops/s，与 builtin 持平；16 KiB TLS 与 asio 版持平（GET 111.7k / PUT 66.9k）|
+| ⑬ | **请求体 MD5 流水化**（todo 条目 "请求体路径未做对称优化"，2026-09-13 做完删除） | 各后端的 PUT / UploadPart 循环都是 读 → `md5.update` → 写 串行在一个线程上：4 MiB PUT 6.15 ms CPU 里 MD5 占 3.3 ms（OpenSSL MD5 单流 1.26 GB/s，无法并行），8 个 worker 已占 6.6 核，瓶颈不在驱动。`storage/pipelined_md5.h` `PipelinedMd5`：`feed(k)` 先等第 k−1 块的哈希（保证摘要顺序，也让调用方的另一块缓冲可复用），再把第 k 块的哈希丢到线程池并立即返回，调用方接着写第 k 块、读第 k+1 块；`final_hex()` 等最后一块。契约：调用方交替使用两块 `kChunk`（128 KiB）缓冲，交给 `feed()` 的字节在下一次 `feed()` 返回前不得改动；前 256 KiB 内联哈希，小对象不付线程跳转。接入 localfs put/upload_part、xlocalfs `drain_to_tmp`（uring 写流的持有块不会被再次交出，更早的块要等 `feed()` 已等过其哈希才会被重新 acquire，满足契约）、duostore `pump_body`。4 MiB PUT：builtin 1065 → 1195、httplib 1082 → 1190、beast 914 → 1173（含 ⑩⑪）、beast TLS 727 → 1110 ops/s，p50 7.2 → 6.2 ms |
 
 ③ 异步日志已随 §5.2 完成。
 
@@ -242,21 +247,26 @@ ratelimit:
 
 ### 3.1 Boost.Beast（异步驱动，性能路径首选）
 
-- 结构：N 个线程共跑一个 `asio::io_context`（或 per-thread io_context，
-  首期用前者，简单）；每连接一个项目自己的 `Task<void>` 会话协程，经自毁式
-  `Detached` 包装（`spawn_detached`）挂到 accept 时 `make_strand` 出的连接 strand 上。
+- 结构：每个 io 线程独占一个 `asio::io_context`（§2.4 ⑩；首期是 N 线程共跑
+  一个，基线证明每记录跨线程唤醒是 TLS 落后的主因）；连接在 accept 时轮询钉到
+  一个 io 线程，其 socket 的全部完成回调都在该线程上，不需要 strand；每连接一个
+  项目自己的 `Task<void>` 会话协程，经自毁式 `Detached` 包装（`spawn_detached`）
+  启动。控制面（acceptor、停机 eventfd、grace/force 定时器）在 `io_[0]` 的 strand 上。
+- TLS：驱动内自写的内存 BIO `TlsStream`（§2.4 ⑫），不用 `asio::ssl::stream`；
+  超时由 `Session` 上的看门狗定时器兜底（§2.4 ⑪），头部读与握手仍用
+  `tcp_stream` 的 expiry。
 - 会话流程：`async_read_header` → 构造 `HttpRequest`（body 封装为
   `BeastBodyReader`，其 `read()` 内部 `async_read_some` 续读）→
   `co_await handler(req)` → 序列化响应头 → 循环拉 `stream_body` 写 socket。
 - `Task<T>` 与 asio 的衔接：不做 `asio::awaitable` ↔ `Task` 的类型转换——会话
   就是 `Task`，asio 的异步操作以回调 awaiter 接入；handler 的续体可能在池线程
-  resume，触碰 socket 前用 `ResumeOn` awaiter `asio::post` 回连接 strand
+  resume，触碰 socket 前用 `ResumeOn` awaiter `asio::post` 回连接所在的 io 线程
   （见 [concurrency.md](concurrency.md) §4.1）。
 - 支持 `Expect: 100-continue`：Beast 解析到该头后，由 driver 在 handler 首次
   调用 `body->read()` 时先回 `100 Continue` 再收 body——这样认证失败可以在
   不接收 body 的情况下直接拒绝，符合 S3 行为。
-- 响应循环：`StreamPrefetch` 双缓冲 + `ResumeOn` 同 strand 快路径（§2.4 ①⑥）；
-  不接 sendfile（strand 线程不能被冷文件读阻塞）。
+- 响应循环：`StreamPrefetch` 双缓冲 + `ResumeOn` 同线程快路径（§2.4 ①⑥）；
+  不接 sendfile（io 线程不能被冷文件读阻塞）。
 
 ### 3.2 cpp-httplib（同步驱动，thread-per-request）
 

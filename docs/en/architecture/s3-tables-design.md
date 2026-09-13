@@ -1132,7 +1132,7 @@ this design are summarized below; open items are in [todo.md](../development/tod
 
 - Views: rename is a two-step "write the destination, then tombstone the source" without
   an intent; replace writes no commit record; the emptiness checks of both backings know
-  `view/`; fsck / diagnostics do not cover views (todo §4); the default `location` is
+  `view/`; fsck / diagnostics do not cover views (todo §3); the default `location` is
   `s3://<bucket>/<ns>/<name>`.
 - Alias: `RestApi::matched_prefix` decides how many segments dispatch skips (the first
   segment was reserved in ①).
@@ -1145,5 +1145,5 @@ this design are summarized below; open items are in [todo.md](../development/tod
   `Catalog::commit_table` skips the STAGED write and the `tables.commit.*` fault points
   when `supports_atomic_commit()`; `--check-config` rejects `catalog_backing: duostore`
   with a non-duostore default backend; KV calls run synchronously on the caller
-  (todo §4); TiKV's get reports an empty value as absent, so the tikv KV facade stores
+  (todo §3); TiKV's get reports an empty value as absent, so the tikv KV facade stores
   every value with a one-byte marker; tikv passed on a tiup playground.

@@ -1,4 +1,5 @@
 #include "storage/duostore/duostore_backend.h"
+#include "storage/pipelined_md5.h"
 
 #include "core/util/time.h"
 
@@ -1147,19 +1148,23 @@ struct Pumped {
 // computing MD5 as it writes.
 // The owner goes into the pack record header (§5.2): object = "bucket\0key",
 // part = "mpu\0<id>\0<no>"
-Task<Pumped> pump_body(IDataStore& data, http::BodyReader& body, std::string owner) {
+Task<Pumped> pump_body(IDataStore& data, http::BodyReader& body, std::string owner, ThreadPool* pool) {
     auto writer = co_await data.open_writer({body.length(), std::move(owner)});
-    util::HashStream md5(util::HashStream::Algo::Md5);
-    std::byte buf[64 * 1024];
-    for (;;) {
-        size_t n = co_await body.read(std::span(buf));
+    // MD5 of chunk k overlaps the data-plane write of k and the read of k+1
+    // (pipelined_md5.h); the writer consumes its span before returning, as the
+    // single reused buffer already required
+    PipelinedMd5 md5(pool);
+    auto bufs = PipelinedMd5::make_buffers();
+    for (size_t cur = 0;; cur ^= 1) {
+        std::span<std::byte> buf(bufs.get() + cur * PipelinedMd5::kChunk, PipelinedMd5::kChunk);
+        size_t n = co_await body.read(buf);
         if (n == 0) break;
-        md5.update(std::span(reinterpret_cast<const uint8_t*>(buf), n));
-        co_await writer->write(std::span<const std::byte>(buf, n));
+        co_await md5.feed(std::span<const std::byte>(buf.data(), n));
+        co_await writer->write(std::span<const std::byte>(buf.data(), n));
     }
     Pumped out;
     out.ref = co_await writer->finish();
-    out.md5 = md5.final_hex();
+    out.md5 = co_await md5.final_hex();
     co_return out;
 }
 
@@ -1272,7 +1277,7 @@ Task<PutResult> DuoStoreBackend::put_object(std::string_view bucket, std::string
 
     // write lease: registered before the first chunk lands
     WriteTicket wt(write_clock_);
-    auto pumped = co_await pump_body(*data_, body, codec::object_key(bucket, key));
+    auto pumped = co_await pump_body(*data_, body, codec::object_key(bucket, key), pool_.get());
     WritePinRelease wp(write_pins_, pins_.get(), pumped.ref);
     ObjectRec rec;
     rec.meta = std::move(meta);
@@ -1321,7 +1326,7 @@ Task<void> DuoStoreBackend::tier_commit_cached(std::string_view bucket, std::str
     co_await pool_->schedule();
     // write lease: registered before the first chunk lands
     WriteTicket wt(write_clock_);
-    auto pumped = co_await pump_body(*data_, body, codec::object_key(bucket, key));
+    auto pumped = co_await pump_body(*data_, body, codec::object_key(bucket, key), pool_.get());
     WritePinRelease wp(write_pins_, pins_.get(), pumped.ref);
     if (pumped.ref.total() != meta.size) {
         // the fill was verified upstream; defend anyway
@@ -1528,7 +1533,7 @@ Task<PutResult> DuoStoreBackend::upload_part(std::string_view bucket, std::strin
     owner += std::to_string(part_no);
     // write lease: registered before the first chunk lands
     WriteTicket wt(write_clock_);
-    auto pumped = co_await pump_body(*data_, body, std::move(owner));
+    auto pumped = co_await pump_body(*data_, body, std::move(owner), pool_.get());
     WritePinRelease wp(write_pins_, pins_.get(), pumped.ref);
     PartRec p;
     p.part_no = part_no;

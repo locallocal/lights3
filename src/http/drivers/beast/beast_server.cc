@@ -12,6 +12,9 @@
 #include <sys/eventfd.h>
 #include <unistd.h>
 
+#include <openssl/bio.h>
+#include <openssl/err.h>
+#include <openssl/ssl.h>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/posix/stream_descriptor.hpp>
@@ -19,11 +22,14 @@
 #include <boost/asio/ssl.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
+#include <boost/asio/write.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 
+#include <array>
 #include <atomic>
 #include <coroutine>
+#include <cstring>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -203,11 +209,250 @@ void wd_stop(Session& s) {
     s.watchdog.cancel();
 }
 
-// TLS session stream: references the underlying tcp_stream (owned by
-// Session) and itself lives on the session coroutine frame. Timeouts still
-// apply to the underlying tcp_stream (beast::get_lowest_layer) — byte
-// timeouts below the TLS record layer cover handshake and reads/writes alike
-using TlsStream = asio::ssl::stream<beast::tcp_stream&>;
+// TLS session stream over the session's tcp_stream (http-adapter.md §2.4 ⑫).
+// asio::ssl::stream drives OpenSSL through a 17 KiB BIO pair and a 17 KiB
+// output buffer, so every 64 KiB chunk beast hands it becomes four
+// async_write_some rounds on the socket (one per TLS record), each a composed
+// operation with its own completion; that fixed cost per record is what kept
+// beast's TLS GET at ~80% of the blocking drivers. This stream uses memory BIOs
+// instead: async_write_some encrypts the whole buffer sequence with SSL_write
+// (the memory BIO grows), drains the ciphertext once and sends it with a single
+// asio::async_write; async_read_some pulls up to one io chunk of ciphertext per
+// socket read and decrypts as many records as that yields. Handshake and
+// close_notify are plain coroutine loops. The object references the tcp_stream
+// (owned by Session) and lives on the session coroutine frame; timeouts apply to
+// the tcp_stream underneath (beast::get_lowest_layer), covering handshake and
+// reads/writes alike
+class TlsStream {
+public:
+    using executor_type = beast::tcp_stream::executor_type;
+
+    TlsStream(beast::tcp_stream& next, asio::ssl::context& ctx, size_t chunk)
+        : next_(next), ssl_(::SSL_new(ctx.native_handle())), in_(chunk) {
+        if (!ssl_) throw std::runtime_error("SSL_new failed");
+        BIO* rbio = ::BIO_new(::BIO_s_mem());
+        BIO* wbio = ::BIO_new(::BIO_s_mem());
+        if (!rbio || !wbio) {
+            ::BIO_free(rbio);
+            ::BIO_free(wbio);
+            ::SSL_free(ssl_);
+            throw std::runtime_error("BIO_new failed");
+        }
+        // the SSL owns both BIOs from here on
+        ::SSL_set_bio(ssl_, rbio, wbio);
+        rbio_ = rbio;
+        wbio_ = wbio;
+        ::SSL_set_accept_state(ssl_);
+    }
+    ~TlsStream() { ::SSL_free(ssl_); }
+    TlsStream(const TlsStream&) = delete;
+    TlsStream& operator=(const TlsStream&) = delete;
+
+    executor_type get_executor() { return next_.get_executor(); }
+    beast::tcp_stream& next_layer() { return next_; }
+    SSL* native_handle() { return ssl_; }
+
+    // Server-side handshake; the caller bounds it with an expiry on next_layer()
+    Task<beast::error_code> handshake() {
+        for (;;) {
+            int r = ::SSL_do_handshake(ssl_);
+            int err = r == 1 ? SSL_ERROR_NONE : ::SSL_get_error(ssl_, r);
+            // ServerHello & co. are waiting in the write BIO whatever the verdict
+            if (auto ec = co_await flush()) co_return ec;
+            if (r == 1) co_return beast::error_code{};
+            if (err != SSL_ERROR_WANT_READ) co_return ssl_error(err);
+            if (auto ec = co_await fill()) co_return ec;
+        }
+    }
+
+    // One-way close_notify (best effort, like asio's async_shutdown without
+    // waiting for the peer's reply)
+    Task<beast::error_code> shutdown() {
+        ::SSL_shutdown(ssl_);
+        co_return co_await flush();
+    }
+
+    // AsyncReadStream: decrypts into the first non-empty buffer of the sequence;
+    // may deliver fewer bytes than requested (read_some semantics)
+    template <class MutableBufferSequence, class Handler>
+    void async_read_some(const MutableBufferSequence& buffers, Handler&& h) {
+        asio::mutable_buffer dst = first_nonempty(buffers);
+        if (dst.size() == 0) {
+            complete(std::forward<Handler>(h), beast::error_code{}, 0);
+            return;
+        }
+        read_step(dst, std::forward<Handler>(h), /*from_initiation=*/true);
+    }
+
+    // AsyncWriteStream: encrypts the whole sequence and sends it in one
+    // composed write; completes with the number of plaintext bytes consumed.
+    // Every SSL_write call closes a TLS record, and beast hands the response
+    // head over as one small buffer per field name / value / CRLF (15 buffers
+    // for a typical S3 response): written one by one they became 15 tiny
+    // records, which cost the server ~6 us and the client ~45 us per request
+    // (asio::ssl::stream avoids it by linearising up to 17 KiB per round). So
+    // small buffers are coalesced into a record-sized staging area first, and
+    // only a buffer that is itself at least one record long (the 64 KiB body
+    // chunks) goes to SSL_write directly, without a copy
+    template <class ConstBufferSequence, class Handler>
+    void async_write_some(const ConstBufferSequence& buffers, Handler&& h) {
+        size_t consumed = 0;
+        auto fail = [&](int n) { complete(std::forward<Handler>(h), ssl_error(::SSL_get_error(ssl_, n)), 0); };
+        auto ssl_write_all = [&](const unsigned char* p, size_t len) -> bool {
+            while (len > 0) {
+                int n = ::SSL_write(ssl_, p, static_cast<int>(std::min<size_t>(len, INT32_MAX)));
+                if (n <= 0) {
+                    fail(n);
+                    return false;
+                }
+                p += n;
+                len -= static_cast<size_t>(n);
+            }
+            return true;
+        };
+        auto flush_staging = [&]() -> bool {
+            if (staged_ == 0) return true;
+            bool ok = ssl_write_all(staging_.data(), staged_);
+            staged_ = 0;
+            return ok;
+        };
+        for (auto it = asio::buffer_sequence_begin(buffers); it != asio::buffer_sequence_end(buffers); ++it) {
+            asio::const_buffer b = *it;
+            const auto* p = static_cast<const unsigned char*>(b.data());
+            size_t left = b.size();
+            consumed += left;
+            while (left > 0) {
+                if (staged_ == 0 && left >= kRecordPlain) {
+                    if (!ssl_write_all(p, left)) return;
+                    break;
+                }
+                size_t take = std::min(left, kRecordPlain - staged_);
+                std::memcpy(staging_.data() + staged_, p, take);
+                staged_ += take;
+                p += take;
+                left -= take;
+                if (staged_ == kRecordPlain && !flush_staging()) return;
+            }
+        }
+        if (!flush_staging()) return;
+        if (!drain_output()) {
+            complete(std::forward<Handler>(h), beast::error_code{}, consumed);
+            return;
+        }
+        asio::async_write(next_, asio::buffer(out_),
+                          [h = std::forward<Handler>(h), consumed](beast::error_code ec, size_t) mutable {
+                              h(ec, ec ? 0 : consumed);
+                          });
+    }
+
+private:
+    template <class Handler>
+    void complete(Handler&& h, beast::error_code ec, size_t n) {
+        // An initiating function must not run its completion inline
+        asio::post(next_.get_executor(), [h = std::forward<Handler>(h), ec, n]() mutable { h(ec, n); });
+    }
+
+    template <class MutableBufferSequence>
+    static asio::mutable_buffer first_nonempty(const MutableBufferSequence& buffers) {
+        for (auto it = asio::buffer_sequence_begin(buffers); it != asio::buffer_sequence_end(buffers); ++it) {
+            asio::mutable_buffer b = *it;
+            if (b.size() > 0) return b;
+        }
+        return {};
+    }
+
+    // Moves the write BIO's ciphertext into out_; false when there is none
+    bool drain_output() {
+        size_t pend = ::BIO_ctrl_pending(wbio_);
+        if (pend == 0) return false;
+        out_.resize(pend);
+        int got = ::BIO_read(wbio_, out_.data(), static_cast<int>(std::min<size_t>(pend, INT32_MAX)));
+        out_.resize(got > 0 ? static_cast<size_t>(got) : 0);
+        return !out_.empty();
+    }
+
+    Task<beast::error_code> flush() {
+        if (!drain_output()) co_return beast::error_code{};
+        auto [ec, n] = co_await io_op([&](auto cb) { asio::async_write(next_, asio::buffer(out_), std::move(cb)); });
+        (void)n;
+        co_return ec;
+    }
+
+    // One socket read into the read BIO
+    Task<beast::error_code> fill() {
+        auto [ec, n] = co_await io_op([&](auto cb) { next_.async_read_some(asio::buffer(in_), std::move(cb)); });
+        if (ec) co_return ec;
+        ::BIO_write(rbio_, in_.data(), static_cast<int>(n));
+        co_return beast::error_code{};
+    }
+
+    template <class Handler>
+    void read_step(asio::mutable_buffer dst, Handler&& h, bool from_initiation) {
+        int n = ::SSL_read(ssl_, dst.data(), static_cast<int>(std::min<size_t>(dst.size(), INT32_MAX)));
+        if (n > 0) {
+            if (from_initiation)
+                complete(std::forward<Handler>(h), beast::error_code{}, static_cast<size_t>(n));
+            else
+                h(beast::error_code{}, static_cast<size_t>(n));
+            return;
+        }
+        int err = ::SSL_get_error(ssl_, n);
+        if (err == SSL_ERROR_WANT_READ) {
+            // Post-handshake messages the peer must see before it sends more
+            // (TLS 1.3 tickets, KeyUpdate replies) sit in the write BIO: send them
+            // first, then wait for ciphertext
+            if (drain_output()) {
+                asio::async_write(next_, asio::buffer(out_),
+                                  [this, dst, h = std::forward<Handler>(h)](beast::error_code ec, size_t) mutable {
+                                      if (ec) {
+                                          h(ec, 0);
+                                          return;
+                                      }
+                                      read_step(dst, std::move(h), false);
+                                  });
+                return;
+            }
+            next_.async_read_some(asio::buffer(in_),
+                                  [this, dst, h = std::forward<Handler>(h)](beast::error_code ec, size_t got) mutable {
+                                      if (ec) {
+                                          h(ec, 0);
+                                          return;
+                                      }
+                                      ::BIO_write(rbio_, in_.data(), static_cast<int>(got));
+                                      read_step(dst, std::move(h), false);
+                                  });
+            return;
+        }
+        beast::error_code ec = err == SSL_ERROR_ZERO_RETURN ? beast::error_code(asio::error::eof) : ssl_error(err);
+        if (from_initiation)
+            complete(std::forward<Handler>(h), ec, 0);
+        else
+            h(ec, 0);
+    }
+
+    static beast::error_code ssl_error(int err) {
+        unsigned long e = ::ERR_get_error();
+        ::ERR_clear_error();
+        if (e != 0) return beast::error_code(static_cast<int>(e), asio::error::get_ssl_category());
+        // No queued reason: a syscall-level failure or a truncated stream
+        if (err == SSL_ERROR_SYSCALL) return beast::error_code(asio::ssl::error::stream_truncated);
+        return beast::error_code(asio::error::operation_not_supported);
+    }
+
+    // TLS plaintext record size: the coalescing threshold
+    static constexpr size_t kRecordPlain = 16384;
+
+    beast::tcp_stream& next_;
+    SSL* ssl_;
+    BIO* rbio_ = nullptr;
+    BIO* wbio_ = nullptr;
+    // ciphertext in / out staging
+    std::vector<unsigned char> in_;
+    std::vector<unsigned char> out_;
+    // plaintext coalescing area for small buffers (one record)
+    std::array<unsigned char, kRecordPlain> staging_{};
+    size_t staged_ = 0;
+};
 
 // Per-request body-read state; owned by the session coroutine frame (still
 // needs draining after the handler's reader is destroyed).
@@ -436,13 +681,9 @@ private:
         // handshake: header bound
         auto idle = std::chrono::seconds(cfg_.header_timeout_sec);
         if (tls_ctx_) {
-            TlsStream tls(sess->stream, *tls_ctx_);
+            TlsStream tls(sess->stream, *tls_ctx_, cfg_.io_chunk_size);
             sess->stream.expires_after(idle);
-            auto [hec, hn] = co_await io_op([&](auto cb) {
-                tls.async_handshake(asio::ssl::stream_base::server,
-                                    [cb = std::move(cb)](beast::error_code e) mutable { cb(e, size_t{0}); });
-            });
-            (void)hn;
+            beast::error_code hec = co_await tls.handshake();
             sess->stream.expires_never();
             counters_.tls_handshake(!hec);
             if (hec) {
@@ -455,9 +696,7 @@ private:
                 // Best-effort close_notify (with a timeout backstop); failure is fine, TCP gets closed right after
                 // anyway
                 sess->stream.expires_after(idle);
-                co_await io_op([&](auto cb) {
-                    tls.async_shutdown([cb = std::move(cb)](beast::error_code e) mutable { cb(e, size_t{0}); });
-                });
+                co_await tls.shutdown();
                 sess->stream.expires_never();
             }
         } else {

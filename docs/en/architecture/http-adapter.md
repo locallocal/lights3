@@ -244,8 +244,9 @@ notice the disconnect at their next socket operation.
 
 ### 2.4 Data-plane performance (roadmap §4.3)
 
-Four changes on the streaming response path, all inside L1 and all keeping
-`BodyReader`'s serial single-consumer contract; numbers in
+Four changes on the response path (①②④⑤), all inside L1 and all keeping
+`BodyReader`'s serial single-consumer contract; ⑨–⑬ at the end of the table
+were added for the problems the baseline turned up. Numbers in
 [performance-baseline.md](../development/performance-baseline.md).
 
 | # | Item | Implementation |
@@ -254,10 +255,14 @@ Four changes on the streaming response path, all inside L1 and all keeping
 | ② | **Buffer pool** | `IoBuffer`: a thread_local free list (at most 16 per thread), `new std::byte[n]` default-initialized -- no more zero-filled 64KiB `std::vector` per response. Returning on another thread is fine (it is only a cache) |
 | ④ | **sendfile** | `BodyReader::try_as_file()` returns `FileSpan{fd, offset, length}` when the remaining bytes are one contiguous file range; the driver moves them kernel-side and reports through `file_bytes_sent(n)` so the reader position and accounting decorators stay consistent. Implemented by localfs `FdStreamReader` (Range included); L2's `CountingBodyReader` forwards both (the bytes still reach metrics and the access log); checksum / tee decorators keep the default (no fast path). **Only the builtin driver takes it**: fixed length + plaintext + `http.sendfile: true` (default); TLS, chunked and non-file bodies always use `read()`, and an `EINVAL/ENOSYS` on the first call falls back too. beast does not: a sendfile on a strand thread would block an I/O thread on cold file reads; httplib exposes no socket handle; seastar's native stack has no sendfile |
 | ⑤ | **builtin streaming write under pumping** | The whole body loop is one coroutine driven by `sync_wait_pumping` (previously a bare `sync_wait` per 64KiB: condvar + two thread hops each, 16384 of them for 1GiB); `co_await resume_on(exec)` before every send brings the continuation back to the connection thread (a slow client never pins a shared pool thread), and `PumpExecutor::running_in_this_thread()` continues inline when already there |
-| ⑥ | **beast `ResumeOn` fast path** | Connection executors are all `strand<io_context::executor_type>` from `make_strand`; `any_io_executor::target<Strand>()` finds it and `running_in_this_thread()` makes `await_ready` true, skipping the `asio::post`. seastar's `ResumeOnShard` already had the same check |
+| ⑥ | **beast `ResumeOn` fast path** | A connection's executor is the plain executor of its io thread's `io_context` (no strands since ⑩); `any_io_executor::target<io_context::executor_type>()` finds it and `running_in_this_thread()` makes `await_ready` true, skipping the `asio::post`. seastar's `ResumeOnShard` already had the same check |
 | ⑦ | **per-bucket metrics without the lock** | `CountingBodyReader` adds only the global atomics per chunk (`add_bytes_*_total`); the bucket dimension accumulates and enters the mutex once per stream or per 16MiB via `add_bucket_bytes` (previously one global lock per 64KiB) |
 | ⑧ | **HeaderMap prefilter / BlockQueue block shaping** (backlog-sequence ⑩, done 2026-09-06) | `HeaderMap` stays an order-preserving vector; each item carries an 8-bit tag (name length + lowercased first / last characters folded together, O(1): hashing the whole name costs as much as the scan it saves, and a full FNV tag measurably slowed hits) plus a 256-bit set of the tags present: a miss (most of the optional headers L2 probes for are absent) returns without scanning, a hit compares the tag before the case-folding compare. Microbenchmark (25 headers, -O2): miss 15 → 1.8 ns, hit 8.3 → 8.0 ns. `BlockQueue`: pushes from a borrowed buffer (httplib's 16 KiB slices) are appended to one tail block (≤ 256 KiB) so the consumer pops per block, not per slice (16384 → about 4.6K pops per 256 MiB); `push(std::string&&)` takes a block over whole (cloudproxy's outbound upload reads each round into a freshly allocated 64 KiB string and moves it in: no copy under the lock). Empty pushes are dropped (a zero-length block would read as EOF on pop). The absolute cost is still small, as the backlog predicted |
 | ⑨ | **beast request-body read granularity** (found by the baseline) | Without a reserved capacity on the session's `flat_buffer`, beast's `read_size = max(512, capacity − size)` requests 512 bytes per socket read: a 4 MiB body was 8192 `recvmsg` + as many `timerfd_settime` (one `expires_after` each) + 77k futex calls, 40 ms per PUT against 6 ms on builtin. Fix: `buffer.reserve(io_chunk_size)`; PUT 4 MiB 91 → 914 ops/s |
+| ⑩ | **beast: one `io_context` per io thread** (todo entry "beast's TLS GET clearly lags", done and removed 2026-09-13) | N io threads used to share one `io_context`, so every socket completion went through the global queue and woke another thread: `strace -c` measured ~655 futex calls per 4 MiB TLS GET (about 2.5 wake/wait pairs per 16 KiB TLS record). Now each io thread owns an `io_context` (concurrency hint 1); a connection is pinned round-robin at accept, needs no strand, and all of its completions are same-thread continuations. The control plane (acceptor / stop eventfd / grace and force timers) stays on a strand over `io_[0]`; force-stop and `finish()` walk every context. A pool thread's `ResumeOn` back to the io thread is still a cross-thread post -- once per chunk, not per record. TLS GET 1560 → 2406 ops/s, plaintext GET +21%, PUT +13–19% |
+| ⑪ | **beast: a per-session watchdog replaces per-operation expiries** | Once an expiry is set, `beast::basic_stream` does `timer.async_wait` plus `cancel` around every `async_read_some` / `async_write_some` -- under TLS two timer operations per record (263 `timerfd_settime` per 4 MiB GET measured). Body reads, draining and every response write now run with `expires_never()` and are bounded by one `steady_timer` on `Session`: `wd_begin()` only records the in-flight operation's start and phase, the timer is armed once per session, and on expiry an overdue operation has its phase counted and the socket `close()`d (the operation fails), an on-time one re-arms for the remainder, no operation leaves it dormant until the next `wd_begin()`. Header reads and the handshake keep the stream expiry (single operations, and they must tell header from idle timeouts). Throughput within noise, TLS GET p99 14.4 → 8.1 ms |
+| ⑫ | **beast: memory-BIO `TlsStream`** | `asio::ssl::stream` drives OpenSSL through a 17 KiB BIO pair and a 17 KiB output buffer, so every 64 KiB chunk beast hands it becomes four `async_write_some` rounds (one composed operation and one completion per record); that fixed per-record cost left beast's TLS GET 0.5 ms CPU per op behind (3.95 vs builtin's 3.44 ms). The driver's own `TlsStream` (`AsyncReadStream`/`AsyncWriteStream` shape, fed straight to `bhttp::async_read/async_write`): `SSL_set_bio` with a pair of `BIO_s_mem`; `async_write_some` encrypts the buffer sequence, drains the ciphertext and sends it with a single `asio::async_write` (the memory BIO grows) -- note that every `SSL_write` closes a record, and beast hands the response head over as one small buffer per field name / value / CRLF (15 for a typical S3 response): written one by one they became 15 tiny records, measured as ~6 µs more server CPU and ~45 µs more client latency per 16 KiB TLS GET (asio avoids it by linearising up to 17 KiB per round), so small buffers are coalesced into a 16 KiB staging area first and only a buffer that is itself at least one record long (the 64 KiB chunks) goes to `SSL_write` directly without a copy; `async_read_some` tries `SSL_read` first and on `WANT_READ` pulls one io chunk of ciphertext into the read BIO and retries (post-handshake messages such as TLS 1.3 tickets waiting in the write BIO go out first); handshake and close_notify are coroutine loops; completions on the initiating path are always `post`ed. Certificate callback / SNI / mTLS still come from the shared `tls::Holder`-configured `SSL_CTX`, `peer_identity(native_handle())` unchanged. TLS GET 2469 → 3069 ops/s, on par with builtin; 16 KiB TLS level with the asio version (GET 111.7k / PUT 66.9k) |
+| ⑬ | **Pipelined request-body MD5** (todo entry "request-body path not optimized symmetrically", done and removed 2026-09-13) | Every backend's PUT / UploadPart loop ran read → `md5.update` → write serially on one thread: of the 6.15 ms CPU per 4 MiB PUT, MD5 was 3.3 ms (OpenSSL MD5 is 1.26 GB/s per stream and cannot be parallelised) and 8 workers already kept 6.6 cores busy -- the driver was not the bottleneck. `storage/pipelined_md5.h` `PipelinedMd5`: `feed(k)` first awaits chunk k−1's hash (digest order, and the caller's other buffer becomes reusable), then hands chunk k's hash to the thread pool and returns at once; the caller goes on to write chunk k and read chunk k+1; `final_hex()` awaits the last chunk. Contract: the caller alternates two `kChunk` (128 KiB) buffers and the bytes given to `feed()` stay untouched until the next `feed()` returned; the first 256 KiB are hashed inline so small objects pay no thread hop. Wired into localfs put/upload_part, xlocalfs `drain_to_tmp` (the uring write stream never hands its held-back block out again and an older block is only reacquired after `feed()` awaited its hash, which satisfies the contract) and duostore `pump_body`. 4 MiB PUT: builtin 1065 → 1195, httplib 1082 → 1190, beast 914 → 1173 (with ⑩⑪), beast TLS 727 → 1110 ops/s; p50 7.2 → 6.2 ms |
 
 ③ async logging was completed with §5.2.
 
@@ -287,11 +292,17 @@ Four changes on the streaming response path, all inside L1 and all keeping
 
 ### 3.1 Boost.Beast (async driver, preferred performance path)
 
-- Structure: N threads jointly running one `asio::io_context` (or per-thread
-  io_context; phase 1 uses the former — simpler); one session coroutine per
-  connection, written as the project's own `Task<void>` and hung on the
-  connection strand (`make_strand` at accept) through a self-destroying
-  `Detached` wrapper (`spawn_detached`).
+- Structure: one `asio::io_context` per io thread (§2.4 ⑩; phase 1 had N
+  threads sharing one, and the baseline showed the per-record cross-thread
+  wake-ups to be the main reason TLS lagged); a connection is pinned round-robin
+  to an io thread at accept, all of its socket completions run on that thread and
+  no strand is needed; one session coroutine per connection, written as the
+  project's own `Task<void>` and launched through a self-destroying `Detached`
+  wrapper (`spawn_detached`). The control plane (acceptor, stop eventfd,
+  grace/force timers) lives on a strand over `io_[0]`.
+- TLS: the driver's own memory-BIO `TlsStream` (§2.4 ⑫) instead of
+  `asio::ssl::stream`; timeouts are backed by the session watchdog timer
+  (§2.4 ⑪), header reads and the handshake keep the `tcp_stream` expiry.
 - Session flow: `async_read_header` → build `HttpRequest` (body wrapped as
   `BeastBodyReader`, whose `read()` continues reading via `async_read_some`
   internally) → `co_await handler(req)` → serialize response headers → loop
@@ -300,14 +311,14 @@ Four changes on the streaming response path, all inside L1 and all keeping
   `Task` — the session *is* a `Task`, and asio's async operations are adapted
   through callback awaiters; the handler's continuation may resume on a pool
   thread, so before touching the socket a `ResumeOn` awaiter `asio::post`s back
-  onto the connection strand (see [concurrency.md](concurrency.md) §4.1).
+  onto the connection's io thread (see [concurrency.md](concurrency.md) §4.1).
 - `Expect: 100-continue` support: once Beast parses that header, the driver sends
   `100 Continue` only when the handler first calls `body->read()`, then receives
   the body — so authentication failures can reject outright without receiving the
   body, matching S3 behavior.
-- Response loop: `StreamPrefetch` double buffering plus the same-strand
-  `ResumeOn` fast path (§2.4 ①⑥); no sendfile (a strand thread must not block
-  on a cold file read).
+- Response loop: `StreamPrefetch` double buffering plus the same-thread
+  `ResumeOn` fast path (§2.4 ①⑥); no sendfile (an io thread must not block on
+  a cold file read).
 
 ### 3.2 cpp-httplib (sync driver, thread-per-request)
 

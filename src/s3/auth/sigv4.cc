@@ -92,6 +92,15 @@ struct AuthFields {
 
 [[noreturn]] void malformed(const std::string& why) { throw S3Error(S3ErrorCode::AuthorizationHeaderMalformed, why); }
 
+// Whether a (lowercase) name appears in a ';'-separated SignedHeaders list. What it really
+// answers is "did the signer commit to this header's value", which is the only reason to
+// let a header influence anything
+bool header_is_signed(const std::string& signed_headers, std::string_view name) {
+    for (auto& n : split(signed_headers, ';'))
+        if (n == name) return true;
+    return false;
+}
+
 void parse_credential(const std::string& cred, AuthFields& f) {
     auto parts = split(cred, '/');
     if (parts.size() != 5) malformed("Credential must be AK/date/region/service/aws4_request");
@@ -717,12 +726,7 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req, std::sp
 
     // host must be in SignedHeaders (AWS requirement; under vhost the bucket comes from Host, and a signature
     // not bound to host could be replayed cross-bucket by swapping the Host header) -- enforced for presigned too
-    {
-        bool host_signed = false;
-        for (auto& n : split(f.signed_headers, ';'))
-            if (n == "host") host_signed = true;
-        if (!host_signed) malformed("SignedHeaders must include 'host'");
-    }
+    if (!header_is_signed(f.signed_headers, "host")) malformed("SignedHeaders must include 'host'");
 
     auto t = util::parse_amz_date(f.amz_date);
     if (!t) malformed("cannot parse x-amz-date");
@@ -789,7 +793,26 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req, std::sp
         // STS form POST: caller hashed the body
         payload_hash = *explicit_payload_hash;
     } else if (f.presigned) {
+        // A presigned URL is signed with UNSIGNED-PAYLOAD unless its signer committed to a
+        // payload hash, and there are exactly two places that commitment can live -- both
+        // covered by the signature itself, which is what makes honouring them safe:
+        //   - the X-Amz-Content-Sha256 query parameter, part of the canonical query (the
+        //     only parameter excluded from it is X-Amz-Signature). It is already on the
+        //     common query allowlist, so it was being accepted and then ignored, and a
+        //     client that presigned with a real digest got SignatureDoesNotMatch;
+        //   - the x-amz-content-sha256 header, but only when the signer listed it in
+        //     SignedHeaders and it therefore entered the canonical headers. An unsigned
+        //     header must not be consulted: a client sending one it did not sign would
+        //     otherwise flip the hash this side computes with and break its own URL.
+        // Neither can be added or altered by anyone but the signer -- doing so changes the
+        // canonical request and the signature stops matching
         payload_hash = "UNSIGNED-PAYLOAD";
+        if (auto q = req.query_get("X-Amz-Content-Sha256")) {
+            payload_hash = *q;
+        } else if (header_is_signed(f.signed_headers, "x-amz-content-sha256")) {
+            if (const std::string* h = req.headers.find("x-amz-content-sha256")) payload_hash = *h;
+        }
+        stream = classify_payload(payload_hash);
     } else if (const std::string* h = req.headers.find("x-amz-content-sha256")) {
         payload_hash = *h;
         stream = classify_payload(payload_hash);

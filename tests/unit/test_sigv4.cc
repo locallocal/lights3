@@ -900,6 +900,128 @@ TEST(sigv4_disabled_keeps_the_streaming_contract) {
     CHECK_EQ(read_all_body(*plain.body), "hello world");
 }
 
+// ---------- presigned URLs that commit to a payload hash ----------
+
+namespace {
+
+// Where the signer put the payload hash it committed to
+enum class HashIn { None, Query, SignedHeader, UnsignedHeader };
+
+// Hand-built presigned PUT, so the canonical request is spelled out rather than produced
+// by the same code under test. The canonical query is sorted by key, as SigV4 requires
+http::HttpRequest make_presigned(const std::string& secret, const std::string& hash, HashIn where) {
+    const std::string amz_date = "20260714T000000Z", date = "20260714";
+    const std::string cred = "TESTAK/" + date + "/us-east-1/s3/aws4_request";
+    const std::string signed_headers = where == HashIn::SignedHeader ? "host;x-amz-content-sha256" : "host";
+
+    std::string cq = "X-Amz-Algorithm=AWS4-HMAC-SHA256";
+    if (where == HashIn::Query) cq += "&X-Amz-Content-Sha256=" + util::aws_uri_encode(hash, true);
+    cq += "&X-Amz-Credential=" + util::aws_uri_encode(cred, true);
+    cq += "&X-Amz-Date=" + amz_date;
+    cq += "&X-Amz-Expires=300";
+    cq += "&X-Amz-SignedHeaders=" + util::aws_uri_encode(signed_headers, true);
+
+    // An unsigned header is not part of what was signed, so the URL still commits to
+    // UNSIGNED-PAYLOAD
+    const std::string effective = (where == HashIn::Query || where == HashIn::SignedHeader) ? hash : "UNSIGNED-PAYLOAD";
+    std::string canon_headers = "host:localhost\n";
+    if (where == HashIn::SignedHeader) canon_headers += "x-amz-content-sha256:" + hash + "\n";
+    const std::string canonical = "PUT\n/bkt/k\n" + cq + "\n" + canon_headers + "\n" + signed_headers + "\n" +
+                                  effective;
+    const std::string sts = "AWS4-HMAC-SHA256\n" + amz_date + "\n" + date + "/us-east-1/s3/aws4_request\n" +
+                            util::sha256_hex(canonical);
+    const std::string sig = util::to_hex(util::hmac_sha256(test_signing_key(secret, date), sts));
+
+    http::HttpRequest req;
+    req.method = "PUT";
+    req.raw_path = "/bkt/k";
+    req.path = "/bkt/k";
+    req.raw_query = cq + "&X-Amz-Signature=" + sig;
+    req.query.push_back({"X-Amz-Algorithm", "AWS4-HMAC-SHA256"});
+    if (where == HashIn::Query) req.query.push_back({"X-Amz-Content-Sha256", hash});
+    req.query.push_back({"X-Amz-Credential", cred});
+    req.query.push_back({"X-Amz-Date", amz_date});
+    req.query.push_back({"X-Amz-Expires", "300"});
+    req.query.push_back({"X-Amz-SignedHeaders", signed_headers});
+    req.query.push_back({"X-Amz-Signature", sig});
+    req.headers.add("Host", "localhost");
+    if (where == HashIn::SignedHeader || where == HashIn::UnsignedHeader) req.headers.add("x-amz-content-sha256", hash);
+    return req;
+}
+
+}  // namespace
+
+TEST(sigv4_presigned_honours_a_committed_payload_hash) {
+    AuthConfig cfg;
+    cfg.credentials = {{"TESTAK", "test-secret-key"}};
+    auto auth = SigV4Authenticator::build(cfg);
+    auth.clock = [] { return *util::parse_amz_date("20260714T000100Z"); };
+    const std::string body = "presigned body";
+    const std::string digest = util::sha256_hex(body);
+
+    // The query parameter is on the common allowlist, so it was accepted and then ignored:
+    // a URL presigned with a real digest came back SignatureDoesNotMatch
+    auto q = make_presigned("test-secret-key", digest, HashIn::Query);
+    q.body = std::make_unique<http::StringBodyReader>(body);
+    auth.verify(q);
+    CHECK_EQ(read_all_body(*q.body), body);
+
+    // and once honoured, it is also enforced
+    auto tampered = make_presigned("test-secret-key", digest, HashIn::Query);
+    tampered.body = std::make_unique<http::StringBodyReader>("a different body!");
+    auth.verify(tampered);
+    bool thrown = false;
+    try {
+        read_all_body(*tampered.body);
+    } catch (const S3Error& e) {
+        thrown = true;
+        CHECK_EQ(wire_code(e.code), wire_code(S3ErrorCode::XAmzContentSHA256Mismatch));
+    }
+    CHECK(thrown);
+
+    // Same through a header the signer listed in SignedHeaders
+    auto h = make_presigned("test-secret-key", digest, HashIn::SignedHeader);
+    h.body = std::make_unique<http::StringBodyReader>(body);
+    auth.verify(h);
+    CHECK_EQ(read_all_body(*h.body), body);
+
+    // A header the signer did NOT sign must not be consulted: the URL still commits to
+    // UNSIGNED-PAYLOAD, and letting the header speak would break a client's own URL
+    auto u = make_presigned("test-secret-key", digest, HashIn::UnsignedHeader);
+    u.body = std::make_unique<http::StringBodyReader>("whatever the client sends");
+    auth.verify(u);
+    CHECK_EQ(read_all_body(*u.body), "whatever the client sends");
+
+    // The ordinary presigned URL is unchanged
+    auto plain = make_presigned("test-secret-key", "", HashIn::None);
+    auth.verify(plain);
+}
+
+TEST(sigv4_presigned_payload_hash_cannot_be_forged) {
+    AuthConfig cfg;
+    cfg.credentials = {{"TESTAK", "test-secret-key"}};
+    auto auth = SigV4Authenticator::build(cfg);
+    auth.clock = [] { return *util::parse_amz_date("20260714T000100Z"); };
+    const std::string digest = util::sha256_hex("presigned body");
+
+    // Rewriting the parameter changes the canonical query, so the signature stops matching
+    auto forged = make_presigned("test-secret-key", digest, HashIn::Query);
+    const std::string other = util::sha256_hex("something else");
+    for (auto& [k, v] : forged.query)
+        if (k == "X-Amz-Content-Sha256") v = other;
+    auto at = forged.raw_query.find(digest);
+    CHECK(at != std::string::npos);
+    forged.raw_query.replace(at, digest.size(), other);
+    CHECK_THROWS_S3(auth.verify(forged), S3ErrorCode::SignatureDoesNotMatch);
+
+    // Adding the parameter to a URL signed without it does the same
+    auto added = make_presigned("test-secret-key", "", HashIn::None);
+    added.query.insert(added.query.begin() + 1, {"X-Amz-Content-Sha256", digest});
+    added.raw_query = "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=" + digest +
+                      added.raw_query.substr(std::string("X-Amz-Algorithm=AWS4-HMAC-SHA256").size());
+    CHECK_THROWS_S3(auth.verify(added), S3ErrorCode::SignatureDoesNotMatch);
+}
+
 // ---------- percent_decode semantic split ----------
 
 TEST(percent_decode_preserves_literal_plus) {

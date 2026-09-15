@@ -215,14 +215,18 @@ inline void parse_target(std::string_view target, HttpRequest& req) {
     req.raw_path = std::string(qpos == std::string_view::npos ? target : target.substr(0, qpos));
     req.raw_query = qpos == std::string_view::npos ? "" : std::string(target.substr(qpos + 1));
     req.path = util::percent_decode(req.raw_path);
+    // Split with views into raw_query: the pieces used to be materialised as std::string
+    // first (the "k=v" pair, then each half), so a two-parameter query cost six
+    // allocations to produce the two it keeps
+    std::string_view q(req.raw_query);
     size_t start = 0;
-    while (start < req.raw_query.size()) {
-        auto amp = req.raw_query.find('&', start);
-        if (amp == std::string::npos) amp = req.raw_query.size();
-        std::string kv = req.raw_query.substr(start, amp - start);
+    while (start < q.size()) {
+        auto amp = q.find('&', start);
+        if (amp == std::string_view::npos) amp = q.size();
+        std::string_view kv = q.substr(start, amp - start);
         if (!kv.empty()) {
             auto eq = kv.find('=');
-            if (eq == std::string::npos)
+            if (eq == std::string_view::npos)
                 req.query.emplace_back(util::percent_decode_query(kv), "");
             else
                 req.query.emplace_back(util::percent_decode_query(kv.substr(0, eq)),

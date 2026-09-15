@@ -157,7 +157,7 @@ private:
 // whether they computed it wrong or the transport rewrote the body
 inline std::vector<ExpectedDigest> parse_expected_digests(const http::HttpRequest& req) {
     auto decode = [&](std::string_view header, size_t bytes) -> std::optional<std::string> {
-        auto v = req.headers.get(header);
+        const std::string* v = req.headers.find(header);
         if (!v) return std::nullopt;
         auto raw = util::base64_decode(*v);
         if (!raw || raw->size() != bytes)
@@ -176,7 +176,7 @@ inline std::vector<ExpectedDigest> parse_expected_digests(const http::HttpReques
 // x-amz-trailer: comma-separated declared trailer names (lowercased, OWS-trimmed, empties dropped)
 inline std::vector<std::string> parse_declared_trailers(const http::HttpRequest& req) {
     std::vector<std::string> out;
-    auto v = req.headers.get("x-amz-trailer");
+    const std::string* v = req.headers.find("x-amz-trailer");
     if (!v) return out;
     std::string cur;
     auto flush = [&] {
@@ -206,13 +206,13 @@ inline std::vector<std::string> parse_declared_trailers(const http::HttpRequest&
 // each part carries -- and is verified against -- its own digest.
 inline void validate_checksum_algorithm(const http::HttpRequest& req) {
     for (std::string_view h : {"x-amz-checksum-algorithm", "x-amz-sdk-checksum-algorithm"}) {
-        auto v = req.headers.get(h);
+        const std::string* v = req.headers.find(h);
         if (!v) continue;
         std::string name = "x-amz-checksum-";
         for (char c : *v) name.push_back(http::HeaderMap::lower(c));
         if (!checksum_spec(name))
             throw S3Error(S3ErrorCode::InvalidRequest, "Unsupported value for " + std::string(h) + ": " + *v);
-        bool provided = req.headers.get(name).has_value();
+        bool provided = req.headers.has(name);
         if (!provided)
             for (auto& t : parse_declared_trailers(req))
                 if (t == name) provided = true;
@@ -253,7 +253,7 @@ inline std::optional<RequestChecksum> request_checksum(const http::HttpRequest& 
         if (!out) out = RequestChecksum{sp, std::move(value), trailer};
     };
     for (auto& sp : kChecksumSpecs)
-        if (auto v = req.headers.get(sp.header)) add(&sp, *v, false);
+        if (const std::string* v = req.headers.find(sp.header)) add(&sp, *v, false);
     for (auto& t : parse_declared_trailers(req))
         if (const auto* sp = checksum_spec(t)) add(sp, "", true);
     return out;

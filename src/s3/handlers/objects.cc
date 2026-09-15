@@ -111,19 +111,19 @@ void fill_object_headers(http::HttpResponse& resp, const storage::ObjectMeta& me
 // GET/HEAD conditional requests (docs/architecture/s3-protocol.md §6, precedence follows RFC 7232:
 // If-Match > If-Unmodified-Since；If-None-Match > If-Modified-Since）
 void check_read_preconditions(const http::HttpRequest& req, const storage::ObjectMeta& meta, bool& not_modified) {
-    if (auto v = req.headers.get("If-Match")) {
+    if (const std::string* v = req.headers.find("If-Match")) {
         if (*v != "*" && strip_quotes(*v) != meta.etag)
             throw S3Error(S3ErrorCode::PreconditionFailed,
                           "At least one of the pre-conditions you specified did not hold");
-    } else if (auto ius = req.headers.get("If-Unmodified-Since")) {
+    } else if (const std::string* ius = req.headers.find("If-Unmodified-Since")) {
         auto t = util::parse_http_date(*ius);
         if (t && to_epoch_sec(meta.last_modified) > to_epoch_sec(*t))
             throw S3Error(S3ErrorCode::PreconditionFailed,
                           "At least one of the pre-conditions you specified did not hold");
     }
-    if (auto v = req.headers.get("If-None-Match")) {
+    if (const std::string* v = req.headers.find("If-None-Match")) {
         if (*v == "*" || strip_quotes(*v) == meta.etag) not_modified = true;
-    } else if (auto ims = req.headers.get("If-Modified-Since")) {
+    } else if (const std::string* ims = req.headers.find("If-Modified-Since")) {
         auto t = util::parse_http_date(*ims);
         if (t && to_epoch_sec(meta.last_modified) <= to_epoch_sec(*t)) not_modified = true;
     }
@@ -137,7 +137,7 @@ bool has_read_preconditions(const http::HttpRequest& req) {
 // If-Range (RFC 7233 §3.2): Range takes effect only when the validator (strong ETag, or HTTP-date exactly
 // matching Last-Modified) hits; otherwise Range is ignored and the full object returned
 bool if_range_matches(const http::HttpRequest& req, const storage::ObjectMeta& meta) {
-    auto v = req.headers.get("If-Range");
+    const std::string* v = req.headers.find("If-Range");
     if (!v) return true;
     if (!v->empty() && v->front() == '"') return strip_quotes(*v) == meta.etag;
     auto t = util::parse_http_date(*v);
@@ -178,7 +178,7 @@ Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::stri
     // striped lock spanned the entire body upload, so 64 slow connections could block all conditional writes
     // gateway-wide, and it could never hold in multi-instance deployments anyway
     storage::PutCondition cond;
-    if (auto v = req.headers.get("If-None-Match")) {
+    if (const std::string* v = req.headers.find("If-None-Match")) {
         if (*v != "*") throw S3Error(S3ErrorCode::NotImplemented, "PUT If-None-Match only supports '*'.");
         cond.if_none_match = true;
         bool exists = true;
@@ -191,7 +191,7 @@ Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::stri
         if (exists)
             throw S3Error(S3ErrorCode::PreconditionFailed,
                           "At least one of the pre-conditions you specified did not hold");
-    } else if (auto v2 = req.headers.get("If-Match")) {
+    } else if (const std::string* v2 = req.headers.find("If-Match")) {
         cond.if_match_etag = strip_quotes(*v2);
         // missing -> NoSuchKey(404)
         auto cur = co_await backend.head_object(bucket, key);
@@ -231,7 +231,7 @@ Task<http::HttpResponse> S3Service::copy_object(http::HttpRequest& req, std::str
                                                 const RequestAuth& auth) {
     // a named pair, not a structured binding: GCC reports the binding's hidden object as
     // maybe-uninitialized inside coroutine frames
-    auto src = parse_copy_source(*req.headers.get("x-amz-copy-source"));
+    auto src = parse_copy_source(*req.headers.find("x-amz-copy-source"));
     const std::string& src_bucket = src.first;
     const std::string& src_key = src.second;
     auto& src_backend = router_.resolve(src_bucket);
@@ -239,7 +239,8 @@ Task<http::HttpResponse> S3Service::copy_object(http::HttpRequest& req, std::str
     auto src_meta = co_await src_backend.head_object(src_bucket, src_key);
     check_copy_preconditions(req, src_meta);
 
-    std::string directive = req.headers.get("x-amz-metadata-directive").value_or("COPY");
+    const std::string* directive_hdr = req.headers.find("x-amz-metadata-directive");
+    std::string directive = directive_hdr ? *directive_hdr : "COPY";
     if (directive != "COPY" && directive != "REPLACE")
         throw S3Error(S3ErrorCode::InvalidArgument, "Invalid x-amz-metadata-directive.");
     if (src_bucket == bucket && src_key == key && directive == "COPY")
@@ -306,7 +307,7 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
     auto& backend = router_.resolve(bucket);
 
     std::optional<storage::ByteRange> range;
-    if (auto v = req.headers.get("Range")) range = parse_range_header(*v);
+    if (const std::string* v = req.headers.find("Range")) range = parse_range_header(*v);
 
     // GET/HEAD ?partNumber: one part of a completed multipart object,
     // resolved to a byte range from the part_sizes layout recorded at complete (or a

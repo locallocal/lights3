@@ -30,9 +30,11 @@ std::string lower(std::string s) {
     return s;
 }
 
-// Value trim + consecutive whitespace folding (SigV4 canonical headers rule; whitespace inside quotes kept verbatim)
-std::string canonical_header_value(const std::string& v) {
-    std::string out;
+// Value trim + consecutive whitespace folding (SigV4 canonical headers rule; whitespace inside quotes kept verbatim).
+// Appends rather than returning: the canonical request is assembled in one buffer, and a
+// header value that needs no folding at all (the common case) then costs nothing
+void append_canonical_header_value(std::string& out, std::string_view v) {
+    const size_t begin = out.size();
     bool in_space = false, in_quotes = false;
     for (char c : v) {
         if (c == '"') in_quotes = !in_quotes;
@@ -40,11 +42,27 @@ std::string canonical_header_value(const std::string& v) {
             in_space = true;
             continue;
         }
-        if (in_space && !out.empty()) out.push_back(' ');
+        if (in_space && out.size() > begin) out.push_back(' ');
         in_space = false;
         out.push_back(c);
     }
-    return out;
+}
+
+// Allocation-free tokenizer for the hot paths: split() below materialises a
+// vector<std::string> per call, and the canonical request walks three such lists (signed
+// headers, query parameters, scope) on every single request
+template <class Fn>
+void for_each_token(std::string_view s, char sep, Fn&& fn) {
+    size_t start = 0;
+    for (;;) {
+        size_t at = s.find(sep, start);
+        if (at == std::string_view::npos) {
+            fn(s.substr(start));
+            return;
+        }
+        fn(s.substr(start, at - start));
+        start = at + 1;
+    }
 }
 
 std::vector<std::string> split(const std::string& s, char sep) {
@@ -66,14 +84,14 @@ std::vector<std::string> split(const std::string& s, char sep) {
 std::string canonical_query(const std::string& raw_query, std::string_view exclude = "") {
     std::vector<std::pair<std::string, std::string>> params;
     if (!raw_query.empty()) {
-        for (auto& kv : split(raw_query, '&')) {
-            if (kv.empty()) continue;
+        for_each_token(raw_query, '&', [&](std::string_view kv) {
+            if (kv.empty()) return;
             auto eq = kv.find('=');
-            std::string k = util::percent_decode(eq == std::string::npos ? kv : kv.substr(0, eq));
-            std::string v = eq == std::string::npos ? "" : util::percent_decode(kv.substr(eq + 1));
-            if (k == exclude) continue;
+            std::string k = util::percent_decode(eq == std::string_view::npos ? kv : kv.substr(0, eq));
+            std::string v = eq == std::string_view::npos ? "" : util::percent_decode(kv.substr(eq + 1));
+            if (k == exclude) return;
             params.emplace_back(util::aws_uri_encode(k, true), util::aws_uri_encode(v, true));
-        }
+        });
     }
     std::sort(params.begin(), params.end());
     std::string out;
@@ -96,9 +114,11 @@ struct AuthFields {
 // answers is "did the signer commit to this header's value", which is the only reason to
 // let a header influence anything
 bool header_is_signed(const std::string& signed_headers, std::string_view name) {
-    for (auto& n : split(signed_headers, ';'))
-        if (n == name) return true;
-    return false;
+    bool found = false;
+    for_each_token(signed_headers, ';', [&](std::string_view n) {
+        if (n == name) found = true;
+    });
+    return found;
 }
 
 void parse_credential(const std::string& cred, AuthFields& f) {
@@ -613,48 +633,83 @@ std::string SigV4Authenticator::signature_for(const http::HttpRequest& req, cons
                                               const std::string& amz_date, const std::string& scope,
                                               const std::string& signed_headers, const std::string& payload_hash,
                                               bool presigned) const {
-    // canonical headers (values taken per the SignedHeaders list; the list must already be sorted;
-    // same-name headers comma-joined in order of appearance -- SigV4 rule)
-    std::string canon_headers;
-    for (auto& name : split(signed_headers, ';')) {
-        std::string joined;
-        bool found = false;
-        for (auto& [k, v] : req.headers.items()) {
-            if (!http::HeaderMap::ieq(k, name)) continue;
-            if (found) joined += ",";
-            joined += canonical_header_value(v);
-            found = true;
-        }
-        if (!found)
-            throw S3Error(S3ErrorCode::SignatureDoesNotMatch,
-                          "Signed header '" + name + "' is missing from the request.");
-        canon_headers += name + ":" + joined + "\n";
-    }
-
-    std::string canonical_uri = req.raw_path.empty() ? "/" : req.raw_path;
+    // The canonical request is assembled into one buffer instead of an ostringstream with a
+    // separate string per part. Sizing it up front is a guess, but a generous one costs a
+    // single allocation where the old shape did one per signed header plus one per stream
+    // insertion
+    std::string canonical;
+    canonical.reserve(512 + req.raw_query.size() + req.raw_path.size());
+    canonical += req.method;
+    canonical += '\n';
+    canonical += req.raw_path.empty() ? "/" : req.raw_path;
+    canonical += '\n';
     // Only presigned requests exclude X-Amz-Signature from the canonical query; when a header-authenticated
     // request carries this query parameter it is signed as an ordinary parameter (matching AWS)
-    std::string presigned_exclude = presigned ? "X-Amz-Signature" : "";
-    std::ostringstream canonical;
-    canonical << req.method << "\n"
-              << canonical_uri << "\n"
-              << canonical_query(req.raw_query, presigned_exclude) << "\n"
-              << canon_headers << "\n"
-              << signed_headers << "\n"
-              << payload_hash;
+    canonical += canonical_query(req.raw_query, presigned ? "X-Amz-Signature" : "");
+    canonical += '\n';
 
-    std::string sts = std::string(kAlgo) + "\n" + amz_date + "\n" + scope + "\n" + util::sha256_hex(canonical.str());
+    // canonical headers (values taken per the SignedHeaders list; the list must already be sorted;
+    // same-name headers comma-joined in order of appearance -- SigV4 rule).
+    // The lookup is a scan per signed header, so the 8-bit name tag HeaderMap already keeps
+    // is used as the prefilter (http/model.h): a signed request lists a handful of headers
+    // and carries a dozen or two, and the folding compare now runs only on a tag hit
+    std::string missing;
+    for_each_token(signed_headers, ';', [&](std::string_view name) {
+        if (!missing.empty()) return;
+        const uint8_t tag = http::HeaderMap::tag(name);
+        bool found = false;
+        const auto& items = req.headers.items();
+        const auto& tags = req.headers.item_tags();
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (tags[i] != tag || !http::HeaderMap::ieq(items[i].first, name)) continue;
+            if (!found) {
+                canonical += name;
+                canonical += ':';
+            } else {
+                canonical += ',';
+            }
+            append_canonical_header_value(canonical, items[i].second);
+            found = true;
+        }
+        if (!found) {
+            missing = std::string(name);
+            return;
+        }
+        canonical += '\n';
+    });
+    if (!missing.empty())
+        throw S3Error(S3ErrorCode::SignatureDoesNotMatch,
+                      "Signed header '" + missing + "' is missing from the request.");
+
+    canonical += '\n';
+    canonical += signed_headers;
+    canonical += '\n';
+    canonical += payload_hash;
+
+    std::string sts = std::string(kAlgo) + "\n" + amz_date + "\n" + scope + "\n" + util::sha256_hex(canonical);
 
     // date/region/service/aws4_request
-    auto parts = split(scope, '/');
-    auto k = derive_signing_key(secret_key, parts[0], parts[1], parts[2]);
+    std::string_view date, region, service;
+    {
+        int n = 0;
+        for_each_token(scope, '/', [&](std::string_view part) {
+            if (n == 0)
+                date = part;
+            else if (n == 1)
+                region = part;
+            else if (n == 2)
+                service = part;
+            ++n;
+        });
+    }
+    auto k = derive_signing_key(secret_key, std::string(date), std::string(region), std::string(service));
     return util::to_hex(util::hmac_sha256(k, sts));
 }
 
 std::optional<std::string> SigV4Authenticator::peek_access_key(const http::HttpRequest& req) {
     try {
         AuthFields f;
-        if (auto auth = req.headers.get("Authorization"))
+        if (const std::string* auth = req.headers.find("Authorization"))
             f = parse_auth_header(*auth);
         else if (auto cred = req.query_get("X-Amz-Credential"))
             parse_credential(*cred, f);
@@ -693,10 +748,10 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req, std::sp
     }
 
     AuthFields f;
-    if (auto auth = req.headers.get("Authorization")) {
+    if (const std::string* auth = req.headers.find("Authorization")) {
         f = parse_auth_header(*auth);
-        auto date = req.headers.get("x-amz-date");
-        if (!date) date = req.headers.get("Date");
+        const std::string* date = req.headers.find("x-amz-date");
+        if (!date) date = req.headers.find("Date");
         if (!date) malformed("missing x-amz-date");
         f.amz_date = *date;
     } else if (auto alg = req.query_get("X-Amz-Algorithm")) {
@@ -768,7 +823,7 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req, std::sp
     // is judged before expiry so a wrong token never reads as merely "expired"
     {
         std::optional<std::string> req_token;
-        if (auto h = req.headers.get("x-amz-security-token"))
+        if (const std::string* h = req.headers.find("x-amz-security-token"))
             req_token = *h;
         else if (auto q = req.query_get("X-Amz-Security-Token"))
             req_token = *q;

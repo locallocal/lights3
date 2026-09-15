@@ -306,6 +306,39 @@ concurrent, 10s, four rounds:
 not go through the pump, and is unchanged as the control. httplib is still positioned as
 the functional-verification driver rather than a performance path; this only removes waste.
 
+### 4.6 O1-O6: allocations and syscalls on the request path
+
+The six pure performance items of the review's §3, done together: the SigV4 canonical
+request assembled into one buffer with the header-name tag as a prefilter (O1),
+`headers.get()` replaced by `find()` on the request path (O2, 52 call sites down to 18, the
+rest being cold ones), request ids written as hex directly (O3), the localfs commit
+fdatasync'ing the fd it already holds instead of re-opening by path (O4), beast resolving
+the peer address once per connection (O5), and `parse_target` splitting the query string
+with string_views (O6).
+
+Before and after binaries interleaved (before then after within each round, so machine
+drift cancels), 16 KiB objects:
+
+| Driver / concurrency | Rounds | Before | After | |
+| --- | --- | --- | --- | --- |
+| beast / 32 (`bench_matrix`) | 8 | PUT 95.0-99.3k | PUT 100.8-103.1k | **disjoint ranges, +3.0%** |
+| beast / 32 | 8 | GET 167.5-176.2k | GET 177.4-182.0k | **disjoint ranges, +3.3%** |
+| builtin / 64 | 3 | PUT median 224.8k | PUT median 224.8k | no measurable difference |
+| builtin / 64 | 3 | GET median 314.5k | GET median 318.5k | inside the noise |
+
+Two things worth stating plainly:
+
+- **The gain is not O5.** Reverting only O5 (putting beast's per-request
+  `remote_endpoint()` back) and running four more interleaved rounds matched the full
+  change (PUT 100.8 / 100.8 / 100.8 / 98.5k), still above the before range -- that one
+  syscall is not the bottleneck; the dozens of small allocations per request are
+  (O1 / O2 / O6). Bisecting further was not done: the whole effect is 3%, and splitting it
+  finer is at the edge of what this harness resolves.
+- **builtin shows nothing**, most likely because at 225k ops/s it is bound by the load
+  generator (same box, same process count): time saved on the server side has nowhere to
+  show. That is not "the change does nothing for builtin", it is this harness not seeing it
+  at that point.
+
 ## 5. Reproducing
 
 ```bash
@@ -327,4 +360,4 @@ mode, size, concurrency, duration_s, result}`, where `result` is the
 | --- | --- | --- |
 | 2026-09-05 | §4.3 data-plane work (prefetch, buffer pool, sendfile, pumping, ResumeOn fast path, per-bucket metrics without the lock, beast read-buffer reserve) | large-object GET +14 to +52%, beast PUT 3.5 to 10× |
 | 2026-09-13 | beast per-thread io_context, session watchdog, memory-BIO TlsStream; PipelinedMd5 request-body hashing (http-adapter.md §2.4 ⑩–⑬) | beast TLS GET 4 MiB +93% (level with the other drivers), 4 MiB PUT +12 to +55% on all drivers, p50 7.2 → 6.2 ms |
-| 2026-09-15 | Request-tail lock removal + `log.async` on by default (§4.0-4.2); direct-read aws-chunked de-framing (§4.3); route resolved once (§4.4, a negative result performance-wise); httplib pump thread pool (§4.5) | 64 concurrent, 16 KiB: PUT +8.1%, GET +19.2%, GET p99 1.01 → 0.87 ms; 128 MiB chunked PUT +19%, at parity with a plain body |
+| 2026-09-15 | Request-tail lock removal + `log.async` on by default (§4.0-4.2); direct-read aws-chunked de-framing (§4.3); route resolved once (§4.4, a negative result performance-wise); httplib pump thread pool (§4.5); request-path allocations and syscalls (§4.6) | 64 concurrent, 16 KiB: PUT +8.1%, GET +19.2%, GET p99 1.01 → 0.87 ms; 128 MiB chunked PUT +19%, at parity with a plain body |

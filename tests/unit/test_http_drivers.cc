@@ -171,6 +171,11 @@ Task<HttpResponse> test_handler(HttpRequest req) {
         resp.small_body = req.body ? "hasbody" : "nobody";
         co_return resp;
     }
+    if (req.path == "/peer") {
+        // what L1 resolved as the client address; beast now caches it per connection
+        resp.small_body = req.remote_addr;
+        co_return resp;
+    }
     if (req.path == "/hdrs") {
         // exactly what L1 parsed, one "name: value" per line: for tests that have to see
         // the header list itself rather than its effect
@@ -935,6 +940,26 @@ void check_framing_rejected(const std::string& driver, const std::string& raw) {
     // If the embedded GET /small were answered independently, it would get 200 + "nobody"
     auto r2 = c.read_response();
     CHECK(!(r2.ok && r2.status == 200 && r2.body == "nobody"));
+}
+
+// The client address is per connection, not per request: beast resolves it once at accept
+// now (remote_endpoint() is a getpeername(2) plus an address format) instead of on every
+// request. It must still be there, and still be the same, on the second request of a
+// keep-alive connection -- which is where a cache set in the wrong place would show up
+TEST(http_driver_remote_addr_is_stable_across_keepalive) {
+    for_each_driver([](const std::string& d) {
+        TestServer ts(d);
+        Client c(ts.port);
+        c.send_str("GET /peer HTTP/1.1\r\nHost: t\r\n\r\n");
+        auto first = c.read_response();
+        CHECK(first.ok);
+        CHECK_EQ(first.status, 200);
+        CHECK_EQ(first.body, "127.0.0.1");
+        c.send_str("GET /peer HTTP/1.1\r\nHost: t\r\n\r\n");
+        auto second = c.read_response();
+        CHECK(second.ok);
+        CHECK_EQ(second.body, first.body);
+    });
 }
 
 // obs-fold (RFC 9112 §5.2): a header line starting with SP/HTAB continues the previous

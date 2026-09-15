@@ -102,6 +102,11 @@ public:
     }
 
     const std::vector<std::pair<std::string, std::string>>& items() const { return items_; }
+    // The per-item name tags, in lockstep with items(). Exposed for callers that scan the
+    // table themselves against a name they already know (SigV4's canonical headers walks
+    // the signed list against the whole table): the tag is the same O(1) prefilter find()
+    // uses, and it keeps the folding compare off the misses
+    const std::vector<uint8_t>& item_tags() const { return tags_; }
 
     // The prefilter tag: length and the lowercased first / last characters
     // folded into 8 bits. O(1) on purpose -- hashing the whole name costs as

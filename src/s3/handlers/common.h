@@ -79,9 +79,9 @@ inline std::string encode_tagging(const std::vector<std::pair<std::string, std::
 // gate the three write paths share
 inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req, uint64_t max_user_meta) {
     storage::ObjectMeta meta;
-    if (auto ct = req.headers.get("Content-Type")) meta.content_type = *ct;
+    if (const std::string* ct = req.headers.find("Content-Type")) meta.content_type = *ct;
     for (auto& f : storage::kStdMetaFields) {
-        if (auto v = req.headers.get(f.header)) {
+        if (const std::string* v = req.headers.find(f.header)) {
             reject_control_chars(f.header, *v);
             meta.*f.field = *v;
         }
@@ -150,15 +150,15 @@ inline void check_copy_preconditions(const http::HttpRequest& req, const storage
     auto fail = [] {
         throw S3Error(S3ErrorCode::PreconditionFailed, "At least one of the pre-conditions you specified did not hold");
     };
-    if (auto v = req.headers.get("x-amz-copy-source-if-match"))
+    if (const std::string* v = req.headers.find("x-amz-copy-source-if-match"))
         if (strip_quotes(*v) != src.etag) fail();
-    if (auto v = req.headers.get("x-amz-copy-source-if-none-match"))
+    if (const std::string* v = req.headers.find("x-amz-copy-source-if-none-match"))
         if (strip_quotes(*v) == src.etag) fail();
-    if (auto v = req.headers.get("x-amz-copy-source-if-unmodified-since")) {
+    if (const std::string* v = req.headers.find("x-amz-copy-source-if-unmodified-since")) {
         auto t = util::parse_http_date(*v);
         if (t && to_epoch_sec(src.last_modified) > to_epoch_sec(*t)) fail();
     }
-    if (auto v = req.headers.get("x-amz-copy-source-if-modified-since")) {
+    if (const std::string* v = req.headers.find("x-amz-copy-source-if-modified-since")) {
         auto t = util::parse_http_date(*v);
         if (t && to_epoch_sec(src.last_modified) <= to_epoch_sec(*t)) fail();
     }
@@ -229,7 +229,7 @@ inline std::optional<storage::PartChecksum> extract_part_checksum(http::HttpRequ
 inline void apply_checksum_echo(const http::HttpRequest& req, const storage::ObjectMeta& meta,
                                 http::HttpResponse& resp) {
     if (resp.status == 206) return;
-    auto v = req.headers.get("x-amz-checksum-mode");
+    const std::string* v = req.headers.find("x-amz-checksum-mode");
     if (!v || !http::HeaderMap::ieq(*v, "ENABLED")) return;
     if (meta.checksum_value.empty() || meta.checksum_algorithm.empty()) return;
     std::string h = "x-amz-checksum-";

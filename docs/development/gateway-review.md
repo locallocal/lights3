@@ -47,32 +47,21 @@ R11（builtin 关连接前补 `shutdown(SHUT_WR)`；**原判"客户端读不到 
 
 ## 2. 结论摘要
 
-风险项 R1–R13 全部完成（每条的去向见 §1），本文余下的是 §3 的六条纯性能项与 §6
-的两条顺带发现。
+风险项 R1–R13 与纯性能项 O1–O6 **全部完成**（去向见 §1）。本文只剩 §5 的两条顺带
+发现；那两条各自了结后，本文连同 docs/README 的索引行一起删除。
 
-## 3. 纯性能项
+## 3. 复现方法
 
-| 编号 | 位置 | 内容 |
-| --- | --- | --- |
-| O1 | `s3/auth/sigv4.cc:609-623` | canonical headers 是 O(signed × headers) 的 `ieq` 扫描，且 `split` 每次分配一串 `std::string`；`canonical_query`（66-85）对 raw query 做 decode→encode→sort，又是一轮分配。小对象高 QPS 下 SigV4 是 CPU 大头之一，值得先建一次小索引再扫 |
-| O2 | 全仓 | `headers.get()` 用了 52 处，`headers.find()` 只有 1 处 —— 而 `http/model.h:43` 的注释明确写着"存在性判断/比较请用 find，get 每次拷贝值"。改造是机械的，每请求能省十几次小分配 |
-| O3 | `s3/service.cc:35-52` | 每请求生成 16 字符 request-id + 48 字符 host-id（两次 `to_hex` + 两次分配）。`x-amz-id-2` 可以退化成"每进程前缀 + 每连接计数"，它只是给日志关联用的 |
-| O4 | `storage/localfs/fs_util.cc:87-94` | 对象提交走 `fsync_path`（按路径重新 `open` 再 `fdatasync` 再 `close`），而 upload_part 走的是 fd 版 `fsync_file`（`localfs_backend.cc:1134`）。PUT 路径每次多一对 open/close 系统调用，两条路径的写法也不一致 |
-| O5 | `http/drivers/beast/beast_server.cc:762-766` | 每请求一次 `remote_endpoint()` 系统调用 + `to_string()` 分配；keep-alive 连接上这是常量，缓存到 `Session` 即可 |
-| O6 | `http/drivers/common.h:213-233` | `parse_target` 对每个 query 参数做 `substr` + 两次 percent-decode，全部落成 `std::string`；配合 O1 一起改成 string_view 视图 + 延迟解码收益更整齐 |
-
-## 4. 复现方法
-
-R 系列已清零；O1–O6 用 `scripts/bench_matrix.sh` / `scripts/bench_gate.sh` 量，方法见
-[performance-baseline.md](performance-baseline.md) §4.4。早先几条用过的"无凭证起服"模板
+条目已清空。各条的实测方法与数据都在
+[performance-baseline.md](performance-baseline.md) §4；早先几条用过的"无凭证起服"模板
 （localfs + builtin + `auth:` 只留 region）见 git 历史里本文的旧版本。
 
-## 5. 建议的推进顺序
+## 4. 留给后来者
 
 1. 只剩 R13。O1–O6 是纯性能项，先照 §4.4 的办法做交错 A/B，别预设它们一定
    测得出来。
 
-## 6. 顺带发现（不在原清单里）
+## 5. 顺带发现（不在原清单里）
 
 - `http_driver_many_concurrent_bodies`（R8 时新加）对 httplib 是 flaky 的：24 个客户端
   同时 connect 会打爆 cpp-httplib 上游那个 5 的 listen backlog，SYN 被丢弃重传，表现为
@@ -80,12 +69,15 @@ R 系列已清零；O1–O6 用 `scripts/bench_matrix.sh` / `scripts/bench_gate.
   建立错峰 10ms 后 27/27 通过（上传本身仍然重叠，每个 200 KB 远长于 10ms）。已在
   R11 这轮修掉；记在这里是因为我一开始误判成 R8 的回归，多跑几轮才排除。
 
-- `duostore_pack_chunked_put_buffer_and_spill` 在 ASan 下报 512KiB 泄漏（2 次
-  `PipelinedMd5::make_buffers`，`duostore_backend.cc:1157` 的 `pump_body`）：put 在中途
-  被放弃时协程帧没被销毁。在未改动的树上同样复现，与 R4/R5 无关，未深查。复现：
-  `LIGHTS3_TEST_FILTER=duostore_pack_chunked ./build-asan/unit_tests`。
+- **ASan 下全量单测泄漏约 63 MB / 252 处**，全部是 `PipelinedMd5::make_buffers`
+  （`duostore_backend.cc` 的 `pump_body`、localfs 的 put 路径）：put 在中途被放弃时协程帧
+  没被销毁，每次漏掉一对 256 KiB 缓冲。最初只在
+  `duostore_pack_chunked_put_buffer_and_spill` 上看到 512 KiB，跑全量才看出规模。**在未
+  改动的树上同样复现**（O 系列改前 252 处 / 63,439,920 字节，改后 253 处 / 63,702,064
+  字节，即与这些改动无关），未深查。复现：`./build-asan/unit_tests`，看末尾的
+  LeakSanitizer 汇总。
 
-## 7. 走查中确认无问题的点
+## 6. 走查中确认无问题的点
 
 避免后来者重复排查，记几条读过并确认站得住的：
 

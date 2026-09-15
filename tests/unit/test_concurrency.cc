@@ -264,8 +264,14 @@ TEST(bounded_queue_backpressure) {
     ThreadPool pool(1, /*queue_capacity=*/1);
     std::promise<void> gate;
     auto blocked = gate.get_future().share();
-    // occupies the only worker
-    pool.post([blocked] { blocked.wait(); });
+    // occupies the only worker; the depth readings below are only meaningful once it is
+    // running, since queue_depth counts the continuation queue this task sits in first
+    std::atomic<bool> gate_running{false};
+    pool.post([blocked, &gate_running] {
+        gate_running.store(true);
+        blocked.wait();
+    });
+    while (!gate_running.load()) std::this_thread::sleep_for(1ms);
 
     std::atomic<int> done{0};
     auto t = [&](ThreadPool& p) -> Task<void> {
@@ -295,6 +301,78 @@ TEST(bounded_queue_backpressure) {
     uint64_t hist_total = std::accumulate(s.wait_hist.begin(), s.wait_hist.end(), uint64_t(0));
     // every dequeued task recorded its wait time
     CHECK_EQ(hist_total, uint64_t(4));
+}
+
+// queue_capacity caps how many tasks may be **ready**, not how many may be scheduled:
+// past it they are deferred, never refused, and the backlog has no limit of its own. The
+// header used to call this a "bounded queue with backpressure", which reads as a hard cap
+// -- it is not one, and the cap that does exist lives in the admission gate above. Drives
+// far more schedules than the capacity through a one-thread pool and checks that none is
+// rejected, that they run in enqueue order across the ready/deferred boundary, and that
+// every one of them charges its full wait (deferred time included) to the histogram
+TEST(schedule_overflow_is_deferred_not_rejected) {
+    constexpr int kCapacity = 4;
+    constexpr int kTasks = 200;
+    ThreadPool pool(1, kCapacity);
+    std::promise<void> gate;
+    auto blocked = gate.get_future().share();
+    // Wait until the blocker is actually *running*: stats().queue_depth counts the
+    // continuation queue too, so while this task is still queued the depth readings below
+    // would be one too high and the next schedule would be started before the previous one
+    // had suspended -- with 200 of them, that race is a coin flip
+    std::atomic<bool> gate_running{false};
+    pool.post([blocked, &gate_running] {
+        gate_running.store(true);
+        blocked.wait();
+    });
+    while (!gate_running.load()) std::this_thread::sleep_for(1ms);
+
+    std::mutex order_m;
+    std::vector<int> order;
+    std::atomic<int> rejected{0};
+    std::vector<std::thread> waiters;
+    // one thread per schedule, started in order and confirmed suspended before the next,
+    // so "enqueue order" is well defined
+    std::atomic<int> enqueued{0};
+    for (int i = 0; i < kTasks; ++i) {
+        waiters.emplace_back([&, i] {
+            auto t = [&](ThreadPool& p, int n) -> Task<void> {
+                co_await p.schedule();
+                std::lock_guard lk(order_m);
+                order.push_back(n);
+            };
+            try {
+                sync_wait(t(pool, i));
+            } catch (const std::exception&) {
+                rejected.fetch_add(1);
+            }
+        });
+        // wait until this schedule is actually queued before starting the next
+        for (int spin = 0; spin < 400; ++spin) {
+            auto st = pool.stats();
+            if (st.queue_depth + st.backlogged >= size_t(i + 1)) break;
+            std::this_thread::sleep_for(2ms);
+        }
+        enqueued.fetch_add(1);
+    }
+    auto st = pool.stats();
+    // the ready queue holds its capacity, everything else waits behind it
+    CHECK_EQ(st.queue_depth, size_t(kCapacity));
+    CHECK_EQ(st.backlogged, size_t(kTasks - kCapacity));
+
+    gate.set_value();
+    for (auto& w : waiters) w.join();
+    CHECK_EQ(rejected.load(), 0);
+    CHECK_EQ(int(order.size()), kTasks);
+    // FIFO holds across the ready/deferred boundary
+    for (int i = 0; i < kTasks; ++i) CHECK_EQ(order[size_t(i)], i);
+
+    st = pool.stats();
+    CHECK_EQ(st.queue_depth, size_t(0));
+    CHECK_EQ(st.backlogged, size_t(0));
+    CHECK_EQ(st.completed, uint64_t(kTasks + 1));
+    uint64_t hist_total = std::accumulate(st.wait_hist.begin(), st.wait_hist.end(), uint64_t(0));
+    CHECK_EQ(hist_total, uint64_t(kTasks + 1));
 }
 
 // ---------- AsyncSemaphore（docs/architecture/concurrency.md §6）----------

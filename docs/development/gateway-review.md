@@ -26,7 +26,10 @@ R6（路由只解析一次；**性能上是阴性结果**，见同文 §4.4，�
 路由变成结构保证，由 `service_website_*` 三条用例守着）、R7（桶维度指标表改 LRU 淘汰 +
 不存在的桶不开系列，回归用例 `s3_metrics_bucket_table_evicts_coldest` 与
 `service_unknown_bucket_opens_no_metric_series`）、R8（httplib 泵线程改固定池，
-PUT +20%，见同文 §4.5；回归用例 `http_driver_many_concurrent_bodies`）。
+PUT +20%，见同文 §4.5；回归用例 `http_driver_many_concurrent_bodies`）、R9（线程池
+"有界队列"的说法改成实话：有界的是**就绪数**、超出的被推迟而非拒绝，硬上限在准入闸门；
+`enqueue_bounded` 更名 `enqueue_deferrable`，回归用例
+`schedule_overflow_is_deferred_not_rejected`）。
 
 等级：高＝可能损坏数据或绕过约束；中＝可被外部输入放大，或明显偏离 AWS 语义；
 低＝加固/一致性问题。
@@ -35,7 +38,6 @@ PUT +20%，见同文 §4.5；回归用例 `http_driver_many_concurrent_bodies`�
 
 | 编号 | 位置 | 等级 | 一句话 |
 | --- | --- | --- | --- |
-| R9 | `core/thread_pool.cc:52` | 低 | `backlog_` 无界，"有界队列 + 背压"的实际语义需要写清 |
 | R10 | `http/drivers/builtin/builtin_server.cc:493` | 低 | obs-fold 折行头未按 RFC 9112 §5.2 拒绝 |
 | R11 | `http/drivers/builtin/builtin_server.cc:768` | 低 | 关连接前未 `shutdown(SHUT_WR)`，极端情况客户端只看到 RST |
 | R12 | `s3/auth/sigv4.cc:792` | 低 | presigned 一律按 `UNSIGNED-PAYLOAD` 计签 |
@@ -43,17 +45,6 @@ PUT +20%，见同文 §4.5；回归用例 `http_driver_many_concurrent_bodies`�
 | O1–O6 | 见 §4 | — | 纯性能项（SigV4 规范化、header 访问、id 生成、fsync、beast 每请求系统调用） |
 
 ## 3. 风险项
-
-### R9（低）ThreadPool 的 backlog 无界
-
-`enqueue_bounded`（`core/thread_pool.cc:52-55`）在 `queue_` 满时把任务放进
-`backlog_`，而 `backlog_` 没有上限。`capacity_` 因此不是"队列上限"，只是"推迟开始
-执行的水位"；真正的上限来自 `runtime.max_inflight_requests`（默认 1024）加上后台
-任务的数量。当前实现没有正确性问题，但 `thread_pool.h:2` 的"bounded queue + 背压"
-和 concurrency.md §3 的表述容易被读成硬上限。
-
-建议：要么给 backlog 一个上限（超了让 `schedule` 抛，调用点有 co_await 能接），要么
-把注释和文档改成"延迟启动式背压，硬上限在准入闸门"。
 
 ### R10（低）obs-fold 折行头未按 RFC 拒绝
 
@@ -137,7 +128,7 @@ R2 的 `stoull` 语义用一个三行程序即可确认（`-1` → 1844674407370
 
 ## 6. 建议的推进顺序
 
-1. 按等级顺延（R9 起）。O1–O6 是纯性能项，先照 §4.4 的办法做交错 A/B，别预设它们一定
+1. 按等级顺延（R10 起）。O1–O6 是纯性能项，先照 §4.4 的办法做交错 A/B，别预设它们一定
    测得出来。
 
 ## 6.5 顺带发现（不在原清单里）

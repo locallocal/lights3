@@ -1,5 +1,5 @@
 // L4: blocking-IO thread pool; coroutines hop onto pool threads via
-// co_await pool.schedule() (docs/architecture/concurrency.md §3: bounded queue + backpressure,
+// co_await pool.schedule() (docs/architecture/concurrency.md §3: two-tier queue,
 // depth/wait-time metrics, §5 cancellation)
 #pragma once
 
@@ -32,7 +32,8 @@ public:
     struct Stats {
         // ready queue length
         size_t queue_depth = 0;
-        // schedule tasks held on the wait list by backpressure when the queue is full
+        // schedule tasks deferred past the ready queue's capacity; not itself capped,
+        // see enqueue_deferrable
         size_t backlogged = 0;
         // tasks fully executed
         uint64_t completed = 0;
@@ -107,9 +108,16 @@ private:
         std::chrono::steady_clock::time_point enqueued;
     };
 
-    // schedule() path: when the queue is full, park on the backpressure wait list;
-    // a worker releases it once space frees up
-    void enqueue_bounded(std::function<void()> fn);
+    // schedule() path. queue_capacity caps how many tasks may be **ready**, not how many
+    // may be scheduled: past it, tasks are deferred onto backlog_ and released FIFO as
+    // workers free slots. Nothing is ever refused, and backlog_ has no limit of its own --
+    // the real bound is how many coroutines can be suspended in schedule() at once, i.e.
+    // the admission gate (runtime.max_inflight_requests) times per-request fan-out, plus
+    // the background jobs. One entry is a std::function, tens of bytes against the
+    // coroutine frames and HTTP buffers those same requests already hold, so it is never
+    // the binding constraint; lights3_pool_backlogged and the wait histogram (which counts
+    // the deferred wait too) are where it shows
+    void enqueue_deferrable(std::function<void()> fn);
     void worker_loop();
     static size_t wait_bucket(std::chrono::steady_clock::duration d);
 

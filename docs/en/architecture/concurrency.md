@@ -212,12 +212,21 @@ mutex + condvar. Two enqueue paths with deliberately different semantics:
 | Entry | Capacity | Purpose |
 | --- | --- | --- |
 | `post(fn)` | unbounded | continuation posting (executor post): must neither fail nor wait — losing a continuation means a hung request |
-| `co_await schedule(token)` | bounded (default 4096) | business code switching onto a pool thread: when the queue is full the task goes onto a backlog wait list, released FIFO as workers free up slots |
+| `co_await schedule(token)` | the **ready** queue is bounded (default 4096); enqueueing itself is not | business code switching onto a pool thread: past the ready queue's capacity the task is deferred onto a backlog, released FIFO as workers free up slots |
 
-- **Backpressure**: backlogged tasks do not consume queue capacity, but the
-  `schedule()` coroutine stays suspended — effectively propagating the pressure
-  back to the request coroutine and ultimately the socket read, preventing
-  unbounded pile-up of blocking tasks;
+- **What is bounded is how many tasks may be ready, not how many may be
+  scheduled**: past `queue_capacity` a task is *deferred*, never refused, and the
+  backlog has no limit of its own. The hard bound lives elsewhere — how many
+  coroutines can sit suspended in `schedule()` at once, i.e. the admission gate
+  (`runtime.max_inflight_requests`) times per-request fan-out, plus the
+  background jobs. One backlog entry is a `std::function`, tens of bytes against
+  the coroutine frames and HTTP buffers those same requests already hold, so it
+  is never the binding constraint. It is a longer queue, not a memory risk, and
+  it is visible: `lights3_pool_backlogged` and the wait histogram (which counts
+  the deferred wait too);
+- **Backpressure**: deferred tasks do not consume ready-queue capacity, but the
+  `schedule()` coroutine stays suspended — propagating the pressure back to the
+  request coroutine and ultimately the socket read;
 - **Metrics** (`stats()`, see [s3-protocol.md](s3-protocol.md) §7):
   queue depth, backlog length, and completion counts are exposed via
   `/-/metrics` and are the main signals for capacity tuning; the
@@ -408,8 +417,9 @@ Production consumers:
 | rados `buffer_sem_` | `rados_buffer_total` overall write-buffer budget: first share via blocking acquire (backpressure), second share of the double buffer via try_acquire (see [duostore-data-rados-design.md](storage/duostore-data-rados-design.md) §4.2) |
 
 In addition: per-connection serial processing (HTTP/1.1 pipelining is not
-executed in parallel) is guaranteed by the driver; the thread pool's bounded
-queue + backlog (§3.1) is the bottom-most second gate.
+executed in parallel) is guaranteed by the driver; the thread pool's ready
+queue + backlog (§3.1) is the bottom-most second gate -- it paces work rather
+than capping it, the cap being the admission gate above.
 
 ## 7. Lifetime of Background Tasks
 

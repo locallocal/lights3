@@ -1,5 +1,5 @@
 // L3: backup/restore and cross-engine migration for duostore meta
-// (docs/archive/gaps.md §6.1). Logical dump/load mediated by IMetaStore: dump writes all
+//. Logical dump/load mediated by IMetaStore: dump writes all
 // bucket/object records (including extent manifests) and the sealed pack ledger
 // into a self-describing binary stream; load replays them one by one through
 // put_object — record-level replay naturally doubles as the meta migration tool
@@ -9,7 +9,7 @@
 // Fixed backup/restore order (operational contract; the **load** side requires
 // writes stopped; the dump side is online when the engine can snapshot —
 // rocksdb/sqlite/tikv implement IMetaStore::snapshot(), redis cannot and keeps
-// the writes-stopped requirement, roadmap §3.7):
+// the writes-stopped requirement):
 //   Backup: data first (copy the chunks/packs directory or a rados pool snapshot)
 //           -> then dump meta. The order guarantees "data referenced by meta is
 //           necessarily in the backup" (§6 data-first mirror argument): extra

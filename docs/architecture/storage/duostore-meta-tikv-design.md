@@ -107,7 +107,7 @@
 | `gcq` | `G<be64 seq>` | `encode_reclaim` | `peek_reclaims` = 前缀 Scan limit max；seq 即 key 序 |
 | `stats` 计数器 | `C<kind>`（kind ∈ {`0`,`1`,`q`}） | 8B 小端 i64（复用 codec 计数器格式） | 号段预留（§5） |
 | `stats` pack 账 | `S<be64 id>d<be64 delta_id>`（delta 行）/ `S<be64 id>s`（封存行） | delta = le64 bytes‖le64 recs；seal = le64 file_size | 随 pack 聚合（P2）落地为 **delta 行 + 折叠**：每次业务事务写唯一 delta 行（id 出 'd' 号段计数器），纯写无冲突——共享账行的读改写会让同 active-pack 的小对象 PUT prewrite 互撞（原预警的物化解法）；`pack_stats()` 前缀扫聚合，单 pack delta 行超 16 条即顺带折叠为一行（删旧行 + 写合并行，与并发新增不冲突） |
-| —（多网关租约） | `Lgc` / `Lr<owner>` | GC 租约 owner；`<oldest_read_ms>\0<expiry_ms>\0<oldest_write_ms>` | `try_gc_lease` 原子 CAS+TTL；`publish_lease` 每网关一行、`min_lease` 前缀扫并懒删过期行（roadmap §3.7） |
+| —（多网关租约） | `Lgc` / `Lr<owner>` | GC 租约 owner；`<oldest_read_ms>\0<expiry_ms>\0<oldest_write_ms>` | `try_gc_lease` 原子 CAS+TTL；`publish_lease` 每网关一行、`min_lease` 前缀扫并懒删过期行 |
 | `tc` | `T<key>` | 不透明 | S3 Tables 目录的 KV 门面（`kv_get/put/delete/scan/put_batch`，每批一个乐观事务） |
 
 ### 3.3 list_objects：Snapshot + Scanner，算法照搬 RocksDB 版

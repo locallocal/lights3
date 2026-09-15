@@ -2,13 +2,13 @@
 # backend, the mint compatibility subset, the S3 Tables client smoke test, and the
 # performance gate / soak (their scripts live in scripts/, the cases belong here)
 
-# MinIO mint compatibility suite (roadmap §6.1): needs docker; SKIP (77) without
+# MinIO mint compatibility suite: needs docker; SKIP (77) without
 # it. The s3cmd + awscli subset is the regression gate (docs/development/testing.md §6)
 add_test(NAME mint
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_mint.sh $<TARGET_FILE:lights3> s3cmd awscli)
 set_tests_properties(mint PROPERTIES SKIP_RETURN_CODE 77 LABELS mint TIMEOUT 3600)
 
-# Performance gate + short soak (roadmap §6.1, docs/development/testing.md §5): lights3-ctl bench
+# Performance gate + short soak (docs/development/testing.md §5): lights3-ctl bench
 # against a memory-backend gateway with throughput / latency floors, and a
 # 30-second soak asserting RSS / fd stability. Both labeled so `ctest -LE perf`
 # skips them on a loaded box
@@ -64,7 +64,7 @@ if(LIGHTS3_DUOSTORE AND LIGHTS3_DRIVER_BUILTIN)
   add_test(NAME e2e_duostore
            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_e2e.sh
                    $<TARGET_FILE:lights3> builtin duostore)
-  # duostore with the io_uring fs data plane (roadmap §3.4 ⑤); the backend falls back
+  # duostore with the io_uring fs data plane; the backend falls back
   # to synchronous IO where io_uring is unavailable, so the case stays green everywhere
   add_test(NAME e2e_duostore_uring
            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_e2e.sh
@@ -74,7 +74,7 @@ if(LIGHTS3_DUOSTORE AND LIGHTS3_DRIVER_BUILTIN)
   add_test(NAME e2e_tiered_duostore
            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_e2e.sh
                    $<TARGET_FILE:lights3> builtin tiered-duostore)
-  # duostore as the tiered *local* side (roadmap §3.6 ⑥): tier state in the object
+  # duostore as the tiered *local* side: tier state in the object
   # record, stubs without extents; the full protocol suite over that composition
   add_test(NAME e2e_tiered_duolocal
            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_e2e.sh

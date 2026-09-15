@@ -1,5 +1,5 @@
 // L1: server-side TLS shared by the OpenSSL-backed drivers (builtin / beast /
-// httplib; roadmap §4.1, docs/usage/tls.md). One mechanism covers three roadmap items:
+// httplib; docs/usage/tls.md). One mechanism covers three requirements:
 //   - certificate material (default cert + SNI extras + client CA) is an
 //     immutable snapshot (Material) selected per handshake by an OpenSSL
 //     certificate callback — so a new snapshot swapped into the Holder takes
@@ -140,7 +140,7 @@ private:
 // "1.2" -> TLS1_2_VERSION, "1.3" -> TLS1_3_VERSION
 long min_version_of(const std::string& s);
 
-// Identity of the peer certificate after the handshake (backlog-sequence ⑥):
+// Identity of the peer certificate after the handshake:
 // nullopt when the peer presented none or verification did not succeed (the
 // latter cannot happen on a completed handshake with SSL_VERIFY_PEER, kept as a
 // belt-and-braces check). Reads the subject CN and the first URI SAN; the

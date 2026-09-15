@@ -530,7 +530,7 @@ TEST(duostore_sqlite_corruption_metric_counts_notadb) {
     CHECK(reg->render().find("lights3_duostore_sqlite_corruption_total{backend=\"s4c\"} 1\n") != std::string::npos);
 }
 
-// meta backup/restore doubling as cross-engine migration (docs/archive/gaps.md §6.1, meta_dump.h): rocks source dump ->
+// meta backup/restore doubling as cross-engine migration (meta_dump.h): rocks source dump ->
 // sqlite target load, data directory shared in place (the unit-test incarnation of the restore procedure "place data
 // first, then load meta"). Asserts: objects restored byte for byte (both pack and multi-chunk extents covered), deleted
 // objects do not resurrect, new writes after restore do not collide with existing file numbers (counter is raised)
@@ -606,7 +606,7 @@ TEST(duostore_meta_dump_migrates_rocks_to_sqlite) {
     }
 }
 
-// Schema evolution policy (docs/archive/gaps.md §6.1): user_version newer than this build -> refuse to run downgraded;
+// Schema evolution policy: user_version newer than this build -> refuse to run downgraded;
 // older than current with no migration in the chain -> loud failure ("changing layout without leaving a migration" is a
 // programming error). Neither rejection may pollute the database -- after restoring the real version it must reopen
 // normally
@@ -637,7 +637,7 @@ TEST(duostore_sqlite_schema_version_policy) {
     }
 }
 
-// Online meta dump (roadmap §3.7): the snapshot view is a held-open WAL read
+// Online meta dump: the snapshot view is a held-open WAL read
 // transaction — writes committed after snapshot() stay invisible to every read
 // through the view, while the write connection keeps committing
 TEST(duostore_sqlite_snapshot_dump_is_consistent) {
@@ -671,7 +671,7 @@ TEST(duostore_sqlite_snapshot_dump_is_consistent) {
     m.close();
 }
 
-// backlog-sequence ⑧: backup chain = full copy + WAL segments, restored to any
+// backup chain = full copy + WAL segments, restored to any
 // entry (id or time). The close-time segment completes the chain; a store that
 // reopens on an existing chain keeps archiving
 TEST(duostore_sqlite_backup_chain_pitr) {

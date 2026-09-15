@@ -71,8 +71,7 @@ make package                      # Release + CPack（deb / rpm / tgz）
   `#endif  // GUARD` 这类收尾标注。
 - 引用设计文档：注释里写 `docs/<group>/<name>.md §N`（例如
   `docs/architecture/storage/duostore-design.md §5.2`），中英文版章节号一致，
-  两边通用。`roadmap §N` / `backlog §N` / `backlog-sequence ①…⑩` /
-  `gaps` / `issues T<n>` 指 [../archive/](../archive/) 下的只读历史账本。
+  两边通用。`backlog §N` 指 [../archive/](../archive/) 下的只读历史账本。
 - 协程：`catch` 块内不能 `co_await`；协程内等待用 `drive` 路径的 `sync_wait` /
   `Started::wait`，否则死锁；GCC 15 对 `co_await` 成员指针有 ICE，先存局部变量；
   协程内的结构化绑定改具名 pair，避免 `maybe-uninitialized`。细节见

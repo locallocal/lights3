@@ -33,7 +33,7 @@ bool is_pseudo_header(const std::string& k) {
     return k == "REMOTE_ADDR" || k == "REMOTE_PORT" || k == "LOCAL_ADDR" || k == "LOCAL_PORT";
 }
 
-// Copies a fallback response into httplib::Response (docs/archive/gaps.md §4):
+// Copies a fallback response into httplib::Response:
 // previously each call site copied only status and body, leaving the
 // x-amz-request-id header behind in HttpResponse — id in the XML but not in
 // the headers, an inconsistency none of the other three drivers exhibit
@@ -46,13 +46,13 @@ void apply_fallback(httplib::Response& rs, const HttpResponse& src) {
 class HttplibServer final : public IHttpServer {
 public:
     explicit HttplibServer(const HttpConfig& cfg) : cfg_(cfg) {
-        // TLS (docs/archive/gaps.md §7): SSLServer is a subclass of Server and loads
+        // TLS: SSLServer is a subclass of Server and loads
         // the certificate at construction. Failure must throw right here
         // (when is_valid() is false, listen just fails silently)
         if (!cfg.tls_cert.empty()) {
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
             // Certificates, SNI extras, client CA and the knobs all live in the shared
-            // holder (roadmap §4.1, http/tls.h); SSLServer only owns the SSL_CTX, which
+            // holder (http/tls.h); SSLServer only owns the SSL_CTX, which
             // the setup callback hands to the holder for configuration
             try {
                 tls_holder_ = std::make_shared<tls::Holder>(cfg);
@@ -98,7 +98,7 @@ public:
             return new httplib::ThreadPool(static_cast<size_t>(n));
         };
         svr_->set_tcp_nodelay(true);
-        // Timeout family (roadmap §4.2): upstream has one read timeout for headers
+        // Timeout family: upstream has one read timeout for headers
         // and body alike, so the header phase is bounded by body_timeout here (the
         // keep-alive wait has its own knob); write and keep-alive map one to one
         svr_->set_read_timeout(cfg.body_timeout_sec);
@@ -157,7 +157,7 @@ public:
             // A response L2 rendered always carries its ids (x-amz-request-id /
             // Server) even when the body is empty or streamed: a HEAD 404 or a
             // website error document must not be rewritten into 405 (found by the
-            // website / fault e2e cases, roadmap §6.1)
+            // website / fault e2e cases)
             if (rs.has_header("x-amz-request-id") || rs.has_header("Server")) return HR::Unhandled;
             // upstream parser verdicts
             if (rs.status == 400 || rs.status == 431) counters_.parse_error();
@@ -210,7 +210,7 @@ public:
     void set_handler(Handler h) override { handler_ = std::move(h); }
     // Upstream owns the accept loop and the TLS handshake, so accept/active/TLS
     // stay 0 here (documented in docs/architecture/http-adapter.md §2.2); requests and the
-    // parse failures this layer sees are counted (roadmap §5.3)
+    // parse failures this layer sees are counted
     ConnStats stats() const override { return counters_.snapshot(); }
 
     void listen(const std::string& addr, uint16_t port) override {
@@ -245,7 +245,7 @@ public:
 
     void shutdown() override {
         // Idempotent: the watchdog thread and the end of Application::run both
-        // call it (admin listener, backlog-sequence ②). A second stop() while the
+        // call it (admin listener). A second stop() while the
         // accept loop is still winding down hits upstream's
         // assert(svr_sock_ != INVALID_SOCKET) -- the socket is already gone but
         // is_running_ is not yet cleared
@@ -273,7 +273,7 @@ private:
             if (!is_pseudo_header(k)) req.headers.add(k, v);
         req.remote_addr = rq.remote_addr;
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
-        // Verified client certificate (backlog-sequence ⑥): httplib exposes the
+        // Verified client certificate: httplib exposes the
         // session per request, so the read happens per request (a cheap peek)
         if (rq.ssl) req.tls_identity = tls::peer_identity(rq.ssl);
 #endif
@@ -332,7 +332,7 @@ private:
         // Push-to-pull: the pump thread drives the ContentReader to fill the
         // queue; the request thread runs the req_exec queue inside
         // sync_wait_pumping, and the body's cv blocking switches back to the
-        // request thread to execute (docs/archive/gaps.md §2.10), not occupying a
+        // request thread to execute, not occupying a
         // shared pool thread
         PumpExecutor req_exec;
         std::shared_ptr<BlockQueue> queue;
@@ -423,7 +423,7 @@ private:
 
         // Streaming response: httplib's content provider is itself a pull
         // model; the closure owns the reader and a double-buffered prefetch
-        // over it (roadmap §4.3 ①/②: the read of the next chunk is in flight
+        // over it (the read of the next chunk is in flight
         // while httplib writes the current one; pooled buffers). pf is declared
         // after body so it is destroyed first -- it may still hold a read in
         // flight when httplib drops the provider on a client disconnect

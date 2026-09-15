@@ -69,7 +69,7 @@ Task<LifecycleRunner::PassStats> LifecycleRunner::run_once() {
             auto& backend = router_.resolve(bucket);
             for (auto& rule : rules) {
                 if (!rule.enabled) continue;
-                // Stale multipart uploads first: their staging space is the roadmap's
+                // Stale multipart uploads first: their staging space is the
                 // headline waste ("zombie MPU garbage is never reclaimed")
                 if (rule.abort_incomplete_days > 0) {
                     storage::ListUploadsOptions opt;
@@ -79,7 +79,7 @@ Task<LifecycleRunner::PassStats> LifecycleRunner::run_once() {
                         for (auto& u : page.uploads) {
                             if (now() - u.initiated < rule.abort_incomplete_days * kDay) continue;
                             try {
-                                // Usage accounting (roadmap §3.9 ①): in-flight bytes leave with the upload
+                                // Usage accounting: in-flight bytes leave with the upload
                                 int64_t stored = 0;
                                 if (usage_ && usage_->enabled()) {
                                     storage::ListPartsOptions popt;

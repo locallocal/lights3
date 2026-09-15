@@ -516,7 +516,7 @@ TEST(cloudproxy_metrics_registered) {
     CHECK(text.find("lights3_cloudproxy_pool_wait_seconds_count{backend=\"cp\"}") != std::string::npos);
 }
 
-// A length-less body (true chunked) uploads via a local spool (docs/archive/gaps.md §6.2): first written to a temp file
+// A length-less body (true chunked) uploads via a local spool: first written to a temp file
 // to obtain the length, then goes down the known-length path; spool_max_bytes=0 keeps the old NotImplemented semantics
 TEST(cloudproxy_chunked_upload_spools) {
     struct NoLenReader final : http::BodyReader {
@@ -562,7 +562,7 @@ TEST(cloudproxy_chunked_upload_spools) {
     CHECK_THROWS_S3(sync_wait(b3.put_object("bkt", "k3", {}, nl)), s3::S3ErrorCode::NotImplemented);
 }
 
-// Same-backend server-side COPY (docs/archive/gaps.md §6.2): x-amz-copy-source completes in one remote call,
+// Same-backend server-side COPY: x-amz-copy-source completes in one remote call,
 // the gateway moves no bytes; REPLACE semantics carry our metadata
 TEST(cloudproxy_server_side_copy) {
     RemoteStack remote;
@@ -586,7 +586,7 @@ TEST(cloudproxy_server_side_copy) {
     CHECK_THROWS_S3(sync_wait(b.copy_object_fast("bkt", "absent", "bkt", "d2", {})), s3::S3ErrorCode::NoSuchKey);
 }
 
-// ---------- roadmap §3.3: backoff/Retry-After, breaker, deadline, pool hygiene, creds ----------
+// ---------- backoff/Retry-After, breaker, deadline, pool hygiene, creds ----------
 
 // A large Retry-After combined with a small op deadline: the retry whose backoff would
 // land past the deadline is not taken — exactly one remote hit, and the 503 maps out.
@@ -743,7 +743,7 @@ TEST(cloudproxy_pool_async_acquire_handoff_and_timeout) {
     CHECK_EQ(pool.stats().total, 1);
 }
 
-// Credential chain via a fake IMDS (roadmap §3.3): empty static keys resolve through
+// Credential chain via a fake IMDS: empty static keys resolve through
 // IMDSv2 (token PUT → role → credential doc); an expiry inside the refresh margin
 // re-fetches on the next signing. The remote is the full SigV4-verifying stack, so a
 // wrong chain would fail the signature, not just the assertion
@@ -823,7 +823,7 @@ TEST(cloudproxy_credential_chain_session_token_header) {
 
 #endif  // LIGHTS3_CLOUDPROXY
 
-// roadmap §5.4: every outbound request carries the request's trace with the
+// every outbound request carries the request's trace with the
 // gateway's span (payload on the awaiting chain's cancellation token), so the
 // remote logs it as parent; background work without a request context sends none
 TEST(cloudproxy_propagates_traceparent) {

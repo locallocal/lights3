@@ -96,7 +96,7 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
     CHECK_EQ(got.meta.user_meta.at("color"), "red");
     CHECK_EQ(read_all(*got.body), "hello world");
 
-    // Checksum persistence round trip (roadmap §2.2): the verified value must survive
+    // Checksum persistence round trip: the verified value must survive
     // each backend's serialization; multipart composes the stored per-part values
     if (checksum_roundtrip) {
         ObjectMeta cm;
@@ -136,7 +136,7 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
         sync_wait(b.delete_object("suite-bkt", "ck.bin"));
         sync_wait(b.delete_object("suite-bkt", "ckm.bin"));
 
-        // Tagging round trip (roadmap §2.5): write-time tags persist everywhere; the
+        // Tagging round trip: write-time tags persist everywhere; the
         // in-place mutation is allowed to answer an honest 501 (duostore has no
         // meta-only update primitive yet)
         ObjectMeta tm;
@@ -155,7 +155,7 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
     }
 
     // Body throws mid-read: the exception must propagate as-is, and no partial object may be left behind (backend.h
-    // contract). This is the shape shared by Content-MD5 mismatch (docs/archive/gaps.md §5.6) and client disconnect
+    // contract). This is the shape shared by Content-MD5 mismatch and client disconnect
     {
         ThrowingBodyReader bad("partial-", 64);
         CHECK_THROWS_S3(sync_wait(b.put_object("suite-bkt", "torn.bin", ObjectMeta{}, bad)), S3ErrorCode::BadDigest);
@@ -217,11 +217,11 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
     CHECK_THROWS_S3(sync_wait(b.get_object("no-such-bkt", "k", std::nullopt)), S3ErrorCode::NoSuchBucket);
     CHECK_THROWS_S3(put(b, "suite-bkt", "../escape", "x"), S3ErrorCode::InvalidArgument);
     CHECK_THROWS_S3(put(b, "suite-bkt", "a/../b", "x"), S3ErrorCode::InvalidArgument);
-    // The 255B per-segment limit has been pushed down to localfs only (docs/archive/gaps.md §6.3
-    // validate_fs_object_key); the shared layer here only guarantees the 1024B total-length limit still holds
+    // The 255B per-segment limit has been pushed down to localfs only (validate_fs_object_key); the shared layer here
+    // only guarantees the 1024B total-length limit still holds
     CHECK_THROWS_S3(put(b, "suite-bkt", std::string(1100, 'x'), "x"), S3ErrorCode::KeyTooLongError);
 
-    // Directory marker objects (docs/archive/gaps.md §6.3): the S3 console's "create folder" and the directory
+    // Directory marker objects: the S3 console's "create folder" and the directory
     // semantics of s3fs/goofys/rclone all depend on them. All backends support them uniformly -- localfs
     // carries them as a marker file inside the directory, the other backends are flat key spaces anyway
     {
@@ -319,8 +319,8 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
     auto complete = [&](const std::string& id, std::vector<PartInfo> parts) {
         return sync_wait(b.complete_multipart("suite-bkt", "mp/joined.bin", id, parts));
     };
-    // Out of order / ETag mismatch / missing part / empty parts. Out-of-order has its own code (docs/archive/gaps.md
-    // §5.7): InvalidPart would make clients re-upload parts, when what is actually needed is sorting the list
+    // Out of order / ETag mismatch / missing part / empty parts. Out-of-order has its own code: InvalidPart would make
+    // clients re-upload parts, when what is actually needed is sorting the list
     CHECK_THROWS_S3(complete(uid, {{2, r2.etag}, {1, r1.etag}}), S3ErrorCode::InvalidPartOrder);
     CHECK_THROWS_S3(complete(uid, {{1, "deadbeef"}}), S3ErrorCode::InvalidPart);
     CHECK_THROWS_S3(complete(uid, {{1, r1.etag}, {3, r2.etag}}), S3ErrorCode::InvalidPart);
@@ -345,7 +345,7 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
     CHECK_THROWS_S3(sync_wait(b.list_parts("suite-bkt", "mp/joined.bin", "00000000000000000000000000000000", {})),
                     S3ErrorCode::NoSuchUpload);
 
-    // Pagination (docs/archive/gaps.md §5.1): this used to always report IsTruncated=false, which clients take to mean
+    // Pagination: this used to always report IsTruncated=false, which clients take to mean
     // the end was reached
     {
         ListPartsOptions po;

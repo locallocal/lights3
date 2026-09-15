@@ -1,6 +1,6 @@
 # Build and distribution: version stamp, install tree, deb/rpm, containers, rollback
 
-The roadmap §6.3 write-up. Five things: the **version / build identity** inside
+The build-and-distribution write-up. Five things: the **version / build identity** inside
 the binaries, the `cmake --install` **install tree**, CPack-generated
 **deb / rpm** packages, **Dockerfile + compose** (a quick-start demo that also
 runs the redis / tikv / rados e2e paths which stay SKIP on a developer box), and
@@ -186,7 +186,7 @@ docker compose --profile redis up -d          # adds :9001 = duostore + redis me
 docker compose --profile tikv up -d           # :9002 = duostore + TiKV meta (pd0 + tikv0, image lights3:full)
 docker compose --profile rados up -d          # :9003 = duostore + RADOS data (ceph/demo single node, image lights3:full)
 docker compose --profile multi up -d          # :9004 = nginx round robin over two gateways sharing redis meta + RADOS data (image lights3:full)
-docker compose --profile multi run --rm e2e-multi   # a 5-part multipart spread over both gateways (multi-gateway-multipart §4 ②)
+docker compose --profile multi run --rm e2e-multi   # a 5-part multipart spread over both gateways
 ```
 
 | profile | Services | Notes |
@@ -195,7 +195,7 @@ docker compose --profile multi run --rm e2e-multi   # a 5-part multipart spread 
 | `redis` | `redis` (`redis:7-alpine`, AOF on), `lights3-redis` | `docker/lights3-redis.yaml` mounted read-only as `/etc/lights3/lights3.yaml` |
 | `tikv` | `pd0`, `tikv0` (`pingcap/{pd,tikv}:${TIKV_VERSION:-v8.5.2}`), `lights3-tikv` | single PD, single TiKV; `lights3:full` is built with `LIGHTS3_RADOS=ON LIGHTS3_TIKV=ON` |
 | `rados` | `ceph` (`${CEPH_IMAGE:-quay.io/ceph/demo:latest}`, fixed IP 172.28.0.10), `rados-init` (one-shot pool creation), `lights3-rados` | `ceph.conf` + admin keyring shared read-only through the `ceph-etc` volume; the keyring is root-only, so the consumers run as root |
-| `multi` | `redis`, `ceph`, `rados-init`, `lights3-multi-a` / `-b`, `nginx-multi`, `e2e-multi` | multi-gateway shared storage (the combination [../archive/multi-gateway-multipart-design.md §2](../../archive/multi-gateway-multipart-design.md) supports): both gateways use `docker/lights3-multi.yaml` (redis meta + RADOS data, `read_lease: 5s`), `LIGHTS3_GC_ENABLED` true on a only; `nginx-multi.conf` rotates per request with no stickiness; `e2e-multi.sh` runs a 5-part multipart through nginx and checks the combined ETag, the GET bytes and both gateways' request counters |
+| `multi` | `redis`, `ceph`, `rados-init`, `lights3-multi-a` / `-b`, `nginx-multi`, `e2e-multi` | multi-gateway shared storage (a combination verified across gateways): both gateways use `docker/lights3-multi.yaml` (redis meta + RADOS data, `read_lease: 5s`), `LIGHTS3_GC_ENABLED` true on a only; `nginx-multi.conf` rotates per request with no stickiness; `e2e-multi.sh` runs a 5-part multipart through nginx and checks the combined ETag, the GET bytes and both gateways' request counters |
 
 `LIGHTS3_GIT_COMMIT=$(git rev-parse --short=12 HEAD) docker compose build`
 stamps the images. Data lives in named volumes (`lights3-data`, …);
@@ -234,8 +234,7 @@ both the external and the spawned path were verified locally at 202/202.
 ## 5. Multi-gateway deployment
 
 Several `lights3` processes pointing at one shared storage behind a load
-balancer, with no session affinity
-([../archive/multi-gateway-multipart-design.md](../../archive/multi-gateway-multipart-design.md)).
+balancer, with no session affinity.
 
 ### 5.1 Support matrix
 

@@ -84,7 +84,7 @@ payload hash 的三档用法：控制面带体请求用精确 `util::sha256_hex(
 无体请求传空串；流式上传用 `remote_client.h:kUnsignedPayload`
 （`UNSIGNED-PAYLOAD`，取舍见设计文档 §3.2，完整性由 TLS + §7 ETag 比对补偿）。
 
-### 2.3.1 凭证链（roadmap §3.3）
+### 2.3.1 凭证链
 
 `access_key`/`secret_key` **均未配置**时，RemoteContext 构造
 `aws_credentials.h:CredentialProvider`，签名时按链解析：环境变量
@@ -113,12 +113,12 @@ EC2 IMDSv2（token PUT → 实例角色 → 凭证 JSON）——EC2/EKS 部署�
   计数并让出槽位，池容量不会被永久蚕食）；达上限则在条件变量上等待，
   **超时（`request_timeout_ms`）抛 `SlowDown`**。等待时长无论成败都记入
   `pool_wait` 直方图；
-- **异步 `acquire_async`**（协程控制面用，roadmap §3.3）：达上限时不再把
+- **异步 `acquire_async`**（协程控制面用）：达上限时不再把
   池线程停在 cv 上——waiter 入队挂起，`release()` 直接把连接交接给队头
   waiter（跳过已超时的僵尸项）并经 backend 注入的 executor 在池线程恢复；
   TimerQueue 单发定时器兑现同一份 `request_timeout` → `SlowDown` 契约。
   超时回调只触碰 waiter 自身的共享状态（自带锁），与池的销毁无竞态；
-- **空闲回收与寿命**（roadmap §3.3）：空闲项带时间戳（队头最旧），逾
+- **空闲回收与寿命**：空闲项带时间戳（队头最旧），逾
   `pool_idle_timeout_ms`（默认 60s，0=不过期）者**绝不复用**——远端/NAT
   静默断掉的连接复用出去就是首请求重试尖峰；acquire 路径惰性剪 +
   TimerQueue 轻量 reaper（间隔 = max(ttl/2, 1s)，完成后重臂）在静默期关闭
@@ -261,8 +261,8 @@ head+put 组合都不行；不支持的上游回 4xx/501 原样映射，412 →
 
 ### 5.1 无长度上传：spool_and_upload
 
-`cloudproxy_backend.cc:CloudProxyBackend::spool_and_upload`（docs/archive/gaps.md
-§6.2 的补课，此前是一刀切 NotImplemented）：AWS 拒绝裸 chunked，故先把
+`cloudproxy_backend.cc:CloudProxyBackend::spool_and_upload`（此前是一刀切
+NotImplemented）：AWS 拒绝裸 chunked，故先把
 body 全量落到本地临时文件取得长度，再走定长 `stream_upload`：
 
 - 临时文件优先 `O_TMPFILE`（匿名 inode，进程崩溃自动回收）；不支持的文件
@@ -309,8 +309,8 @@ body 全量落到本地临时文件取得长度，再走定长 `stream_upload`�
 
 ### 6.3 copy_object_fast：远端服务端 COPY
 
-`cloudproxy_backend.cc:CloudProxyBackend::copy_object_fast`（docs/archive/gaps.md
-§6.2：此前同后端复制要"下到网关再传回去"，双倍跨网流量）：PUT 目标路径 +
+`cloudproxy_backend.cc:CloudProxyBackend::copy_object_fast`（此前同后端复制要
+"下到网关再传回去"，双倍跨网流量）：PUT 目标路径 +
 `x-amz-copy-source: /<src_rb>/<src_key>` + **恒
 `x-amz-metadata-directive: REPLACE`**（handler 已把 COPY/REPLACE 语义折叠进
 meta，远端只需照抄）。经 `retry_io("copy", …)` 执行——服务端 COPY 是幂等
@@ -336,8 +336,7 @@ CopyObjectResult 的 ETag 去引号返回。
   `<Checksum<ALGO>>`（wire 名已是大写），远端复核；
 - `abort_multipart`：DELETE `?uploadId=`，非 2xx → `ErrCtx::Upload`
   （404 → NoSuchUpload）；
-- `list_parts` / `list_multipart_uploads`：单页转发（docs/archive/gaps.md §5.1：
-  客户端 marker 直译远端 marker，IsTruncated 原样回传，不再全量聚页）。
+- `list_parts` / `list_multipart_uploads`：单页转发（客户端 marker 直译远端 marker，IsTruncated 原样回传，不再全量聚页）。
   防自旋兜底：远端报截断却不给游标时，用本页末元素补游标；连末元素都没有
   则把 is_truncated 改为 false——宁可诚实报"到头"也不让客户端原地打转。
 
@@ -361,7 +360,7 @@ CopyObjectResult 的 ETag 去引号返回。
    解析也不得掉进 500）；404 按 `remote_client.h:ErrCtx` 上下文补语义
    （Key→NoSuchKey / Bucket→NoSuchBucket / Upload→NoSuchUpload）；仍未命中
    的未知 4xx → `InvalidRequest`（本地 400）并把远端码与原文带进
-   message——**不塌缩成 500**（docs/archive/gaps.md §3.9：SDK 自动重试 500，会把
+   message——**不塌缩成 500**（SDK 自动重试 500，会把
    InvalidObjectState 这类确定性拒绝变成无限重试）；
 5. 5xx / 其余 → `InternalError`（不引入 502：S3 词表无 BadGateway）。
 
@@ -371,7 +370,7 @@ CopyObjectResult 的 ETag 去引号返回。
 文字。resource 一律用**客户端视角**的 `/bucket/key`
 （`cloudproxy_backend.cc:resource_of`），不泄漏带前缀的远端路径。
 
-### 7.2 重试策略：retry_io 与三条独立路径（roadmap §3.3 重构）
+### 7.2 重试策略：retry_io 与三条独立路径
 
 - 判定集合：`remote_client.h:RemoteContext::retryable_status`
   （429/500/502/503/504）与 `retryable_transport`
@@ -396,7 +395,7 @@ CopyObjectResult 的 ETag 去引号返回。
   排除主动 abort 与"provider 已被调但无响应"（可能是我方生产者断流，
   不能算远端健康失格）。
 
-### 7.2.1 熔断器与 per-op deadline（roadmap §3.3）
+### 7.2.1 熔断器与 per-op deadline
 
 - **熔断器**（`remote_client.cc:RemoteContext::breaker_*`）：连续
   `breaker_threshold`（默认 10，0=关）次决定性失败（传输错误或 5xx；429

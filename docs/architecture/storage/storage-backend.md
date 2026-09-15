@@ -134,7 +134,7 @@ resolve(bucket) → IStorageBackend&
     可读、存量对象兼容），读取侧 xattr 优先、缺失时回落 sidecar；不支持 xattr
     的文件系统上退化为纯 sidecar 语义（提交顺序为先数据后 sidecar）——该降级
     以常驻 gauge `lights3_localfs_xattr_fallback` 暴露（构造期即探测），
-    `require_xattr: true` 则改为启动/写入即失败（roadmap §3.5）。
+    `require_xattr: true` 则改为启动/写入即失败。
   - **sidecar 写策略**（`sidecar: sync|async|lazy`，默认 sync）：sync 每次
     PUT 4 次 fsync + 2 次 rename；async 把 sidecar 挪到后台任务（响应后落
     盘）；lazy 在 xattr 写成功时根本不写 sidecar（并顺手 unlink 旧的）。
@@ -155,7 +155,7 @@ resolve(bucket) → IStorageBackend&
   路径指向新 inode，二次 stat 会让 meta 与 fd 持有的 body 错位（短包/截断）。
   `FdBodyReader` 每次 `read()` 都经池执行 `pread`（带偏移，天然支持 Range）；
   fd 由 RAII 持有，取消/断连自动关闭。
-- **元数据缓存**（roadmap §3.8）：HEAD/GET 先查按 (bucket,key) 分片的 LRU
+- **元数据缓存**：HEAD/GET 先查按 (bucket,key) 分片的 LRU
   （`meta_cache.h`），记录携带 inode 戳（dev/ino/size/mtime/ctime）：HEAD 命中
   默认一次 stat 对戳（`meta_cache_validate=false` 则零 syscall），GET 用已持
   fd 的 fstat 对戳，戳不符即重读——外部进程改写同一 root 也不会喂出陈旧
@@ -166,7 +166,7 @@ resolve(bucket) → IStorageBackend&
 - **LIST**：递归目录遍历 + prefix 剪枝（prefix 含 `/` 时直接定位起始目录）；
   delimiter=`/` 时目录即 common prefix，无需展开其内部，天然高效。
   分页 token = 最后返回的 key（目录序即字典序，需保证遍历为排序遍历）。
-  不建索引，但（roadmap §3.5）：一页的 stat+getxattr 由多个池线程条带并行
+  不建索引，但：一页的 stat+getxattr 由多个池线程条带并行
   （`list_meta_concurrency`）；每个目录的排序条目表按目录 inode+mtime/ctime
   缓存（`list_cache_entries`，一次 stat 校验），翻页时二分定位 marker，深页
   成本不再随页码增长。见 [storage/localfs.md](localfs.md) §6。
@@ -182,7 +182,7 @@ resolve(bucket) → IStorageBackend&
 
 - **封装**：`storage/xlocalfs/uring.h` 用原生 syscall（io_uring_setup/enter +
   mmap SQ/CQ）实现最小封装，不引入 liburing 依赖。1..N 个独立 ring
-  （`rings`，roadmap §3.4 ④）：每 ring 一把提交互斥锁 + 批量 enter（值班
+  （`rings`）：每 ring 一把提交互斥锁 + 批量 enter（值班
   flusher）+ 专职收割线程，CQE 完成后把协程续体投递回线程池——磁盘等待期间
   不占任何线程，后续的同步落盘调用（sidecar 等）天然回到池线程。建环时注册
   fixed buffers / 稀疏 fixed files 表（失败只丢优化不丢功能）。
@@ -249,7 +249,7 @@ meta / data 两侧均已有可选替换实现（各有专文，编译开关默�
   TiKV（[duostore-meta-tikv-design.md](duostore-meta-tikv-design.md)）；
 - data：Ceph/RADOS（[duostore-data-rados-design.md](duostore-data-rados-design.md)）。
 
-对象元数据缓存（roadmap §3.8）：GET/HEAD 命中时整条 `ObjectRec`（含
+对象元数据缓存：GET/HEAD 命中时整条 `ObjectRec`（含
 manifest）来自进程内 LRU，零 meta 引擎 RTT。rocksdb/sqlite 默认开且精确
 失效；redis/tikv 默认关，开启须 `0 < meta_cache_ttl < gc_grace`（对端网关的
 写在 TTL 内不可见，read-lease 相应回拨）。见
@@ -258,7 +258,7 @@ manifest）来自进程内 LRU，零 meta 引擎 RTT。rocksdb/sqlite 默认开�
 注意：duostore 不能作 tiered 的 local 侧（tiered 绑定 localfs 磁盘布局），
 可作其 cloud 侧或独立使用。
 
-### 5.x 计时装配（roadmap §5.1）
+### 5.x 计时装配
 
 `Application` 把路由用的后端集合包一层 `storage::MeteredBackend`
 （`src/storage/metered_backend.h`）：每个 `IStorageBackend` 虚函数被计时并记入

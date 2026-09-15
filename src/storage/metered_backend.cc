@@ -20,7 +20,7 @@ bool is_backend_error(std::exception_ptr ep) {
     }
 }
 
-// Body of a get_object stream carrying the backend lease (backlog-sequence ⑦):
+// Body of a get_object stream carrying the backend lease:
 // released when the request drops the stream, however it ends
 class LeasedBodyReader final : public http::BodyReader {
 public:
@@ -98,7 +98,7 @@ Task<T> MeteredBackend::timed(const char* name, Task<T> inner) {
     // The token is inherited from the awaiting handler chain: it carries the
     // request's RequestBackendStats when dispatch attached one
     CancelToken tok = co_await current_cancel();
-    // held for the call's duration (backlog-sequence ⑦)
+    // held for the call's duration
     Lease lease(inflight_);
     OpMetrics& m = op(name);
     auto t0 = std::chrono::steady_clock::now();

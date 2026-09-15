@@ -60,7 +60,7 @@ std::vector<std::pair<std::string, std::string>> meta_headers(const ObjectMeta& 
     std::vector<std::pair<std::string, std::string>> out;
     for (auto& f : kStdMetaFields)
         if (!(meta.*f.field).empty()) out.emplace_back(f.header, meta.*f.field);
-    // Header-form checksum forwarded so the remote stores/verifies it too (roadmap §2.2).
+    // Header-form checksum forwarded so the remote stores/verifies it too.
     // Trailer-form values (checksum_pending) cannot be sent — headers leave before the
     // body is read — so they stop at this gateway's verification (documented limitation)
     if (!meta.checksum_algorithm.empty() && !meta.checksum_value.empty()) {
@@ -102,7 +102,7 @@ ObjectMeta meta_from_response(std::string_view key, const httplib::Response& res
     if (auto t = util::parse_http_date(res.get_header_value("Last-Modified"))) m.last_modified = *t;
     for (auto& f : kStdMetaFields)
         if (res.has_header(f.header)) m.*f.field = res.get_header_value(f.header);
-    // Remote checksum echo (roadmap §2.2): present when the request carried
+    // Remote checksum echo: present when the request carried
     // x-amz-checksum-mode: ENABLED (GET/HEAD below always send it)
     for (auto& [k, v] : res.headers) {
         constexpr std::string_view kCk = "x-amz-checksum-";
@@ -251,7 +251,7 @@ CloudProxyBackend::CloudProxyBackend(CloudProxyConfig cfg, std::shared_ptr<Threa
     auto ep = Endpoint::parse(cfg.endpoint);
     ctx_ = std::make_shared<RemoteContext>(std::move(cfg), ep, metrics);
     // Async pool waiters resume business logic on pool threads, never on the
-    // releasing/timer thread (roadmap §3.3)
+    // releasing/timer thread
     ctx_->pool.set_resume_executor(&exec_);
     LOG_INFO(
         "cloudproxy backend: endpoint={} region={} prefix='{}' style={} control={} "
@@ -329,7 +329,7 @@ Task<void> CloudProxyBackend::async_backoff(int64_t delay_ms) {
     co_await pool_->schedule();
 }
 
-// Coroutine retry driver for idempotent control-plane requests (roadmap §3.3): replaces
+// Coroutine retry driver for idempotent control-plane requests: replaces
 // the old blocking with_retry, whose backoff slept on a pool thread — worst case 700ms
 // per request, and a jittery remote would eat the pool wholesale with concurrent
 // backoffs. Per attempt: breaker gate (fail fast when the remote is decidedly down) →
@@ -620,7 +620,7 @@ Task<PutResult> CloudProxyBackend::stream_upload(std::string raw_path, std::stri
     auto len_opt = body.length();
     // AWS rejects bare chunked uploads (§3.2). Without a length (chunked and no
     // x-amz-decoded-content-length), spool to a local temp file first to obtain the length,
-    // then upload (docs/archive/gaps.md §6.2 -- previously a flat NotImplemented, making such PUTs
+    // then upload (previously a flat NotImplemented, making such PUTs
     // entirely unusable on this backend)
     if (!len_opt) {
         if (ctx_->cfg.spool_max_bytes == 0)
@@ -735,7 +735,7 @@ Task<PutResult> CloudProxyBackend::stream_upload(std::string raw_path, std::stri
         // contract requires draining the body -- the verification decorators (sha256/chunked
         // checks) hook at full-read/EOF, and stopping at full-read would skip them
         for (;;) {
-            // A fresh block per read, moved into the queue whole (backlog-sequence ⑩):
+            // A fresh block per read, moved into the queue whole:
             // the copy under the queue lock goes away for the price of one allocation
             std::string chunk(kChunk, '\0');
             size_t n = co_await body.read(std::as_writable_bytes(std::span(chunk)));
@@ -783,7 +783,7 @@ Task<PutResult> CloudProxyBackend::stream_upload(std::string raw_path, std::stri
     ctx->throw_remote_error(out->status, out->resp_body, multipart_ctx ? ErrCtx::Upload : ErrCtx::Bucket, resource);
 }
 
-// Spool for length-less uploads (docs/archive/gaps.md §6.2): the body lands fully in a temp file
+// Spool for length-less uploads: the body lands fully in a temp file
 // (O_TMPFILE anonymous inode, auto-reclaimed on process crash; filesystems without support
 // fall back to unlink-after-open); once the length is known, go through the known-length
 // stream_upload via FdStreamReader. The cost is one local disk write/read plus
@@ -838,7 +838,7 @@ Task<PutResult> CloudProxyBackend::spool_and_upload(std::string raw_path, std::s
                                      multipart_ctx);
 }
 
-// Server-side COPY (docs/archive/gaps.md §6.2): previously a copy within the same cloudproxy
+// Server-side COPY: previously a copy within the same cloudproxy
 // backend would "download to the gateway and upload back", doubling cross-network traffic
 // and cost, when the remote could have done it with one x-amz-copy-source. Always send
 // REPLACE + our metadata -- the handler has already folded COPY/REPLACE semantics into
@@ -1146,7 +1146,7 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket, s
     const std::string body = w.str();
     const std::string body_hash = util::sha256_hex(body);
 
-    // The retry loop lives at coroutine level (roadmap §3.3): each POST is one blocking
+    // The retry loop lives at coroutine level: each POST is one blocking
     // attempt inside control_io, backoff goes through the TimerQueue instead of sleeping
     // on a pool/private thread, gated by the breaker and the per-op deadline. Ambiguity
     // resolution (co_await head_object) already lived on the coroutine side
@@ -1272,7 +1272,7 @@ Task<void> CloudProxyBackend::abort_multipart(std::string_view bucket, std::stri
 }
 
 // Now that the contract carries pagination fields, this changed from "accumulate all pages
-// then return" to forwarding a single page (docs/archive/gaps.md §5.1): the client's marker becomes
+// then return" to forwarding a single page: the client's marker becomes
 // the remote's marker directly, and the remote's IsTruncated is passed back verbatim.
 // Previously the bare-vector contract forced pulling every remote page, so a client wanting
 // just the first page still waited for everything

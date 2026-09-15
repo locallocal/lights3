@@ -1,4 +1,4 @@
-// Test-only certificate factory (roadmap §4.1 tests): self-signed / CA-signed
+// Test-only certificate factory (tests): self-signed / CA-signed
 // EC P-256 certificates generated at runtime through the OpenSSL API, so the
 // TLS cases need no fixture files and can mint fresh material for reload tests
 #pragma once
@@ -65,7 +65,7 @@ inline void add_ext(X509* cert, X509* issuer, int nid, const char* value) {
 
 // issuer = nullptr -> self-signed. ca = true marks the certificate as a CA.
 // Server/client leaves get SAN DNS:localhost, IP:127.0.0.1 (+ the CN as DNS);
-// uri_san adds a URI entry (client identities, backlog-sequence ⑥)
+// uri_san adds a URI entry (client identities)
 inline Cert make_cert(const std::string& cn, const Cert* issuer = nullptr, bool ca = false, long serial = 0,
                       const std::string& uri_san = "") {
     static long next_serial = 1000;

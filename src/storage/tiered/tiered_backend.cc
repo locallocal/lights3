@@ -166,7 +166,7 @@ private:
     bool degraded_ = false, finished_ = false, released_ = false;
 };
 
-// Range GET block cache filler (roadmap §3.6 ⑦): the cloud is asked for the block-aligned
+// Range GET block cache filler: the cloud is asked for the block-aligned
 // superset [af, al] of the client's [f, l]; bytes flow into the sparse cache file as they
 // arrive, and only the client's window is handed on. Once the client window is exhausted
 // the remaining tail (at most one block) is drained in the same read() so the last block
@@ -331,7 +331,7 @@ void TieredBackend::init_metrics(const MetricsScope& metrics) {
                                    "GC delete attempts that failed and were re-queued with exponential backoff");
     m_gc_deferred_ = metrics.gauge("lights3_tiered_gc_deferred",
                                    "Queue entries still in backoff as of the last GC round (not yet retried)");
-    // roadmap §3.6: scan mode split, eviction volume, access flushes, range cache, quarantine
+    // scan mode split, eviction volume, access flushes, range cache, quarantine
     const char* scan_help = "Completed scan rounds by mode";
     m_scan_full_ = metrics.counter("lights3_tiered_scan_rounds_total", scan_help, {{"mode", "full"}});
     m_scan_incr_ = metrics.counter("lights3_tiered_scan_rounds_total", scan_help, {{"mode", "incremental"}});
@@ -346,7 +346,7 @@ void TieredBackend::init_metrics(const MetricsScope& metrics) {
     const char* q_help = "Reconciliation findings currently held in the quarantine ledger";
     m_q_refs_missing_ = metrics.gauge("lights3_tiered_quarantine_entries", q_help, {{"kind", "refs_missing"}});
     m_q_foreign_ = metrics.gauge("lights3_tiered_quarantine_entries", q_help, {{"kind", "foreign"}});
-    // Local-tier capacity (backlog-sequence ①): the numbers the space watermark is
+    // Local-tier capacity: the numbers the space watermark is
     // measured against, read at render time. Callbacks capture the tier-local adapter
     // and the shared books estimate rather than this backend, so a registry that
     // outlives the backend renders zeros instead of touching freed memory
@@ -415,7 +415,7 @@ std::shared_ptr<TieredBackend> TieredBackend::from_config(
         // The "%" suffix must participate in the decision: "1%" means 1%. The old code
         // dropped the suffix, so 1.0 did not trigger the /100, a 1% low watermark parsed as
         // 100%, and (used-low) went negative, wrapped around, and demoted the entire bucket
-        // (docs/archive/gaps.md §3.9). "85%"/"85" and "0.85" are all accepted
+        //. "85%"/"85" and "0.85" are all accepted
         if (suffixed || v > 1.0) v /= 100.0;
         if (!(v > 0.0 && v <= 1.0))
             throw std::runtime_error("tiered backend '" + cfg.name + "': watermark '" + s + "' out of range (0, 100%]");
@@ -429,7 +429,7 @@ std::shared_ptr<TieredBackend> TieredBackend::from_config(
     auto cloud = built.at(cloud_name);
     if (cloud.get() == local_be.get())
         throw std::runtime_error("tiered backend '" + cfg.name + "': local and cloud must differ");
-    // Local side adapters (roadmap §3.6 ⑥): localfs/xlocalfs share the disk layout
+    // Local side adapters: localfs/xlocalfs share the disk layout
     // adapter; duostore keeps tier state in its meta engine
     std::shared_ptr<tier::ITierLocal> local;
     if (auto lf = std::dynamic_pointer_cast<LocalFsBackend>(local_be))
@@ -464,7 +464,7 @@ std::shared_ptr<TieredBackend> TieredBackend::from_config(
         else
             throw std::runtime_error("tiered backend '" + cfg.name + "': reconcile_orphans must be rebuild|delete");
     }
-    // roadmap §3.6 knobs
+    // knobs
     if (auto v = param("full_scan_interval"); !v.empty()) tc.full_scan_interval_sec = parse_duration_sec(v);
     if (auto v = param("evict_size_weight"); !v.empty()) tc.evict_size_weight = std::stod(v);
     if (auto v = param("evict_frequency_weight"); !v.empty()) tc.evict_frequency_weight = std::stod(v);
@@ -551,7 +551,7 @@ Task<ObjectStream> TieredBackend::get_object(std::string_view bucket, std::strin
         const ObjectMeta& m = obj->meta;
         const TierInfo& t = obj->tier;
 
-        // remote + Range: block cache (roadmap §3.6 ⑦) when enabled, else passthrough
+        // remote + Range: block cache when enabled, else passthrough
         // (docs/architecture/storage/tiered-design.md §6.3); external meta is always the local original
         if (range && cfg_.range_cache && local_->supports_range_cache() && m.size > 0) {
             // InvalidRange here matches what the cloud would say
@@ -909,7 +909,7 @@ Task<void> TieredBackend::promote_object(std::string bucket, std::string key) {
 Task<void> TieredBackend::commit_cache_fill(std::string bucket, std::string key, ObjectMeta expect,
                                             TierInfo expect_tier, tier::ICacheFill& fill) {
     auto lk = co_await key_lock(bucket, key).acquire();
-    // Critical path (docs/archive/gaps.md §2.4): this function is co_awaited by TeeCacheReader when
+    // Critical path: this function is co_awaited by TeeCacheReader when
     // the client reads EOF; without switching back to a pool thread, the whole commit
     // (renames + fsyncs) would land directly on the HTTP response thread
     co_await pool_->schedule();
@@ -1084,7 +1084,7 @@ struct TieredBackend::ScanCtx {
     TierScanStats st;
     // launched this round (dedupe across passes)
     std::set<std::string> chosen;
-    // bounded coroutine frames (docs/archive/gaps.md §2.13)
+    // bounded coroutine frames
     std::vector<Task<void>> batch;
     // measured usage (full scan only)
     uint64_t local_bytes = 0;
@@ -1172,7 +1172,7 @@ Task<void> TieredBackend::scan_full(ScanCtx& cx) {
     last_full_scan_ = cx.now;
 }
 
-// Wheel round (roadmap §3.6 ①): only the slots whose deadline has passed are read;
+// Wheel round: only the slots whose deadline has passed are read;
 // each candidate is verified against its current access record (a touch since
 // enrollment re-enrolls it further out), so the round costs O(activity), not O(objects)
 Task<void> TieredBackend::scan_incremental(ScanCtx& cx) {
@@ -1295,7 +1295,7 @@ Task<void> TieredBackend::scan_evict(ScanCtx& cx, uint64_t need) {
     // Eviction candidates cannot cover the gap (disk consumed by things outside this
     // backend, or every object is smaller than the watermark gap): previously each
     // round silently recomputed and freed 0 bytes, completely invisible to operators
-    // (docs/archive/gaps.md §4)
+    //
     if (need > 0)
         LOG_WARN(
             "tiered: space watermark still exceeded after eviction round, "
@@ -1488,7 +1488,7 @@ Task<TierGcStats> TieredBackend::run_gc_once() {
     co_return st;
 }
 
-// ---------- Quarantine ledger (roadmap §3.6 ④) ----------
+// ---------- Quarantine ledger ----------
 // One TSV per finding under <state>/quarantine/, named by md5(kind\0bucket\0key) so the
 // same finding maps to the same file across rounds. A finding is logged loudly the first
 // time only; later rounds bump last_seen/count. Findings that stop reproducing are swept
@@ -1706,7 +1706,7 @@ Task<TierReconcileStats> TieredBackend::run_reconcile_once() {
     for (const auto& bi : co_await local_->backend().list_buckets()) {
         const std::string& bucket = bi.name;
 
-        // Two-cursor ordered merge (docs/archive/gaps.md §2.13): local and cloud are both paged in
+        // Two-cursor ordered merge: local and cloud are both paged in
         // key lexicographic order, completing both reconciliation directions in O(page)
         // memory -- previously both full key sets were materialized in memory (~1.5-2GB for
         // tens of millions of objects). The tier is read fresh per key

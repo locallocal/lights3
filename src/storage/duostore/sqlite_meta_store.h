@@ -32,7 +32,7 @@ struct SqliteMetaOptions {
     int pool_size = 8;
     // busy handler wait (§5.2; not in YAML, tests may shorten)
     int busy_timeout_ms = 5000;
-    // Backup chain directory (backlog-sequence ⑧, docs/architecture/storage/duostore-meta-sqlite.md
+    // Backup chain directory (docs/architecture/storage/duostore-meta-sqlite.md
     // §10): when set and a full backup has started a chain there, auto-checkpoints
     // are off and the WAL is archived as one segment per `backup --incremental`
     // (and once more at close), so every commit reaches the chain. Empty = off
@@ -81,11 +81,11 @@ public:
     void drop_pack_stat(uint64_t pack_id) override;
     bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version, const DataRef& from,
                       const DataRef& to) override;
-    // One txn, one fsync (batched compaction, gaps §2.13); per-item CAS is independent
+    // One txn, one fsync (batched compaction); per-item CAS is independent
     std::vector<bool> swap_extents_batch(std::span<const SwapReq> reqs) override;
     bool chunk_referenced(uint64_t file_id) override;
     void scan_refs(const std::function<void(uint64_t file_id)>& cb) override;
-    // Online-dump snapshot (roadmap §3.7): leases a pool connection and holds an
+    // Online-dump snapshot: leases a pool connection and holds an
     // open WAL read transaction on it — every view read observes the snapshot the
     // transaction materialized. Borrows this store — destroy before close()
     std::unique_ptr<IMetaReadView> snapshot() override;
@@ -96,7 +96,7 @@ public:
     bool kv_delete(std::string_view key) override;
     std::vector<KvItem> kv_scan(std::string_view prefix, std::string_view after, size_t limit) override;
     std::vector<std::string> kv_put_batch(std::span<const KvPut> puts) override;
-    // Backup chain (backlog-sequence ⑧): full = TRUNCATE checkpoint + online copy of
+    // Backup chain: full = TRUNCATE checkpoint + online copy of
     // the database file (sqlite3_backup) into dir/<id>-full.sqlite3; incremental =
     // the -wal file since the previous chain point copied to dir/<id>-wal, then a
     // TRUNCATE checkpoint so the next segment starts clean. Writers are paused for
@@ -180,7 +180,7 @@ private:
     void require_bucket(Conn& c, std::string_view b);
     std::optional<std::string> object_raw(Conn& c, std::string_view b, std::string_view k);
     // Connection-parameterized read bodies shared by the live methods (fresh pool
-    // lease per call) and SnapshotView (roadmap §3.7: all calls on the one leased
+    // lease per call) and SnapshotView (all calls on the one leased
     // connection inside its open read transaction)
     std::vector<BucketInfo> list_buckets_in(Conn& c);
     ListResult list_objects_in(Conn& c, std::string_view b, const ListOptions& opt);
@@ -192,7 +192,7 @@ private:
     // pack_stats table, §2.2). Independent of write_refs: complete's refs transfer
     // (owner rewrite) must be a no-op for packs — mixing them would double-count.
     // rec_overhead: per-record header overhead (codec::pack_rec_overhead*); live_bytes
-    // uses the same accounting basis as file_size (docs/archive/gaps.md §2.3a)
+    // uses the same accounting basis as file_size
     void write_pack_delta(Conn& c, const DataRef& ref, int sign, int64_t rec_overhead);
     // Single-item CAS core of swap (mu_ held, runs inside the caller's transaction):
     // on successful validation writes and returns true; on mismatch returns false
@@ -220,9 +220,8 @@ private:
     std::unique_ptr<Conn> wc_;
     // Dedicated id-segment connection, always synchronous=FULL (independent of
     // opt_.sync, §4); alloc_mu_ protects the IdRange and this connection. Lock order
-    // alloc_mu_ → mu_ (mu_ is held during reservation to keep business writers out,
-    // docs/archive/gaps.md §3.9); alloc is called by the data plane outside business
-    // transactions, so no reverse nesting
+    // alloc_mu_ → mu_ (mu_ is held during reservation to keep business writers out); alloc is called by the data plane
+    // outside business transactions, so no reverse nesting
     std::mutex alloc_mu_;
     std::unique_ptr<Conn> ac_;
     // indexed by Extent::Kind

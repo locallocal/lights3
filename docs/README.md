@@ -60,10 +60,8 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 
 ### 归档（[archive/](archive/)）
 
-已收口的历史底账（gaps.md / issues.md / roadmap.md / backlog.md / backlog-sequence.md）
-与做完的设计步骤文档（multi-gateway-multipart-design.md），只读、不再更新；源码注释中
-`docs/archive/<name>.md §N`、`roadmap §N`、`backlog §N`、`backlog-sequence ①…⑩`、
-`multi-gateway-multipart §4 ①…④` 引用的论证出处，不要删除。
+已收口的历史底账（backlog.md），只读、不再更新；源码注释中
+`backlog §N` 引用的论证出处，不要删除。
 
 ## 一页纸架构图
 

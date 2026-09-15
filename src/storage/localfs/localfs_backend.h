@@ -23,7 +23,7 @@
 
 namespace lights3::storage {
 
-// ---- Object metadata cache value (roadmap §3.8) ----
+// ---- Object metadata cache value ----
 // Identity of the data inode as stat(2)/fstat(2) observed it when the metadata was read.
 // Every commit path renames a fresh inode over the object (PUT / complete / copy / tier
 // stub / cache fill) and the in-place tag rewrite touches ctime, so a stamp mismatch is a
@@ -51,7 +51,7 @@ using FsMetaCache = MetaCache<FsCachedMeta>;
 // Inheritable by xlocalfs: the data plane (GET/PUT/parts/concatenation) is virtual, layout
 // and metadata logic are reused
 struct LocalFsOptions {
-    // Orphaned multipart cleanup (docs/archive/gaps.md §6.3): previously kMpuTtl was hardcoded to
+    // Orphaned multipart cleanup: previously kMpuTtl was hardcoded to
     // 7 days and only scanned once at startup -- a gateway running for months without a
     // restart would accumulate never-completed/aborted upload directories without bound
     // 0 = no cleanup
@@ -59,7 +59,7 @@ struct LocalFsOptions {
     // 0 = scan only at startup
     int mpu_scan_interval_sec = 6 * 3600;
 
-    // ---- roadmap §3.5 (docs/architecture/storage/localfs.md §2/§3/§6/§12) ----
+    // ---- (docs/architecture/storage/localfs.md §2/§3/§6/§12) ----
     // Fail at construction (and on every write) when the root filesystem cannot store the
     // metadata xattr, instead of degrading to the two-rename sidecar consistency model
     bool require_xattr = false;
@@ -77,7 +77,7 @@ struct LocalFsOptions {
     // data file; listing self-heals only the directories it visits). 0 = off
     int sidecar_scan_interval_sec = 24 * 3600;
 
-    // ---- Object metadata cache (roadmap §3.8; docs/architecture/storage/localfs.md §5.1) ----
+    // ---- Object metadata cache (docs/architecture/storage/localfs.md §5.1) ----
     // Budget in objects (0 = off). A hit spares the getxattr / sidecar read + TSV decode;
     // with meta_cache_validate a HEAD still costs one stat(2) (GET already holds an fstat)
     // and a stamp mismatch refetches, so the cache stays correct under writes made by
@@ -90,14 +90,14 @@ struct LocalFsOptions {
     bool meta_cache_validate = true;
 };
 
-// run_scrub_once knobs (roadmap §3.1); per-call rather than config — a scrub is
+// run_scrub_once knobs; per-call rather than config — a scrub is
 // an operator-invoked traversal (CLI), not a resident worker
 struct FsScrubOptions {
     // 0 = unthrottled
     uint64_t max_bytes_per_sec = 0;
 };
 
-// Integrity report of run_scrub_once() (roadmap §3.1). Read-only; every finding
+// Integrity report of run_scrub_once(). Read-only; every finding
 // is a log line plus a counter here. etag_mismatches/read_errors are the "data
 // is in danger" signals; the skipped_* and unverifiable buckets exist so a
 // clean report can honestly say what it did not cover
@@ -140,16 +140,16 @@ public:
                                PutCondition cond = {}) override;
     Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) override;
     // Data path, on-disk vs. logical size, metadata source (xattr / sidecar), tier
-    // sidecar fields; one "file" extent (roadmap §6.2)
+    // sidecar fields; one "file" extent
     Task<std::optional<ObjectLayout>> inspect_object(std::string_view bucket, std::string_view key) override;
-    // Same-backend copy fast path (docs/archive/gaps.md §6.3): copy_file_range moves data in the
+    // Same-backend copy fast path: copy_file_range moves data in the
     // kernel (an O(1) clone on reflink-capable filesystems), bypassing user-space buffers.
     // Tier stubs (data not local) return nullopt to fall back to the streaming path
     Task<std::optional<PutResult>> copy_object_fast(std::string_view src_bucket, std::string_view src_key,
                                                     std::string_view dst_bucket, std::string_view dst_key,
                                                     ObjectMeta meta) override;
     Task<void> delete_object(std::string_view bucket, std::string_view key) override;
-    // ?tagging in-place meta rewrite (roadmap §2.5): xattr + sidecar under the per-key commit lock
+    // ?tagging in-place meta rewrite: xattr + sidecar under the per-key commit lock
     Task<void> set_object_tagging(std::string_view bucket, std::string_view key, std::string tagging) override;
     Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) override;
 
@@ -166,7 +166,7 @@ public:
                                      const ListPartsOptions& opt) override;
     Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket, const ListUploadsOptions& opt) override;
 
-    // Full-verify scrub (roadmap §3.1): walks every bucket directory, re-reads
+    // Full-verify scrub: walks every bucket directory, re-reads
     // each object's content and compares the recomputed MD5 against the stored
     // ETag (multipart composites are recomputed from part_sizes; legacy objects
     // without a recorded layout count as unverifiable). Strictly read-only.
@@ -176,7 +176,7 @@ public:
     // skipped_races instead of mismatches
     Task<FsScrubStats> run_scrub_once(FsScrubOptions opt = {});
 
-    // Orphan-sidecar sweep (roadmap §3.5): walks every bucket and removes sidecars whose
+    // Orphan-sidecar sweep: walks every bucket and removes sidecars whose
     // data file is gone, each under the per-key commit lock so an in-flight PUT of the same
     // key can never lose its freshly written sidecar. Returns the number removed. Runs
     // periodically (sidecar_scan_interval) and is exposed for tests/tools
@@ -212,7 +212,7 @@ protected:
     void require_bucket(std::string_view bucket) const;
     ObjectMeta load_meta(const std::filesystem::path& data_path, std::string key) const;
 
-    // ---- metadata cache plumbing (roadmap §3.8) ----
+    // ---- metadata cache plumbing ----
     // Authoritative read (xattr/sidecar) over a stat result the caller holds, filling the
     // cache with the record + that stat's stamp. tok must predate the metadata read (the
     // lookup that missed hands it out), so a write racing the read cannot leave a stale
@@ -226,7 +226,7 @@ protected:
         return meta_cache_->invalidate_on_exit(bucket, key);
     }
 
-    // ---- Data-plane accounting (docs/archive/gaps.md §7) ----
+    // ---- Data-plane accounting ----
     // Enum values are the metric array indices; the data-plane methods xlocalfs overrides
     // share the same instances (overrides don't go through the base implementation, each
     // instruments at its own entry, so no double counting by construction)
@@ -271,7 +271,7 @@ protected:
     std::shared_ptr<ThreadPool> pool_;
     LocalFsOptions opt_;
     mutable fsutil::MetaXattrPolicy xattr_;
-    // roadmap §3.8; xlocalfs's data plane consults it too
+    // xlocalfs's data plane consults it too
     std::unique_ptr<FsMetaCache> meta_cache_;
 
 private:
@@ -284,7 +284,7 @@ private:
     Task<std::string> md5_range(int fd, uint64_t off, uint64_t len, class ScrubThrottle& throttle,
                                 std::vector<uint8_t>& buf, FsScrubStats& st);
 
-    // list_objects helpers (roadmap §3.5 ①): the page's metadata is loaded by `stride`
+    // list_objects helpers: the page's metadata is loaded by `stride`
     // strided workers over the pool (each key = stat + getxattr; a key deleted between
     // readdir and stat is dropped, not an error), then orphan sidecars spotted during the
     // walk are reaped under the per-key lock

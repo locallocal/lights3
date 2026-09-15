@@ -2,7 +2,7 @@
 # TlsStream over memory BIOs (docs/architecture/http-adapter.md §3.1)
 if(LIGHTS3_DRIVER_BEAST)
   # Beast/Asio are both header-only; BOOST_ROOT or the system path both work.
-  # TLS (docs/archive/gaps.md §7): asio::ssl needs libssl
+  # TLS: asio::ssl needs libssl
   target_link_libraries(lights3_core PUBLIC OpenSSL::SSL)
   find_package(Boost 1.75 QUIET)
   if(NOT Boost_FOUND)

@@ -304,7 +304,7 @@ in both other implementations: data-plane chunk creation uses `O_EXCL`, so hitti
 an existing file fails loudly.
 
 **Write-lock contention**: in-process business transactions are already kept out
-by `mu_` (gaps §3.9), so the reservation UPDATE only competes with external
+by `mu_`, so the reservation UPDATE only competes with external
 writers bypassing the flock for SQLite's single-writer lock, absorbed first by
 busy_timeout(5s); SQLITE_BUSY means the single statement definitively did not
 execute, so **bounded retries (≤4 rounds, each with its own 5s wait) instead of
@@ -550,7 +550,7 @@ backends:
 | --- | --- | --- |
 | meta | `rocksdb` | Adds legal value `sqlite`; selecting sqlite when the option is not compiled in → configuration error |
 | sqlite_path | `<root>/meta.sqlite3` | DB file path (corresponds to the RocksDB meta_path usage of pointing at an SSD); the parent directory is created by the store |
-| sqlite_wal_archive | empty | Backup chain directory (backlog-sequence ⑧): `duostore backup --incremental` archives WAL segments there; once a chain has started auto-checkpoints are off and close archives the last segment; empty = full backups only (storage/duostore-meta-sqlite.md §10) |
+| sqlite_wal_archive | empty | Backup chain directory: `duostore backup --incremental` archives WAL segments there; once a chain has started auto-checkpoints are off and close archives the last segment; empty = full backups only (storage/duostore-meta-sqlite.md §10) |
 | sqlite_cache | 64MiB | Page-cache **process-wide total budget** (validated ≥1MiB): SQLite's cache_size is per-connection; the implementation spreads the budget across all connections (1 write + 1 alloc + pool_size reads, §5.2) — semantics aligned with rocksdb_block_cache's single-budget role, not amplified by connection count |
 | meta_sync | true | **Carried over, not ignored** (contrast: ignored when meta=redis): SQLite, like RocksDB, is a local engine; the durability level is still owned by this process (§6) |
 

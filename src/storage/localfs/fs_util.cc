@@ -66,7 +66,6 @@ bool fsync_enabled() {
 void fsync_file(int fd) {
     if (!fsync_enabled()) return;
     if (int fe = fault::check("localfs.fsync")) {
-        // roadmap §6.1
         errno = fe;
         throw_errno("fdatasync");
     }
@@ -90,7 +89,7 @@ void fsync_path(const fs::path& path) {
     int fd = ::open(path.c_str(), O_RDONLY);
     if (fd < 0) return;
     // Same contract as fsync_file: the 200 promises durability, so a failed
-    // fdatasync of the staged content is a write failure (roadmap §6.1 fault point
+    // fdatasync of the staged content is a write failure (fault point
     // localfs.fsync sits here as well — the object commit path syncs by path)
     int fe = fault::check("localfs.fsync");
     int rc = fe ? -1 : ::fdatasync(fd);
@@ -142,11 +141,11 @@ std::vector<std::pair<std::string, std::string>> meta_kv(const ObjectMeta& meta,
         kv.emplace_back("remote.etag", tier.remote_etag);
         kv.emplace_back("remote.at", tier.remote_at);
     }
-    // First-class metadata (docs/archive/gaps.md §5.2): empty values are not written, so existing
+    // First-class metadata: empty values are not written, so existing
     // sidecars stay byte-for-byte identical
     for (auto& f : kStdMetaFields)
         if (!(meta.*f.field).empty()) kv.emplace_back(f.store_key, meta.*f.field);
-    // Checksum closure (roadmap §2.2): persisted only when a verified value exists —
+    // Checksum closure: persisted only when a verified value exists —
     // trailer-form values live in checksum_pending until the body is drained, which the
     // commit ordering guarantees has happened by now
     if (std::string cv = resolved_checksum_value(meta); !cv.empty()) {
@@ -182,7 +181,7 @@ static void write_sidecar(const fs::path& sidecar, const ObjectMeta& meta, const
 // Failure (ENOTSUP/E2BIG etc.) degrades to sidecar-only without taking down the write path
 // -- but must leave a trace: degradation means falling back to the "two-rename"
 // consistency model, and if it happens silently operators have no way to know
-// (docs/archive/gaps.md §3.9). Warn only once per errno kind to avoid flooding the write path
+//. Warn only once per errno kind to avoid flooding the write path
 bool set_meta_xattr(const fs::path& path, const ObjectMeta& meta, const TierInfo& tier, MetaXattrPolicy* policy) {
     std::string blob = kv_to_tsv(meta_kv(meta, tier));
     if (::setxattr(path.c_str(), kMetaXattr, blob.data(), blob.size(), 0) == 0) return true;
@@ -195,7 +194,7 @@ bool set_meta_xattr(const fs::path& path, const ObjectMeta& meta, const TierInfo
             path.string(), strerror(e));
     if (policy) {
         policy->note_failure();
-        // Fail-fast (roadmap §3.5): the caller has not renamed yet, so refusing here leaves
+        // Fail-fast: the caller has not renamed yet, so refusing here leaves
         // no half-committed object -- the tmp is discarded by TmpFile RAII
         if (policy->required)
             throw S3Error(S3ErrorCode::InternalError,
@@ -249,7 +248,7 @@ std::optional<std::string> get_meta_xattr(const fs::path& path) {
     if (errno != ERANGE) return std::nullopt;
     // Exceeds the stack buffer: refetch at the actual size. Silently falling back to the
     // sidecar here could read stale metadata from a crash window -- if the xattr exists,
-    // it is authoritative (docs/archive/gaps.md §3.9)
+    // it is authoritative
     ssize_t sz = ::getxattr(path.c_str(), kMetaXattr, nullptr, 0);
     if (sz < 0) return std::nullopt;
     std::string out(static_cast<size_t>(sz), '\0');
@@ -265,7 +264,7 @@ void prepare_object_dest(const fs::path& dest, std::string_view key) {
     if (ec) {
         // Only "prefix collides with an existing file" is a client error; ENOSPC/EACCES/EIO
         // are all 500 -- mapping them to 400 means clients won't retry and operators never
-        // get the disk-full signal (docs/archive/gaps.md §3.9)
+        // get the disk-full signal
         if (ec == std::errc::not_a_directory || ec == std::errc::file_exists)
             throw S3Error(S3ErrorCode::InvalidArgument, "Object key conflicts with an existing object path",
                           std::string(key));

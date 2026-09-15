@@ -1,4 +1,4 @@
-# Prometheus recording + alerting rules for lights3 (roadmap §5.5, docs/usage/monitoring.md §3).
+# Prometheus recording + alerting rules for lights3 (docs/usage/monitoring.md §3).
 # Every metric name below is emitted by GET /-/metrics (docs/architecture/s3-protocol.md §7);
 # tests/monitoring/check_assets.py cross-checks them against the source catalog.
 # Thresholds are starting points for a single gateway — tune `for` and the

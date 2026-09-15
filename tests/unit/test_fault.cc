@@ -1,4 +1,4 @@
-// roadmap §6.1: fault injection — the facade (spec grammar, one-shot / sticky
+// fault injection — the facade (spec grammar, one-shot / sticky
 // points, reset) and the wired points on the localfs and duostore pack IO paths:
 // a fault surfaces as InternalError with the injected errno text, leaves no
 // half-written state behind, and the backend keeps working once the point clears

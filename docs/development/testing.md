@@ -1,7 +1,7 @@
-# 测试体系：矩阵、e2e 覆盖、fuzz、故障注入、压测/长稳、覆盖率（roadmap §6.1）
+# 测试体系：矩阵、e2e 覆盖、fuzz、故障注入、压测/长稳、覆盖率
 
-单元测试与 e2e 的基础形态见 [s3-protocol.md §8](../architecture/s3-protocol.md)；本篇是 roadmap
-§6.1 补齐的八项：ctest 清单与标签、website / lights3-ctl / 故障注入的 e2e 段、fuzz
+单元测试与 e2e 的基础形态见 [s3-protocol.md §8](../architecture/s3-protocol.md)；本篇覆盖
+八项：ctest 清单与标签、website / lights3-ctl / 故障注入的 e2e 段、fuzz
 harness、故障注入门面、性能门禁与 soak、mint 挂 ctest、ubsan/coverage 构建、
 一键矩阵脚本。
 
@@ -77,8 +77,7 @@ rados 看 `LIGHTS3_TEST_RADOS_CONF` + `_POOL`（`LIGHTS3_TEST_RADOS_CLIENT` 选�
   能签、吊销后 curl 403）、`website set/get/delete`（curl 读回 lights3-ctl 写的配置）、
   `bench put/get` 零错误、`fsck` 对 bench 对象零 mismatch；原有 `usage/quota/
   tenant/reload` 保留。
-- **多网关 multipart**（`duostore-redis` 变体，
-  [archive/multi-gateway-multipart-design.md §4 ②](../archive/multi-gateway-multipart-design.md)）：
+- **多网关 multipart**（`duostore-redis` 变体）：
   同一 redis meta + 同一数据根起两个网关，create 在 A、5 个分片 B/A 交替上传、
   两侧 ListParts / ListMultipartUploads 一致、B complete、A HEAD/GET；合成 ETag 由
   脚本从各分片 ETag 独立算出再比对。单测侧同一场景矩阵在
@@ -157,7 +156,7 @@ LIGHTS3_FAULTS="localfs.write:1:EIO,duostore.pack.fdatasync:0:ENOSPC" lights3 --
 
 - `scripts/bench_matrix.sh <lights3> <lights3-ctl> [--drivers a,b] [--tls on|off|both]
   [--duration N] [--concurrency N] [--size SZ] [--objects N] [--modes put,get]
-  [--io-threads N] [--json FILE] [--label TEXT] [--keep-log]`：性能基线矩阵（roadmap §4.3）——每个（驱动 × TLS）格起一个
+  [--io-threads N] [--json FILE] [--label TEXT] [--keep-log]`：性能基线矩阵——每个（驱动 × TLS）格起一个
   localfs 网关跑 `lights3-ctl bench put/get`，输出 Markdown 表 + 每格一行 JSON；
   驱动清单默认取 `lights3 --version` 的 `drivers:` 行。结果入库
   [performance-baseline.md](performance-baseline.md)。

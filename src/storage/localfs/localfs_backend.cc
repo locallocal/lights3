@@ -49,7 +49,7 @@ LocalFsBackend::LocalFsBackend(fs::path root, fs::path staging, std::shared_ptr<
     init_metrics(metrics);
     commit_locks_.reserve(kLockStripes);
     for (size_t i = 0; i < kLockStripes; ++i) commit_locks_.push_back(std::make_unique<AsyncSemaphore>(1));
-    // xattr capability probe (roadmap §3.5): staging shares root's filesystem (rename
+    // xattr capability probe: staging shares root's filesystem (rename
     // atomicity), so a probe there answers for the whole layout. A negative result is
     // either fatal (require_xattr) or made visible on the metrics plane right away --
     // previously the only trace was a WARN at the first failing PUT
@@ -95,7 +95,7 @@ void LocalFsBackend::init_metrics(const MetricsScope& metrics) {
         m_op_seconds_[size_t(op)] = metrics.histogram(
             "lights3_localfs_op_seconds", "Wall time of a data-path operation", {0.001, 0.005, 0.02, 0.1, 0.5, 2, 10},
             {{"op", kOpNames[size_t(op)]}});
-    // roadmap §3.5: xattr degradation as a resident gauge (same rationale as
+    // xattr degradation as a resident gauge (same rationale as
     // lights3_xlocalfs_uring_fallback -- a startup WARN vanishes with log rotation, a gauge
     // stays on the dashboard), plus the sweep and directory-cache counters
     xattr_.fallback = metrics.gauge("lights3_localfs_xattr_fallback",
@@ -111,7 +111,7 @@ void LocalFsBackend::init_metrics(const MetricsScope& metrics) {
         metrics.counter("lights3_localfs_list_dir_cache_total", "Listing directory-snapshot cache lookups",
                         {{"result", "miss"}}),
         metrics.gauge("lights3_localfs_list_dir_cache_entries", "Directory entries resident in the listing cache"));
-    // Object metadata cache (roadmap §3.8); metric family shared across backends
+    // Object metadata cache; metric family shared across backends
     // (lights3_meta_cache_*, distinguished by the backend label)
     meta_cache_ = std::make_unique<FsMetaCache>(
         MetaCacheOptions{opt_.meta_cache_entries, std::chrono::seconds(std::max(0, opt_.meta_cache_ttl_sec))}, metrics);
@@ -134,7 +134,7 @@ Task<void> LocalFsBackend::close() {
     co_return;
 }
 
-// Periodic maintenance (docs/archive/gaps.md §6.3 for the mpu scan, roadmap §3.5 for the
+// Periodic maintenance (for the mpu scan, for the
 // sidecar sweep): the mpu cleanup previously ran only once at startup, so a gateway running
 // for months without a restart would accumulate never-completed/aborted upload directories
 // without bound. Each task re-arms itself after completion (same as the duostore worker):
@@ -193,13 +193,13 @@ AsyncSemaphore& LocalFsBackend::commit_lock(std::string_view bucket, std::string
 fs::path LocalFsBackend::bucket_dir(std::string_view bucket) const { return root_ / fs::path(std::string(bucket)); }
 
 fs::path LocalFsBackend::object_path(std::string_view bucket, std::string_view key) const {
-    // Directory-marker object (docs/archive/gaps.md §6.3): "a/b/" has no corresponding file name
+    // Directory-marker object: "a/b/" has no corresponding file name
     // on the filesystem; it lands on the reserved marker file inside the directory:
     // <bucket>/a/b/.lights3-dir
     std::string rel(key);
     if (rel.ends_with('/')) rel += fsutil::kDirMarker;
     fs::path p = bucket_dir(bucket) / fs::path(rel);
-    // Defense in depth (docs/archive/gaps.md §1.1): bucket/key were already validated at L2 and at
+    // Defense in depth: bucket/key were already validated at L2 and at
     // each entry point, so the path should never escape root_. But fs::path::operator/
     // with an absolute right-hand operand **replaces the entire path**
     // (root_ / "/etc" == "/etc"), and the cost of a single slip is arbitrary file reads --
@@ -224,7 +224,7 @@ ObjectMeta LocalFsBackend::load_meta(const fs::path& data_path, std::string key)
     return fsutil::load_object_meta(data_path, std::move(key));
 }
 
-// ---------- object metadata cache (roadmap §3.8) ----------
+// ---------- object metadata cache ----------
 
 ObjectMeta LocalFsBackend::meta_from_stat(std::string_view bucket, std::string_view key, const fs::path& path,
                                           const struct stat& st, const FsMetaCache::Token& tok,
@@ -249,7 +249,7 @@ Task<void> LocalFsBackend::create_bucket(std::string_view bucket) {
     std::error_code ec;
     fs::create_directories(dir, ec);
     if (ec) throw S3Error(S3ErrorCode::InternalError, "create bucket dir: " + ec.message());
-    // fsync the marker and both levels of directory entries (docs/archive/gaps.md §4): the object
+    // fsync the marker and both levels of directory entries: the object
     // write path is strictly fsynced, and the inversion of "bucket vanished after power
     // loss while the client already got a 200 -- with objects still in it, even" is
     // unacceptable. The bucket directory's own dirent lives in root, so fsyncing only the
@@ -284,7 +284,7 @@ Task<void> LocalFsBackend::delete_bucket(std::string_view bucket) {
     // as a 500; and if the directory cannot be removed after the marker is deleted (a
     // concurrent write landed an object between the emptiness check and remove), the
     // bucket disappears from list/exists while the data remains -- invisible and
-    // undeletable (docs/archive/gaps.md §3.9)
+    // undeletable
     std::error_code ec;
     fs::remove(dir / kBucketMarker, ec);
     if (ec) throw S3Error(S3ErrorCode::InternalError, "delete bucket marker: " + ec.message());
@@ -348,7 +348,6 @@ Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_
         size_t left = n;
         while (left > 0) {
             if (int fe = fault::check("localfs.write")) {
-                // roadmap §6.1
                 errno = fe;
                 throw_errno("write staging tmp");
             }
@@ -375,7 +374,7 @@ Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_
     auto lk = co_await commit_lock(bucket, key).acquire();
     // the lock wakeup may resume on another thread; do blocking IO back on a pool thread
     co_await pool_->schedule();
-    // cached record dropped after the commit (roadmap §3.8)
+    // cached record dropped after the commit
     auto inv = invalidate_on_exit(bucket, key);
     fs::path dest = object_path(bucket, key);
     fsutil::check_put_condition(dest, cond, key);
@@ -400,7 +399,7 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
     // metadata from disk (previously it was only checked on the open-failure branch, so
     // the success path never checked the bucket at all, and any bucket that could
     // construct a path outside root_ could read files directly). The one exception is a
-    // metadata-cache hit (roadmap §3.8): the record is only used when the inode stamp
+    // metadata-cache hit: the record is only used when the inode stamp
     // still matches the fd's fstat, and it proves the bucket existed when the object was
     // last read from disk
     fs::path path = object_path(bucket, key);
@@ -459,7 +458,7 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
     co_return out;
 }
 
-// Same-backend copy fast path (docs/archive/gaps.md §6.3): previously CopyObject moved every byte
+// Same-backend copy fast path: previously CopyObject moved every byte
 // "into the gateway and back out" even within one localfs. copy_file_range keeps the move
 // in the kernel (direct page-cache copy; O(1) metadata clone on btrfs/xfs reflink).
 // Unavailable (cross-device EXDEV, old-kernel ENOSYS, filesystem EINVAL) returns nullopt
@@ -598,7 +597,7 @@ Task<ObjectMeta> LocalFsBackend::head_object(std::string_view bucket, std::strin
         g.ok = true;
         co_return m;
     }
-    // Cache first (roadmap §3.8). Validated (default): one stat(2) taken before the
+    // Cache first. Validated (default): one stat(2) taken before the
     // lookup, whose stamp must match the record -- one syscall instead of stat +
     // getxattr (+ sidecar read) + decode, and an external overwrite/removal is caught.
     // Unvalidated: a hit is no syscall at all. A miss goes on to the authoritative
@@ -681,7 +680,7 @@ DirEntries read_dir_sorted(const fs::path& dir, std::vector<fs::path>* orphans) 
             continue;
         }
         if (name == fsutil::kBucketMarker) continue;
-        // Directory-marker object (docs/archive/gaps.md §6.3): restored to the key "<rel>"
+        // Directory-marker object: restored to the key "<rel>"
         // (already ends with '/'). Its sort key is the empty string -- it sorts right
         // before the other entries in the same directory, matching the
         // "collect everything + full sort" order where "a/b/" < "a/b/x"
@@ -715,8 +714,8 @@ DirEntries read_dir_sorted(const fs::path& dir, std::vector<fs::path>* orphans) 
     return es;
 }
 
-// Per-list_objects directory reader: consults the backend's snapshot cache (roadmap
-// §3.5 ②) and collects orphan candidates across the walk
+// Per-list_objects directory reader: consults the backend's snapshot cache and collects orphan candidates across the
+// walk
 struct DirReader {
     fsutil::DirListCache* cache;
     std::vector<fs::path> orphans;
@@ -736,7 +735,7 @@ struct DirReader {
     }
 };
 
-// Ordered directory walk for list_objects (docs/archive/gaps.md §2.7 pruning).
+// Ordered directory walk for list_objects (pruning).
 // Sort key of a directory entry: files use name, directories use name+"/" -- every key
 // underneath has that string as a prefix, so the interleaved output order matches
 // "collect everything + full sort" byte for byte, without materializing the whole tree.
@@ -761,7 +760,7 @@ struct ListWalker {
         return true;
     }
 
-    // Page start (roadmap §3.5 ②): index of the first entry of this (sorted) directory
+    // Page start: index of the first entry of this (sorted) directory
     // that can still produce output after start_after -- a binary search instead of the
     // old linear "q <= start_after → continue" over every entry, which made page N cost
     // O(directory) even when the marker sat near the end
@@ -932,7 +931,7 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
     co_return out;
 }
 
-// roadmap §3.5 ①: one page = up to max_keys × (stat + getxattr), previously serial on a
+// one page = up to max_keys × (stat + getxattr), previously serial on a
 // single pool thread (2000+ syscalls behind one request). Strided fan-out over the pool;
 // results keep the walk order by index
 Task<void> LocalFsBackend::load_page_meta(const fs::path& base, const std::vector<std::string>& keys,
@@ -972,7 +971,7 @@ Task<void> LocalFsBackend::load_meta_slice(const fs::path& base, const std::vect
     }
 }
 
-// ---------- orphan sidecars (roadmap §3.5) ----------
+// ---------- orphan sidecars ----------
 
 // Remove one "<key>.lights3-meta" whose data file is gone. Under the key's commit lock:
 // PUT's commit section (data rename → sidecar write) holds the same lock, so the re-check
@@ -1088,7 +1087,7 @@ Task<std::string> LocalFsBackend::create_multipart(std::string_view bucket, std:
     std::vector<std::pair<std::string, std::string>> kv{
         {"bucket", std::string(bucket)}, {"key", std::string(key)}, {"content_type", meta.content_type}};
     if (!meta.checksum_algorithm.empty()) kv.emplace_back("checksum_algorithm", meta.checksum_algorithm);
-    // First-class metadata must also survive create→complete (docs/archive/gaps.md §5.2); key
+    // First-class metadata must also survive create→complete; key
     // names share their source with the sidecar
     for (auto& f : kStdMetaFields)
         if (!(meta.*f.field).empty()) kv.emplace_back(f.store_key, meta.*f.field);
@@ -1121,7 +1120,6 @@ Task<PutResult> LocalFsBackend::upload_part(std::string_view bucket, std::string
         size_t left = n;
         while (left > 0) {
             if (int fe = fault::check("localfs.write")) {
-                // roadmap §6.1
                 errno = fe;
                 throw_errno("write part tmp");
             }
@@ -1155,7 +1153,7 @@ Task<PutResult> LocalFsBackend::upload_part(std::string_view bucket, std::string
     tmp.committed = true;
     fsutil::fsync_dir(up.dir);
     // The .md5 sidecar is already a kv file: the verified part checksum rides along
-    // (roadmap §2.2); resolved() only after the body was drained above (trailer form)
+    //; resolved() only after the body was drained above (trailer form)
     std::vector<std::pair<std::string, std::string>> pkv{{"md5", etag}};
     if (checksum && !checksum->resolved().empty()) {
         pkv.emplace_back("checksum_algorithm", checksum->algorithm);
@@ -1206,7 +1204,7 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket, std:
     tmp.fd = ::open(tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (tmp.fd < 0) throw_errno("open complete tmp");
     uint64_t total = 0;
-    // per-part layout for GET ?partNumber (roadmap §2.5)
+    // per-part layout for GET ?partNumber
     std::vector<uint64_t> sizes;
     std::vector<char> buf(256 * 1024);
     for (auto& path : paths) {
@@ -1223,7 +1221,6 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket, std:
             const char* p = buf.data();
             size_t left = static_cast<size_t>(n);
             while (left > 0) {
-                // roadmap §6.1
                 int fe = fault::check("localfs.write");
                 ssize_t w = fe ? -1 : ::write(tmp.fd, p, left);
                 if (w < 0) {
@@ -1251,7 +1248,7 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket, std:
     meta.last_modified = std::chrono::system_clock::now();
     meta.part_sizes = std::move(sizes);
     PutResult result{meta.etag};
-    // Composite checksum from the stored, verified per-part values (roadmap §2.2)
+    // Composite checksum from the stored, verified per-part values
     apply_composite_checksum(digests, meta, result);
     {
         // same as PUT: serialize the commit section
@@ -1367,7 +1364,7 @@ void LocalFsBackend::cleanup_stale_uploads() {
     }
 }
 
-// ---------- scrub (roadmap §3.1) ----------
+// ---------- scrub ----------
 
 Task<FsScrubStats> LocalFsBackend::run_scrub_once(FsScrubOptions opt) {
     co_await pool_->schedule();

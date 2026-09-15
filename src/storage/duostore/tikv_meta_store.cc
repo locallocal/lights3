@@ -61,7 +61,7 @@ void conflict_backoff(int attempt) {
     std::this_thread::sleep_for(us);
 }
 
-// Single-value size guard for object manifests (docs/archive/gaps.md §2.12): a single TiKV
+// Single-value size guard for object manifests: a single TiKV
 // value is bounded by the raft entry limit (8MiB by default); an over-limit
 // PUT/complete would **fail permanently** and an existing such object could not be
 // deleted. Fail-fast after encoding with EntityTooLarge (400, actionable: client
@@ -351,7 +351,7 @@ TikvMetaStore::TikvMetaStore(TikvMetaOptions opt) : opt_(std::move(opt)) {
     // conflict / key collision / unknown outcome (a constant idempotent write,
     // decidable by re-reading) all go through the backoff retry loop to converge;
     // one-shot-and-give-up is not allowed (other write paths get the same loop from
-    // txn_retry). Version evolution (docs/archive/gaps.md §6.1): existing version < current
+    // txn_retry). Version evolution: existing version < current
     // walks the migration chain (each step idempotent — the shared engine has no
     // global migration lock, and multiple new-version gateways walking the chain
     // concurrently are harmless to each other; racing stamp Puts converge to the same
@@ -556,7 +556,7 @@ void TikvMetaStore::mut_pack_delta(std::vector<TikvMutation>& muts, const DataRe
 
 void TikvMetaStore::enqueue_reclaim(std::vector<TikvMutation>& muts, const DataRef& ref, ReclaimReason reason) {
     if (ref.extents.empty()) return;
-    // Oversized DataRefs are split into multiple entries (docs/archive/gaps.md §2.11): keeps
+    // Oversized DataRefs are split into multiple entries: keeps
     // GC per-batch decode memory bounded and a single gcq value away from the raft
     // entry limit; acks are per-entry independent and unlink is idempotent, so
     // splitting does not change crash semantics
@@ -608,7 +608,7 @@ uint64_t TikvMetaStore::alloc_id(char kind, IdRange& r, uint32_t n) {
         // called during mutation assembly, before the business commit happens.
         // Passing it through as-is would make commit_or_discard treat it as
         // "business commit outcome unknown" and refuse to clean up already-written
-        // data extents, creating needless orphans (docs/archive/gaps.md §3.9). Downgrade to
+        // data extents, creating needless orphans. Downgrade to
         // a deterministic failure
         throw S3Error(S3ErrorCode::InternalError, std::string("duostore tikv meta: id segment reservation failed "
                                                               "(business txn not committed): ") +
@@ -938,11 +938,11 @@ std::vector<UploadInfo> TikvMetaStore::list_uploads(std::string_view b, std::str
         auto [lo, hi] = range_of('U', std::string(b) + '\0');
         // prefix + 'U' + b + '\0'
         size_t plen = lo.size();
-        // Cursor pushdown (docs/archive/gaps.md §5.1): key order is (key, upload_id) order, so
+        // Cursor pushdown: key order is (key, upload_id) order, so
         // raising the lower bound of [lo,hi) skips the whole segment. The trailing
         // '\0' places the lower bound just past that pair; key-marker-only means
         // "key > key_marker" (keys contain no NUL, so key_marker+'\x01' is the smallest
-        // greater key). The prefix raises the bound further (roadmap §3.5)
+        // greater key). The prefix raises the bound further
         std::string from = lo;
         if (!id_marker.empty()) {
             from += std::string(key_marker);
@@ -1058,7 +1058,7 @@ std::vector<std::pair<uint64_t, Reclaim>> TikvMetaStore::peek_reclaims(size_t ma
         for (auto& [key, v] : client().scan(ts, gcq_key(min_seq), hi, max)) {
             uint64_t seq = codec::parse_be64(std::string_view(key).substr(plen));
             out.emplace_back(seq, codec::decode_reclaim(v));
-            // Cumulative extent cap (gaps §2.11): returns at least 1 item (over-scanned kv discarded in place)
+            // Cumulative extent cap: returns at least 1 item (over-scanned kv discarded in place)
             extents += out.back().second.extents.size();
             if (extents >= max_extents) break;
         }
@@ -1073,7 +1073,7 @@ void TikvMetaStore::ack_reclaim(uint64_t seq) {
     });
 }
 
-// Multi-gateway GC lease (docs/archive/gaps.md §6.1): value = "<owner>\0<expiry_ms>".
+// Multi-gateway GC lease: value = "<owner>\0<expiry_ms>".
 // Snapshot-read decision + prewrite conflict detection acts as a CAS
 // (read-then-commit, §4.1) — of two instances racing to claim, only one commit
 // succeeds; the loser retries, reads the new lease, and backs out. TTL expiry is
@@ -1101,8 +1101,7 @@ bool TikvMetaStore::try_gc_lease(std::string_view owner, int64_t ttl_ms) {
     });
 }
 
-// Multi-gateway read / write leases (roadmap §3.7; write side:
-// docs/archive/multi-gateway-multipart-design.md §4 ①): 'L' table row
+// Multi-gateway read / write leases (write side): 'L' table row
 // "r<owner>", value "<oldest_read_ms>\0<expiry_ms>\0<oldest_write_ms>". A blind
 // single-key put — each gateway only ever writes its own row, so there is no
 // contention to arbitrate; TTL expiry is judged by wall clock exactly like
@@ -1333,7 +1332,7 @@ void TikvMetaStore::scan_refs(const std::function<void(uint64_t)>& cb) {
     });
 }
 
-// Online-dump snapshot view (roadmap §3.7): one TSO version fixed at
+// Online-dump snapshot view: one TSO version fixed at
 // construction — MVCC makes every read at it a consistent view across the whole
 // dump, with no server-side state to hold. The cluster GC safepoint must stay
 // behind the version for the view's lifetime (gc_retention covers the dump

@@ -31,7 +31,7 @@ Non-goals (not in the first phase):
   same premise as localfs);
 - TransactionDB / distributed transactions for meta (compound invariants use an
   in-store mutex, §4.5);
-- ~~serving as the local side of tiered~~ — implemented (roadmap §3.6 ⑥, `DuoStoreTierLocal`, §13.1);
+- ~~serving as the local side of tiered~~ — implemented (`DuoStoreTierLocal`, §13.1);
 - RocksDB compression (metadata volume is small; traded for zero external
   dependencies, §13.3).
 
@@ -244,7 +244,7 @@ u8 ver | u64 size | u64 mtime_ms | u64 version | str etag | str content_type
 ```
 
 v2 appends the first-class metadata section `u16 n_std | (str k, str v)*` after
-n_meta; v3 (roadmap §3.6 ⑥) appends `u8 tier | str remote_etag | str remote_at`
+n_meta; v3 appends `u8 tier | str remote_etag | str remote_at`
 — the object's state when duostore serves as a tiered hot tier (a stub is
 tier=remote with no runs), see [storage/tiered.md §11](../../../architecture/storage/tiered.md).
 Readers accept v1–v3, writers always emit v3.
@@ -597,7 +597,7 @@ parses centrally with range validation (modeled on cloudproxy); `parse_size` /
 | meta_path | `<root>/meta` | RocksDB directory |
 | meta / data | rocksdb / fs | engine selection: `meta: rocksdb\|redis\|sqlite\|tikv`, `data: fs\|rados` (§12) |
 | chunk_size | 8MiB | large-object slicing granularity |
-| fs_uring | false | io_uring data plane for data=fs (roadmap §3.4 ⑤, [duostore-data-fs.md](../../../architecture/storage/duostore-data-fs.md) §9); if the engine cannot be built it falls back to the synchronous path and sets the resident gauge `lights3_duostore_uring_fallback=1` |
+| fs_uring | false | io_uring data plane for data=fs ([duostore-data-fs.md](../../../architecture/storage/duostore-data-fs.md) §9); if the engine cannot be built it falls back to the synchronous path and sets the resident gauge `lights3_duostore_uring_fallback=1` |
 | fs_uring_queue_depth | 256 | SQ depth per ring ([8,65536]) |
 | fs_uring_sqpoll | false | kernel SQ polling thread |
 | fs_uring_rings | 1 | number of ring shards ([0,64], 0 = auto) |
@@ -609,8 +609,8 @@ parses centrally with range validation (modeled on cloudproxy); `parse_size` /
 | gc_enabled | true | master switch for the background GC worker + orphan-scan scheduling; set false on non-designated instances in multi-gateway deployments (single-instance execution constraint, duostore-data-rados-design.md §8.3); manual hooks are not gated |
 | gc_interval / gc_grace | 5m / 5m | reclaim period / delayed-deletion grace |
 | gc_compact_max_packs / gc_compact_max_bytes | 16 / 1GiB | per-round compaction budget (highest-yield packs first, the rest next round); 0 = unlimited |
-| read_lease | 5s | multi-gateway read / write lease publish period (roadmap §3.7, storage/duostore-core.md §8.5): every gateway publishes the start times of its oldest in-flight read and oldest in-flight write to the shared meta (redis/tikv); GC only reclaims entries every peer's in-flight read provably cannot reference, and the orphan scan only unlinks unreferenced chunks older than every peer's in-flight write; 0 = off (then `gc_grace` must exceed the longest GET / upload); local engines (rocksdb/sqlite) stand the publisher down automatically at no cost |
-| meta_cache_entries | 64K (rocksdb/sqlite) / 0 (redis/tikv) | object metadata cache budget (roadmap §3.8, storage/duostore-core.md §7.1): a GET/HEAD hit costs no meta round trip; 0 = off. Exact invalidation on local engines; shared engines need `meta_cache_ttl` to enable it |
+| read_lease | 5s | multi-gateway read / write lease publish period (storage/duostore-core.md §8.5): every gateway publishes the start times of its oldest in-flight read and oldest in-flight write to the shared meta (redis/tikv); GC only reclaims entries every peer's in-flight read provably cannot reference, and the orphan scan only unlinks unreferenced chunks older than every peer's in-flight write; 0 = off (then `gc_grace` must exceed the longest GET / upload); local engines (rocksdb/sqlite) stand the publisher down automatically at no cost |
+| meta_cache_entries | 64K (rocksdb/sqlite) / 0 (redis/tikv) | object metadata cache budget (storage/duostore-core.md §7.1): a GET/HEAD hit costs no meta round trip; 0 = off. Exact invalidation on local engines; shared engines need `meta_cache_ttl` to enable it |
 | meta_cache_ttl | 0 (never) | cache entry expiry; on shared engines (redis/tikv) it must satisfy `0 < ttl < gc_grace` (a peer gateway's write stays invisible for up to one TTL; the published read lease is backdated by the TTL) |
 | meta_cache_feed | true | subscribe to the engine's invalidation feed when it has one (redis pub/sub); false = TTL-only bounded staleness |
 | orphan_scan_interval | 1d | chunk orphan reconciliation period |
@@ -645,7 +645,7 @@ leases plus the GC lease (§11 `read_lease`,
 
 ### 13.1 Component relationships
 
-- **Can serve as tiered's local side** (roadmap §3.6 ⑥): tiered's local side
+- **Can serve as tiered's local side**: tiered's local side
   is abstracted as `ITierLocal`; `DuoStoreTierLocal` keeps the tier state in
   the object record, a stub = a record without extents, commit = a CAS meta
   transaction ([tiered-design.md](tiered-design.md) §2,

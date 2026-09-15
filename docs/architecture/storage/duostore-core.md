@@ -94,7 +94,7 @@ run = { u8 kind, u64 first_file_id, u32 count,
 | bucket（`encode_bucket`） | v1 | `u8 ver \| u64 created_ms` |
 | object（`encode_object`） | 写 v3 读 v1–v3 | `u8 ver \| u64 size \| u64 mtime_ms \| u64 version \| str etag \| str content_type \| u16 n_meta (str k, str v)* \| [v2] u16 n_std (str k, str v)* \| [v3] u8 tier \| str remote_etag \| str remote_at \| runs`（v3 tier 段 = duostore 作 tiered 热层时的状态，[tiered.md §11](tiered.md)；老于 v3 的二进制读不了 v3 记录） |
 | upload（`encode_upload`） | 写 v2 读 v1/v2 | `u8 ver \| u64 initiated_ms \| str content_type \| u16 n_meta kv* \| [v2] u16 n_std kv*` |
-| part（`encode_part`） | 写 v2 读 v1/v2 | `u8 ver \| u64 size \| str md5 \| u64 modified_ms \| [v2] str checksum_algorithm \| str checksum_value \| runs`（v2 段 = 已校验的分片校验和，roadmap §2.2） |
+| part（`encode_part`） | 写 v2 读 v1/v2 | `u8 ver \| u64 size \| str md5 \| u64 modified_ms \| [v2] str checksum_algorithm \| str checksum_value \| runs`（v2 段 = 已校验的分片校验和） |
 | gcq（`encode_reclaim`） | v1 | `u8 ver \| u8 reason \| u64 enqueue_ms \| runs` |
 | stats 计数器（`encode_counter_delta`） | — | 8B 小端 i64（merge 增量与全值同格式） |
 
@@ -105,7 +105,7 @@ run = { u8 kind, u64 first_file_id, u32 count,
 - v2 的一等元数据段（Cache-Control 等七个标准头，`backend.h:kStdMetaFields`，
   含 `website_redirect` / `tagging`）是自描述 kv 而非固定槽位：下次加字段不需要
   bump 版本，未知 key 读时丢弃（`codec.cc:put_std_meta` / `read_std_meta`）。
-  校验和闭包与分片布局（roadmap §2.2/§2.5）正是这样搭车进来的：同一段里另写
+  校验和闭包与分片布局正是这样搭车进来的：同一段里另写
   `checksum_algorithm` / `checksum_value` / `checksum_type` / `part_sizes`
   （逗号连接的各分片大小，供 GET `?partNumber` 与 scrub 用）四个保留 key，
   trailer 形式的校验值在此时已由 `resolved_checksum_value` 解出。
@@ -155,7 +155,7 @@ run = { u8 kind, u64 first_file_id, u32 count,
 `list_objects` / `list_parts` / `list_uploads` 为纯读。`list_uploads` 的
 (key_marker, id_marker, limit, prefix) 是**下推提示**，引擎可整体忽略（调用方
 总会再跑 `apply_uploads_page`），但**尊重 limit 就必须同时尊重 prefix**
-（roadmap §3.5：先 seek 到 prefix、越界即停，否则 prefix 范围之前的 limit 条
+（先 seek 到 prefix、越界即停，否则 prefix 范围之前的 limit 条
 会被调用方的过滤清空而误报列举结束）；id_marker 为空而 key_marker 非空表示
 "key > key_marker"（S3 key-marker-only 语义）；delimiter 非空时调用方传
 limit=0（分组需全貌）。
@@ -188,8 +188,7 @@ limit=0（分组需全貌）。
   `publish_lease` / `min_lease`（读写租约，§8.5）在共享引擎上覆盖，
   关闭时回落 `gc_grace ≥ 最长预期 GET / 上传时长` 的旧约束。
 - `publish_lease(owner, LeaseInfo{oldest_read_ms, oldest_write_ms}, ttl)` /
-  `min_lease() -> optional<LeaseInfo>`：多网关读写租约（roadmap §3.7；写侧
-  [multi-gateway-multipart-design.md](../../archive/multi-gateway-multipart-design.md) §4 ①，
+  `min_lease() -> optional<LeaseInfo>`：多网关读写租约（读写两侧的
   语义与安全论证见 §8.5）。共享引擎实现，min 逐字段取最小；任一存活租约缺
   write 字段（旧版本网关写的）则 `oldest_write_ms` 为 nullopt = 写侧下限未知。
   本地引擎默认 publish 返回 false（unsupported，发布器停摆）、min 返回 nullopt。
@@ -330,14 +329,13 @@ value 的 ETag = `meta_store.h:kv_etag`（sha256 hex 前 16 字符），由引�
 `meta_->head_object`（`decode_object_meta`，零 manifest 物化）并回填 meta-only
 记录。`delete_object` 是纯 meta 事务（幂等），物理回收全部异步由 GC 变现。
 
-`inspect_object`（`lights3-ctl object inspect` / `GET /-/admin/objects/...`，
-roadmap §6.2）**刻意绕过缓存**直读 `meta_->get_object`，返回
+`inspect_object`（`lights3-ctl object inspect` / `GET /-/admin/objects/...`）**刻意绕过缓存**直读 `meta_->get_object`，返回
 `ObjectLayout{engine="duostore", attrs, extents}`：attrs 含 logical_size /
 etag / content_type / last_modified / meta_version / tier（非 local 时另附
 remote_etag、remote_at）/ extents / stored_bytes，extents 逐条给出
 kind（chunk/pack/rados）、file_id、offset、length、crc32c。
 
-### 7.1 对象元数据缓存（roadmap §3.8）
+### 7.1 对象元数据缓存
 
 `meta_cache.h:MetaCache<CachedObject>`（`duostore_backend.h:ObjectRecCache`）
 按 (bucket, key) 缓存 `ObjectRec` 整条记录：`manifest=false` 是 HEAD 回填的
@@ -367,7 +365,7 @@ GC 轮压实迁移了记录（`records_migrated > 0`，缓存中的旧 manifest 
 `lights3_meta_cache_invalidations_total` / `lights3_meta_cache_entries`；
 测试观测口 `meta_cache_stats()` / `meta_cache_enabled()`。
 
-**跨网关失效广播（backlog-sequence ⑤）**：redis 引擎把每次对象记录变更从提交脚本内
+**跨网关失效广播 **：redis 引擎把每次对象记录变更从提交脚本内
 `PUBLISH <prefix>inv`，各网关一条订阅连接把消息喂给本地 `MetaCache::invalidate`，
 （重）订阅时整表清空；`meta_cache_ttl` 退为丢消息的兜底上界。tikv 无发布订阅，
 维持 TTL 有界陈旧契约。接线在 `DuoStoreBackend::wire_cache_invalidation`
@@ -406,8 +404,7 @@ GC 轮压实迁移了记录（`records_migrated > 0`，缓存中的旧 manifest 
    否则超预算的单个大 pack 永远无法推进），余者计入 `packs_compact_deferred`
    下轮继续。`rewrite_pack` 顺扫触发迁移回调（§8.2）。`compact_blocked_`：
    上轮没迁干净的 pack（在途 mpu 分片/遗留 owner/存活损坏记录），live_recs
-   无变化且冷却窗（gc_grace）未过则跳过重扫。**损坏隔离区**（roadmap §3.7，
-   §8.6）：连续 `kQuarantineStrikes`(=3) 次扫描"corrupt>0 且 migrated==0 且
+   无变化且冷却窗（gc_grace）未过则跳过重扫。**损坏隔离区**（§8.6）：连续 `kQuarantineStrikes`(=3) 次扫描"corrupt>0 且 migrated==0 且
    账目不动"的 pack 进隔离账本——不再冷却重扫，候选收集时直接跳过；账目一动
    （删对象/mpu 落定）自动释放重试（purged 条目除外，文件已删）。
 4. **整空 pack 删除**：sealed 且 live_recs==0、**首次见空起逾 gc_grace**
@@ -441,7 +438,7 @@ GC 轮压实迁移了记录（`records_migrated > 0`，缓存中的旧 manifest 
   峰值内存较三张哈希表方案低一个量级），再枚举盘面——"文件先于 refs 落盘"
   的不变量保证 R 中 id 的文件在枚举开始前必已在盘，miss 即真丢失。
 - **正向**：`scan_chunks` 枚举中内联分类——无 refs、**不在 gcq 在途集合**
-  （roadmap §3.7：曾被引用的 chunk 解引用时原子入 gcq，回收交给带
+  （曾被引用的 chunk 解引用时原子入 gcq，回收交给带
   read-lease 门的 gcq 路径，此处 unlink 会绕过该门伤及对端在途读；扫描前
   peek 全量 gcq 收集在途 file_id，跳过计入 `skipped_gcq`。剩下够格的候选
   必是从未被引用的崩溃遗留，读者不可能持有）、mtime 逾 gc_grace、**mtime
@@ -462,7 +459,7 @@ GC 轮压实迁移了记录（`records_migrated > 0`，缓存中的旧 manifest 
 `gc_tick`/`orphan_tick` **完成后重臂**（轮次永不重叠堆积）；`gc_enabled=false`
 （多网关非指定实例）不排程但保留手动钩子。
 
-### 8.4 scrub（`run_scrub_once`，roadmap §3.1）
+### 8.4 scrub（`run_scrub_once`）
 
 > 触发面：离线 `lights3 fsck <backend>`、在线网关的 `POST /-/admin/fsck/<backend>`
 > （`lights3-ctl fsck --offline`，[cli.md §3.5](../../usage/cli.md)）；两者共用 `app/admin_jobs.h` 的分派。
@@ -503,7 +500,7 @@ TimerQueue 上分片睡眠（≤500ms/片，片间探测 `bg_.closing()`），cl
 （scrub 是运维触发的遍历，不是常驻 worker）。`bg_.closing()` 在对象与
 extent 粒度探测，中断置 `aborted`（统计为部分结果）。
 
-### 8.5 多网关读写租约（roadmap §3.7；写侧 multi-gateway-multipart §4 ①）
+### 8.5 多网关读写租约
 
 补齐"A 网关在读/在写的 extent，B 网关 GC 看不到 A 的 pin"这块文档明列的
 设计前提（此前只靠 `gc_grace` 兜底）。粗粒度租约而非逐 extent 上报，一条
@@ -541,7 +538,7 @@ extent 粒度探测，中断置 `aborted`（统计为部分结果）。
   回收；`read_lease: 0` 关闭时回落旧约束 `gc_grace ≥ 最长预期 GET / 上传时长`。
 - 时钟前提与 GC 租约相同：网关间 NTP 偏差 ≪ gc_grace。
 
-### 8.6 损坏 pack 隔离区（roadmap §3.7；CLI `lights3 duostore quarantine`）
+### 8.6 损坏 pack 隔离区（CLI `lights3 duostore quarantine`）
 
 存活损坏记录（读回 crc 不符、无法迁移）以前只会让 pack 在 `compact_blocked_`
 里按 gc_grace 冷却无限重扫——永远回收不掉，也没有运维出口。现在：
@@ -577,8 +574,7 @@ extent 粒度探测，中断置 `aborted`（统计为部分结果）。
 
 ### 9.1 多网关
 
-四步可落在不同网关（[multi-gateway-multipart-design.md](../../archive/multi-gateway-multipart-design.md)），
-前提是共享 meta（redis / tikv）+ 共享数据面（rados）；部署清单见
+四步可落在不同网关，前提是共享 meta（redis / tikv）+ 共享数据面（rados）；部署清单见
 [../deployment.md §5](../../usage/deployment.md)：
 
 - **全局唯一**：upload_id 由 `multipart.cc:new_upload_id` 取 128 bit 随机，与
@@ -624,7 +620,7 @@ inode = 静默丢数据。封存失败仅 WARN 不阻启动。随后生成随机
 记录级重放天然兼作四引擎间的 meta 迁移工具，value 布局差异被接口吸收。
 backend 层入口 `run_meta_dump` / `run_meta_load` 持 `gc_sem_`。
 
-**在线 dump**（roadmap §3.7）：`run_meta_dump` 先要 `IMetaStore::snapshot()`
+**在线 dump**：`run_meta_dump` 先要 `IMetaStore::snapshot()`
 ——一个 `IMetaReadView`（list_buckets / get_object / list_objects /
 pack_stats 四个读，恰好是 dump 所需），全部读观测同一时点状态，业务写可以
 继续。三个引擎的实现：rocksdb 钉一个 `GetSnapshot()`（四条读路径按
@@ -666,7 +662,7 @@ get_object 逐条导出（并发删除仅防御性跳过）。
 （`run_meta_load` 内建：释放信号量后调 `run_orphan_scan_once`，回收备份窗口
 内数据侧多出的文件）。
 
-### 11.1 备份链与 PITR（`meta_backup.h` / `meta_backup.cc`，backlog-sequence ⑧）
+### 11.1 备份链与 PITR（`meta_backup.h` / `meta_backup.cc`）
 
 §11 的 dump 是一份逻辑全量；备份链在它旁边补**增量 + 恢复到中间点**：一个备份
 目录持一条链，`manifest.json` 按序记条目（第一条必为全量，其后为增量或新的全量），

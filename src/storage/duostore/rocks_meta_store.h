@@ -38,15 +38,14 @@ struct RocksMetaOptions {
     int max_write_buffers = 2;
     // total flush/compaction background threads
     int max_background_jobs = 2;
-    // empty scope = isolated instance (tests construct directly with zero wiring,
-    // docs/archive/gaps.md §6.1)
+    // empty scope = isolated instance (tests construct directly with zero wiring)
     MetricsScope metrics{};
 };
 
 class RocksMetaStore final : public IMetaStore {
 public:
     // Current schema version (existing DBs are upgraded via the migration chain on
-    // open, docs/archive/gaps.md §6.1)
+    // open)
     static constexpr int64_t kSchemaCurrent = 1;
     // Schema marker validity check (pure precondition of migrate_schema; static for
     // easy unit testing): parse failure, or a version newer than this build (running
@@ -91,11 +90,11 @@ public:
     void drop_pack_stat(uint64_t pack_id) override;
     bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version, const DataRef& from,
                       const DataRef& to) override;
-    // Single WriteBatch, single commit (batched compaction, gaps §2.13); per-item CAS is independent
+    // Single WriteBatch, single commit (batched compaction); per-item CAS is independent
     std::vector<bool> swap_extents_batch(std::span<const SwapReq> reqs) override;
     bool chunk_referenced(uint64_t file_id) override;
     void scan_refs(const std::function<void(uint64_t file_id)>& cb) override;
-    // Online-dump snapshot (roadmap §3.7): pins a RocksDB snapshot; all four view
+    // Online-dump snapshot: pins a RocksDB snapshot; all four view
     // reads run against it. Borrows this store — destroy before close()
     std::unique_ptr<IMetaReadView> snapshot() override;
 
@@ -105,7 +104,7 @@ public:
     bool kv_delete(std::string_view key) override;
     std::vector<KvItem> kv_scan(std::string_view prefix, std::string_view after, size_t limit) override;
     std::vector<std::string> kv_put_batch(std::span<const KvPut> puts) override;
-    // Backup chain (backlog-sequence ⑧): rocksdb::BackupEngine on dir/rocksdb --
+    // Backup chain: rocksdb::BackupEngine on dir/rocksdb --
     // every backup is self-sufficient (SST files shared between backups, so a
     // "full" and an "incremental" entry cost the same); the manifest marker is
     // the engine's backup id and a restore needs only the last entry of the plan.
@@ -138,7 +137,7 @@ private:
     // snap = pinned snapshot for the online-dump view (nullptr = latest state)
     std::optional<std::string> get_raw(int cf, std::string_view key, const rocksdb::Snapshot* snap = nullptr);
     // Snapshot-parameterized read bodies shared by the live methods (nullptr =
-    // per-call snapshot / latest) and SnapshotView (roadmap §3.7 online dump)
+    // per-call snapshot / latest) and SnapshotView (online dump)
     std::vector<BucketInfo> list_buckets_snap(const rocksdb::Snapshot* snap);
     ListResult list_objects_snap(std::string_view b, const ListOptions& opt, const rocksdb::Snapshot* snap);
     std::vector<PackStat> pack_stats_snap(const rocksdb::Snapshot* snap);
@@ -156,7 +155,7 @@ private:
     // in the same batch. Separate from batch_refs: complete's refs transfer (owner
     // rewrite) must be a no-op for packs, and mixing them would double-count.
     // rec_overhead: per-record header overhead (codec::pack_rec_overhead*);
-    // live_bytes uses the same accounting basis as file_size (docs/archive/gaps.md §2.3a)
+    // live_bytes uses the same accounting basis as file_size
     void batch_pack_delta(rocksdb::WriteBatch& batch, const DataRef& ref, int sign, int64_t rec_overhead);
     // Single-item CAS core of swap (called holding mu_): on successful validation it
     // appends the whole mutation set to the batch and returns true; on mismatch it

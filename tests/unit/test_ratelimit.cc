@@ -1,4 +1,4 @@
-// roadmap §4.2: per-IP / per-access-key rate limiting (s3/ratelimit.h) — token
+// per-IP / per-access-key rate limiting (s3/ratelimit.h) — token
 // bucket + concurrency cap + bounded table, and the dispatch integration
 // (503 SlowDown + Retry-After, metrics), plus the timeout/ratelimit config surface
 #include <chrono>

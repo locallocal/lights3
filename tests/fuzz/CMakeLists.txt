@@ -1,4 +1,4 @@
-# Fuzz harnesses (roadmap §6.1, docs/development/testing.md §3): one LLVMFuzzerTestOneInput
+# Fuzz harnesses (docs/development/testing.md §3): one LLVMFuzzerTestOneInput
 # per parser reachable without authentication. Default = standalone binaries
 # replaying tests/fuzz/corpus/<name>/ (a crash-regression gate under any
 # compiler / sanitizer); LIGHTS3_FUZZ_LIBFUZZER=ON (clang) links libFuzzer and

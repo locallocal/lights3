@@ -1,4 +1,4 @@
-// L2: mTLS identity mapping (backlog-sequence ⑥, docs/usage/tls.md §2.1,
+// L2: mTLS identity mapping (docs/usage/tls.md §2.1,
 // docs/architecture/multi-tenancy.md §4.2) -- two halves in one file:
 //   1. verify_identity / enforce_tls_tenant: the dispatch-side rules. A verified
 //      client certificate whose selected subject (auth.tls_identity) is bound to
@@ -114,8 +114,8 @@ VerifiedIdentity S3Service::verify_identity(http::HttpRequest& req) const {
     if (!b)
         throw S3Error(S3ErrorCode::AccessDenied,
                       "The client certificate '" + *subject + "' is not bound to a credential.");
-    // Same single-lookup snapshot rule as a signed request (docs/archive/gaps.md
-    // §3.7): policy / tenant / role are taken with the credential, never re-read
+    // Same single-lookup snapshot rule as a signed request: policy / tenant / role are taken with the credential, never
+    // re-read
     auto bound = cred_store_ ? cred_store_->lookup(b->access_key) : std::nullopt;
     if (!bound)
         throw S3Error(S3ErrorCode::AccessDenied, "The credential bound to the client certificate no longer exists.");

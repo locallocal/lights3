@@ -6,7 +6,7 @@ target_sources(lights3_core PRIVATE
 )
 
 if(LIGHTS3_DUOSTORE)
-  # duostore as the tiered *local* side (roadmap §3.6 ⑥): tier state lives in the
+  # duostore as the tiered *local* side: tier state lives in the
   # object record, so this translation unit needs the duostore engine
   target_sources(lights3_core PRIVATE tier_local_duo.cc)
 endif()

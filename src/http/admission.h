@@ -3,7 +3,7 @@
 // This used to be inlined in the main.cc assembly layer — the whole
 // lifetime-sensitive path (queueing, tying the Permit into the streaming
 // response body, returning it on disconnect, 503 when cancelled while queued)
-// was unreachable from unit tests (docs/archive/issues.md T11). Leaking a single
+// was unreachable from unit tests. Leaking a single
 // Permit permanently loses one slot; in production that shows up as a
 // site-wide hang once the quota is exhausted, so this class of regression
 // must be caught by behavioral tests. Extracted into a standalone header so
@@ -25,7 +25,7 @@
 namespace lights3::http {
 
 // Ties the admission-control Permit to the streaming response body's lifetime
-// (docs/archive/gaps.md part 3, concurrency.md §6): if the permit only lived in the
+// (concurrency.md §6): if the permit only lived in the
 // handler coroutine frame, it would be returned **before** the response body
 // starts transferring — N large-object GETs could all acquire and all release
 // their permits yet still concurrently consume bandwidth and backend IO, so
@@ -49,7 +49,7 @@ private:
     AsyncSemaphore::Permit permit_;
 };
 
-// Admission-gate counters (roadmap §5.3), rendered by /-/metrics next to the
+// Admission-gate counters, rendered by /-/metrics next to the
 // three capacity gauges: the queue-wait histogram over every request (a request
 // that got its permit without queueing lands in the first bucket), how many had
 // to queue, how many were cancelled while queued (503), and transfer stall cuts
@@ -83,10 +83,10 @@ struct AdmissionCounters {
 //   transfer. Small responses (small_body) return the permit at co_return —
 //   the driver's time to write out a chunk of memory is bounded, not worth
 //   threading the permit into the driver for;
-// - The transfer stall guard (docs/archive/gaps.md §3.3) wraps both directions,
+// - The transfer stall guard wraps both directions,
 //   installed at the L1/L2 boundary so it covers all four drivers at once;
 //   disabled when stall <= 0
-// stall_sec is read per request so a config hot reload (roadmap §4.4) can change
+// stall_sec is read per request so a config hot reload can change
 // the transfer stall bound without rebuilding the handler chain.
 // counters (optional) receives the queue-wait / cancellation / stall statistics
 inline Handler make_admission_handler(std::shared_ptr<AsyncSemaphore> inflight,

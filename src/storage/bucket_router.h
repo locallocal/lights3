@@ -1,6 +1,6 @@
 // L3: bucket → backend routing (glob rules, matched in declaration order, see
 // docs/architecture/storage/storage-backend.md §2).
-// Build-time validation (docs/archive/gaps.md §6.3): bad glob syntax / literal characters
+// Build-time validation: bad glob syntax / literal characters
 // impossible in a bucket name / unreachable rules (placed after a catch-all, or duplicating
 // an earlier rule) all fail at startup -- a mistyped pattern that silently never matches
 // would quietly route the bucket to the default backend. "!pattern" is a negated rule.
@@ -20,11 +20,11 @@
 
 namespace lights3::storage {
 
-// Copies of a router share one rule table (config hot reload, roadmap §4.4):
+// Copies of a router share one rule table (config hot reload):
 // update() swaps the table atomically for every holder — S3Service, the lifecycle
 // runner, the usage tracker — while a request in flight keeps the table it
 // resolved against. The backend set can be replaced the same way (backend
-// instances added / removed at runtime, backlog-sequence ⑦): rules and backend
+// instances added / removed at runtime): rules and backend
 // set travel in one snapshot, so a table never names a backend outside its set.
 // The default backend is fixed for the process (it hosts .sys and the stores
 // loaded from it); update() refuses to change it
@@ -42,7 +42,7 @@ public:
     // always lands on the default backend
     std::shared_ptr<IStorageBackend> default_backend() const { return shared_->default_backend; }
 
-    // Configured name of the backend a bucket routes to (metrics label, roadmap §5.1)
+    // Configured name of the backend a bucket routes to (metrics label)
     std::string backend_name(std::string_view bucket) const;
     const std::string& default_backend_name() const { return shared_->default_name; }
 

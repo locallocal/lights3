@@ -18,7 +18,7 @@ std::string new_upload_id() {
     // upload_id is returned directly to the client and is the sole credential for
     // aborting/completing someone else's upload: mt19937_64's internal state can be
     // recovered from ~2496 outputs, and a random_device seed carries only 32 bits of
-    // entropy -- predictable means enumerable/forgeable (docs/archive/gaps.md §3.9). Must use a CSPRNG
+    // entropy -- predictable means enumerable/forgeable. Must use a CSPRNG
     uint8_t bytes[16];
     if (::getentropy(bytes, sizeof(bytes)) != 0) throw S3Error(S3ErrorCode::InternalError, "cannot generate upload id");
     return util::to_hex(bytes);
@@ -49,7 +49,7 @@ void validate_part_order(std::span<const PartInfo> parts) {
     if (parts.empty()) throw S3Error(S3ErrorCode::InvalidPart, "You must specify at least one part.");
     int prev = 0;
     for (auto& p : parts) {
-        // Out-of-order has its own error code (docs/archive/gaps.md §5.7): InvalidPart means "this
+        // Out-of-order has its own error code: InvalidPart means "this
         // part is bad", which makes clients re-upload the part; what is actually needed is
         // to sort the list and resubmit
         if (p.part_no <= prev)
@@ -65,7 +65,7 @@ void validate_part_number(int part_no) {
         throw S3Error(S3ErrorCode::InvalidArgument, "Part number must be an integer between 1 and 10000.");
 }
 
-// ---- Checksum closure (roadmap §2.2) ----
+// ---- Checksum closure ----
 
 std::optional<std::string> composite_checksum(std::string_view algorithm,
                                               const std::vector<std::string>& part_values_b64) {

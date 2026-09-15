@@ -196,7 +196,7 @@ TEST(duostore_decode_object_meta_parity) {
     CHECK_EQ(codec::to_unix_ms(lite.last_modified), codec::to_unix_ms(full.last_modified));
 }
 
-// Canonical parsing of the pack record owner (docs/archive/gaps.md §6.1): three historical forms converge on a single
+// Canonical parsing of the pack record owner: three historical forms converge on a single
 // entry point
 TEST(duostore_parse_pack_owner_forms) {
     using codec::PackOwner;
@@ -235,7 +235,7 @@ TEST(duostore_parse_pack_owner_forms) {
     CHECK(codec::parse_pack_owner(std::string("\0k", 2)).kind == PackOwner::Kind::kUnknown);
 }
 
-// Schema marker validation (the pure precondition of the migration hook, docs/archive/gaps.md §6.1): equal to current
+// Schema marker validation (the pure precondition of the migration hook): equal to current
 // passes straight through, newer than this build is rejected (prevents a downgrade silently corrupting writes), garbage
 // is rejected
 TEST(duostore_rocks_schema_marker_validation) {
@@ -424,7 +424,7 @@ TEST(duostore_gc_reclaims_after_overwrite_and_delete) {
 
 namespace {
 
-// Shared lease board (multi-gateway-multipart §4 ①): what a shared meta engine
+// Shared lease board: what a shared meta engine
 // would hold — one LeaseInfo per publishing gateway. Two LeaseSimMeta wrappers
 // over the same RocksMetaStore + board model two gateways on one meta
 struct LeaseBoard {
@@ -449,7 +449,7 @@ struct LeaseBoard {
 };
 
 // Forwarding IMetaStore wrapper that simulates a peer gateway's published lease
-// (roadmap §3.7): min_lease reports the test-set read floor (`floor`, the
+//: min_lease reports the test-set read floor (`floor`, the
 // historical single-knob form) or, with use_board, the field-wise min of the
 // leases published to the shared board; everything else delegates to a real
 // RocksMetaStore (possibly shared between two wrappers; only the owner closes it)
@@ -579,7 +579,7 @@ LeaseHarness make_lease_backend(const DuoStoreConfig& cfg, std::shared_ptr<Threa
 
 }  // namespace
 
-// Multi-gateway read lease (roadmap §3.7): a gcq entry enqueued after the oldest
+// Multi-gateway read lease: a gcq entry enqueued after the oldest
 // in-flight peer read started is deferred (that read may hold the old ref); once
 // the lease floor moves past the enqueue — or no lease is published at all — the
 // entry reclaims as usual
@@ -620,7 +620,7 @@ TEST(duostore_gc_defers_to_peer_read_lease) {
     sync_wait(h.b->close());
 }
 
-// Orphan scan vs gcq pending (roadmap §3.7): a chunk deref'd but not yet
+// Orphan scan vs gcq pending: a chunk deref'd but not yet
 // reclaimed stays with the (lease-gated) gcq path — the scan counts and skips it
 TEST(duostore_orphan_scan_leaves_gcq_pending_chunks) {
     TmpDir tmp;
@@ -645,7 +645,7 @@ TEST(duostore_orphan_scan_leaves_gcq_pending_chunks) {
     sync_wait(b->close());
 }
 
-// Online meta dump (roadmap §3.7): the snapshot view observes the state at
+// Online meta dump: the snapshot view observes the state at
 // snapshot() — writes committed afterwards are invisible, and the archive loads
 // back to exactly the snapshot state
 TEST(duostore_meta_snapshot_dump_is_consistent) {
@@ -682,7 +682,7 @@ TEST(duostore_meta_snapshot_dump_is_consistent) {
     m2.close();
 }
 
-// InFlightClock (roadmap §3.7): empty registry reports the fallback; the oldest
+// InFlightClock: empty registry reports the fallback; the oldest
 // in-flight start wins until it ends
 TEST(duostore_read_clock_oldest) {
     InFlightClock c;
@@ -1300,7 +1300,7 @@ TEST(duostore_config_rocksdb_tuning_params) {
     CHECK(threw);
 }
 
-// Misconfiguration guard (multi-gateway-multipart §4 ④): shared meta over local fs
+// Misconfiguration guard: shared meta over local fs
 // data is flagged (a WARN at startup, the same text from --check-config), every
 // other combination is silent — including the local engines and the rados data
 // plane the multi-gateway deployment actually uses
@@ -1508,7 +1508,7 @@ TEST(duostore_compact_low_liveness_pack) {
     CHECK_EQ(st1.packs_compacted, uint64_t(0));
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
 
-    // A GET before the round caches k2's manifest, which still names P1 (roadmap §3.8)
+    // A GET before the round caches k2's manifest, which still names P1
     {
         auto g = sync_wait(h.b->get_object("bkt", "k2", std::nullopt));
         CHECK_EQ(read_all(*g.body), patterned(600));
@@ -1544,7 +1544,7 @@ TEST(duostore_compact_low_liveness_pack) {
     sync_wait(h.b->close());
 }
 
-// Age rotation (docs/archive/gaps.md §6.1): under low write volume an active pack sealed only by capacity never
+// Age rotation: under low write volume an active pack sealed only by capacity never
 // rotates, and its dead space can never enter the compaction candidate set. seal_aged_packs seals over-age active
 // packs, reporting file_size truthfully (not the crash back-seal's 0), after which the dead space can be reclaimed by
 // compaction
@@ -1605,7 +1605,7 @@ TEST(duostore_pack_age_rotation_runs_in_gc) {
     sync_wait(h.b->close());
 }
 
-// Compaction budget and priority (docs/archive/gaps.md §6.1): capped at N per round, taken in descending order of
+// Compaction budget and priority: capped at N per round, taken in descending order of
 // reclaimable bytes -- previously it was "rewrite every eligible pack in one round", and after a bulk delete a single
 // round could hold the lock for hours
 TEST(duostore_compact_budget_prioritises_by_reclaimable) {
@@ -1729,7 +1729,7 @@ TEST(duostore_compact_corrupt_live_record_keeps_pack) {
     sync_wait(h.b->close());
 }
 
-// Corrupt-pack quarantine (roadmap §3.7): three fruitless scans (corrupt records,
+// Corrupt-pack quarantine: three fruitless scans (corrupt records,
 // zero migration, unmoved account) park the pack — no more rescans; the ledger
 // survives restart; release re-enables scanning; purge removes the file keeping
 // the accounting; draining the account retires everything
@@ -1957,7 +1957,7 @@ TEST(duostore_active_pack_of_other_writer_not_sealed) {
     sync_wait(probe.close());
 }
 
-// Denominator backfill for crash-leftover packs (gaps §2.3b): after the seal(0) back-seal, the first GC round uses
+// Denominator backfill for crash-leftover packs: after the seal(0) back-seal, the first GC round uses
 // one stat_pack stat to backfill file_size -- packs with healthy liveness no longer unconditionally enter the full
 // sequential-scan rewrite
 TEST(duostore_gc_stat_backfills_crash_leftover_pack) {
@@ -2171,7 +2171,7 @@ TEST(duostore_orphan_scan_forward_and_reverse) {
     sync_wait(b2->close());
 }
 
-// packs/ two-way reconciliation (docs/archive/gaps.md §6.1): the pack file exists as soon
+// packs/ two-way reconciliation: the pack file exists as soon
 // as it is created, but the packstat row only lands when the first record
 // commits — a hard crash inside that window leaks the file forever with no
 // record anywhere. Forward: unrecorded pack file past grace is deleted.
@@ -2312,7 +2312,7 @@ TEST(duostore_orphan_scan_write_pin_protects_inflight_put) {
     sync_wait(b->close());
 }
 
-// Write lease (multi-gateway-multipart §4 ①): two gateways over one meta and one
+// Write lease: two gateways over one meta and one
 // chunk directory. Gateway A streams a slow PUT; gateway B (the GC instance) runs
 // the orphan scan with grace=0. B's pin table cannot see A's write-side pin, so
 // without the lease (read_lease=0, the documented grace-only fallback) B deletes
@@ -2425,7 +2425,7 @@ TEST(duostore_orphan_scan_defers_to_peer_write_lease) {
     sync_wait(a.b->close());
 }
 
-// ---------- scrub suite (roadmap §3.1) ----------
+// ---------- scrub suite ----------
 
 namespace {
 
@@ -2826,7 +2826,7 @@ TEST(duostore_crash_random_sigkill_keeps_reported_commits) {
     sync_wait(b->close());
 }
 
-// gaps §3.9: chunk ids are batch-allocated in geometric runs — even when
+// chunk ids are batch-allocated in geometric runs — even when
 // concurrent writers interleave and burn ids in the allocator (runs are not
 // contiguous with each other), an object's chunk ids stay contiguous within
 // each run, so the manifest's run encoding remains valid
@@ -2857,7 +2857,7 @@ TEST(duostore_chunk_ids_batched_in_runs) {
     sync_wait(d.close());
 }
 
-// roadmap §3.4 ⑤: io_uring FsDataStore — identical layout, chunk path via the pipelined
+// io_uring FsDataStore — identical layout, chunk path via the pipelined
 // streams (multi-block write, crc-verified read-ahead, Range across chunk boundaries) and
 // the pack path via the ring-side fdatasync. Direct-store test; the full-suite coverage
 // lives in test_storage.cc (duostore_backend_suite_uring)
@@ -2929,7 +2929,7 @@ TEST(duostore_fs_data_store_uring_roundtrip) {
     sync_wait(d.close());
 }
 
-// ---------- object metadata cache (roadmap §3.8) ----------
+// ---------- object metadata cache ----------
 
 // HEAD fills a meta-only entry, GET upgrades it to a full record and then skips the meta
 // engine; put/complete/delete invalidate after their commit point
@@ -3076,7 +3076,7 @@ TEST(duostore_meta_cache_shared_engine_needs_ttl) {
                                                                                                              << 16);
 }
 
-// ---------- backlog-sequence ⑧: backup chains / PITR ----------
+// ---------- backup chains / PITR ----------
 
 TEST(duostore_backup_manifest_plan) {
     TmpDir tmp;

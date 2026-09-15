@@ -1,4 +1,4 @@
-# Monitoring Consumers: Prometheus Rules and the Grafana Dashboard (roadmap §5.5)
+# Monitoring Consumers: Prometheus Rules and the Grafana Dashboard
 
 `GET /-/metrics` already speaks canonical Prometheus text with uniform
 `lights3_*` naming ([s3-protocol.md §7](../architecture/s3-protocol.md)); this document is its
@@ -95,7 +95,7 @@ Recording rules (shared by dashboard and alerts): `lights3:requests:rate5m`,
 | Row | Panels |
 | --- | --- |
 | Overview | four stats (req/s, 5xx ratio, P99, in flight); breakdown by method / class / exact status code, S3 error codes, byte throughput |
-| APIs | rate, 5xx and P99 per api × backend (roadmap §5.1) |
+| APIs | rate, 5xx and P99 per api × backend |
 | HTTP layer | connections, keep-alive reuse (requests ÷ accepted), timeouts by phase, malformed requests / TLS handshakes, rate-limit rejections |
 | Admission & pools | permit capacity/available/waiting, admission wait P50/P99, stall cuts, shared and backend pools, timer thread |
 | Storage backends | backend op P99 / errors / rate, metadata cache, **degradation flags** (uring / xattr fallback), localfs op errors |

@@ -146,7 +146,7 @@ std::shared_ptr<ccmd::command> make_delete() {
     return cmd;
 }
 
-// ---- mTLS bindings (backlog-sequence ⑥, docs/usage/tls.md §2.1): /-/admin/tls-identities ----
+// ---- mTLS bindings (docs/usage/tls.md §2.1): /-/admin/tls-identities ----
 
 constexpr const char* kTlsBase = "/-/admin/tls-identities";
 

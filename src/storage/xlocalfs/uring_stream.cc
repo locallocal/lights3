@@ -206,7 +206,7 @@ struct StreamState {
 
     void submit_rw(Slot& s, bool write) { submit_one(s, make_rw(write, s)); }
 
-    // WRITE(link) -> FSYNC pushed as one contiguous chain (roadmap §3.4 ③): the fsync
+    // WRITE(link) -> FSYNC pushed as one contiguous chain: the fsync
     // starts only after the write completes, one submission for both
     void submit_write_fsync_chain(Slot& w, Slot& f) {
         UringEngine::Sqe qs[2] = {make_rw(true, w), make_fsync(f)};

@@ -1,6 +1,6 @@
 # 构建与分发：版本号、安装树、deb/rpm、容器、回滚
 
-roadmap §6.3 的落地说明。覆盖五件事：二进制里的**版本与构建标识**、
+构建与分发的落地说明。覆盖五件事：二进制里的**版本与构建标识**、
 `cmake --install` **安装树**、CPack 生成的 **deb / rpm**、**Dockerfile + compose**
 （上手 demo，同时把 redis / tikv / rados 三条在开发机上长期 SKIP 的 e2e 路径跑起来），
 以及 `install.sh` 升级的**回滚与卸载**。各分发渠道共用同一份安装后逻辑
@@ -171,7 +171,7 @@ docker compose --profile redis up -d          # 再加 :9001 = duostore + redis 
 docker compose --profile tikv up -d           # :9002 = duostore + TiKV meta（pd0 + tikv0，镜像 lights3:full）
 docker compose --profile rados up -d          # :9003 = duostore + RADOS data（ceph/demo 单节点，镜像 lights3:full）
 docker compose --profile multi up -d          # :9004 = nginx 轮询两个网关（redis meta + RADOS data 共享，镜像 lights3:full）
-docker compose --profile multi run --rm e2e-multi   # 跨网关 5 分片 multipart 校验（multi-gateway-multipart §4 ②）
+docker compose --profile multi run --rm e2e-multi   # 跨网关 5 分片 multipart 校验
 ```
 
 | profile | 服务 | 说明 |
@@ -180,7 +180,7 @@ docker compose --profile multi run --rm e2e-multi   # 跨网关 5 分片 multipa
 | `redis` | `redis`（`redis:7-alpine`，AOF 开）、`lights3-redis` | 配置 `docker/lights3-redis.yaml` 只读挂进 `/etc/lights3/lights3.yaml` |
 | `tikv` | `pd0`、`tikv0`（`pingcap/{pd,tikv}:${TIKV_VERSION:-v8.5.2}`）、`lights3-tikv` | 单 PD 单 TiKV；`lights3:full` 由 `LIGHTS3_RADOS=ON LIGHTS3_TIKV=ON` 构建 |
 | `rados` | `ceph`（`${CEPH_IMAGE:-quay.io/ceph/demo:latest}`，固定 IP 172.28.0.10）、`rados-init`（建池一次性任务）、`lights3-rados` | `ceph.conf` + admin keyring 经 `ceph-etc` 卷只读共享；keyring 仅 root 可读，消费者以 root 运行 |
-| `multi` | `redis`、`ceph`、`rados-init`、`lights3-multi-a` / `-b`、`nginx-multi`、`e2e-multi` | 多网关共享存储（[archive/multi-gateway-multipart-design.md §2](../archive/multi-gateway-multipart-design.md) 支持的组合）：两网关同一 `docker/lights3-multi.yaml`（redis meta + RADOS data，`read_lease: 5s`），`LIGHTS3_GC_ENABLED` 仅 a 为 true；`nginx-multi.conf` 无粘连逐请求轮询；`e2e-multi.sh` 经 nginx 跑 5 分片 multipart，校验合成 ETag、GET 字节与两网关请求计数 |
+| `multi` | `redis`、`ceph`、`rados-init`、`lights3-multi-a` / `-b`、`nginx-multi`、`e2e-multi` | 多网关共享存储（经验证可跨网关的组合）：两网关同一 `docker/lights3-multi.yaml`（redis meta + RADOS data，`read_lease: 5s`），`LIGHTS3_GC_ENABLED` 仅 a 为 true；`nginx-multi.conf` 无粘连逐请求轮询；`e2e-multi.sh` 经 nginx 跑 5 分片 multipart，校验合成 ETag、GET 字节与两网关请求计数 |
 
 `LIGHTS3_GIT_COMMIT=$(git rev-parse --short=12 HEAD) docker compose build` 给
 镜像打 commit。数据卷：`lights3-data` 等命名卷，`docker compose down -v` 清空。
@@ -214,8 +214,7 @@ docker compose --profile e2e down -v
 
 ## 5. 多网关部署
 
-多个 `lights3` 进程指向同一份共享存储、前置负载均衡、无会话粘连
-（[archive/multi-gateway-multipart-design.md](../archive/multi-gateway-multipart-design.md)）。
+多个 `lights3` 进程指向同一份共享存储、前置负载均衡、无会话粘连。
 
 ### 5.1 支持矩阵
 

@@ -460,7 +460,7 @@ TEST(duostore_redis_list_uploads_hscan_batches) {
     m.close();
 }
 
-// Multi-gateway GC lease (docs/archive/gaps.md §6.1): of two instances with the same prefix only one wins the lease;
+// Multi-gateway GC lease: of two instances with the same prefix only one wins the lease;
 // the same owner renewing refreshes the TTL; another owner's expired lease can be taken over
 TEST(duostore_redis_gc_lease) {
     REDIS_OR_SKIP();
@@ -482,7 +482,7 @@ TEST(duostore_redis_gc_lease) {
     c.close();
 }
 
-// Multi-gateway read / write leases (roadmap §3.7, multi-gateway-multipart §4 ①):
+// Multi-gateway read / write leases:
 // the min across published leases wins field-wise; expiry (PX) retires a crashed
 // publisher; no publishers = nullopt; a lease written by an older build (no write
 // field) makes the write floor unknown while the read floor still folds; no
@@ -523,7 +523,7 @@ TEST(duostore_redis_read_lease) {
     b.close();
 }
 
-// Object metadata cache over a shared engine (roadmap §3.8): a peer gateway's overwrite is
+// Object metadata cache over a shared engine: a peer gateway's overwrite is
 // invisible to a cached reader for at most meta_cache_ttl (the documented bounded-staleness
 // contract), the published read lease is backdated by that TTL, and from_params enforces
 // "off unless configured, and then only with 0 < ttl < gc_grace"
@@ -636,7 +636,7 @@ TEST(duostore_redis_meta_cache_bounded_staleness) {
     CHECK(!DuoStoreConfig::from_params("p", on).meta_cache_feed);
 }
 
-// backlog-sequence ⑤ (docs/architecture/storage/duostore-meta-redis-design.md §3.6): with the cache on, a peer's
+// (docs/architecture/storage/duostore-meta-redis-design.md §3.6): with the cache on, a peer's
 // commit publishes on <prefix>inv and the local record drops within a message's
 // latency instead of at the TTL; a lost feed clears the cache on reconnect
 TEST(duostore_redis_cache_invalidation_feed) {
@@ -746,7 +746,7 @@ TEST(duostore_redis_cache_invalidation_feed) {
     sync_wait(b->close());
 }
 
-// roadmap §3.5: uz:<b> lex index. Pages walked with the composite cursor must concatenate to
+// uz:<b> lex index. Pages walked with the composite cursor must concatenate to
 // the full listing (which itself must match what was registered); a legacy table without an
 // index (simulated by deleting uz:<b>) still lists completely and gets its index rebuilt;
 // a stale index member (hash field gone) is skipped and healed
@@ -821,7 +821,7 @@ TEST(duostore_redis_list_uploads_lex_index) {
     m.close();
 }
 
-// roadmap §6.1: the redis.command fault point simulates a connection-level
+// the redis.command fault point simulates a connection-level
 // failure — a read retries once on a fresh connection (reconnect counted), a write
 // surfaces InternalError; the store keeps working once the point clears
 TEST(duostore_redis_fault_point) {
@@ -841,7 +841,7 @@ TEST(duostore_redis_fault_point) {
     a.close();
 }
 
-// backlog-sequence ⑧: redis has no gateway-side incremental mechanism -- a
+// redis has no gateway-side incremental mechanism -- a
 // backup is the logical dump plus the replication offset as the AOF restore marker
 TEST(duostore_redis_backup_marker_and_logical_chain) {
     REDIS_OR_SKIP();
@@ -866,7 +866,7 @@ TEST(duostore_redis_backup_marker_and_logical_chain) {
     m.close();
 }
 
-// ---------- multi-gateway multipart (docs/archive/multi-gateway-multipart-design.md §4 ②) ----------
+// ---------- multi-gateway multipart ----------
 // Two backends over one redis prefix and one shared data engine; the scenarios
 // live in unit/multi_gateway_suite.h and run identically over tikv
 

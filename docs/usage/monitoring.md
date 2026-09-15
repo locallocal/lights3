@@ -1,4 +1,4 @@
-# 监控消费侧：Prometheus 规则与 Grafana dashboard（roadmap §5.5）
+# 监控消费侧：Prometheus 规则与 Grafana dashboard
 
 `GET /-/metrics` 已是规范 Prometheus 文本格式、`lights3_*` 命名统一
 （[s3-protocol.md §7](../architecture/s3-protocol.md)），本篇是它的消费侧：零 C++ 改动，
@@ -90,7 +90,7 @@ Recording 规则（供 dashboard 与告警共用）：`lights3:requests:rate5m`�
 | 行 | 面板要点 |
 | --- | --- |
 | Overview | 四个 stat（req/s、5xx 率、P99、在途）；按 method / class / 精确状态码分布、S3 错误码、字节吞吐 |
-| APIs | api × backend 的速率、5xx、P99（roadmap §5.1） |
+| APIs | api × backend 的速率、5xx、P99 |
 | HTTP layer | 连接数、keep-alive 复用率（requests ÷ accepted）、超时分相、畸形请求 / TLS 握手、限流拒绝 |
 | Admission & pools | 许可容量/可用/排队、准入等待 P50/P99、停滞掐断、共享池与后端池、定时器线程 |
 | Storage backends | 后端 op P99 / 错误 / 速率、元数据缓存、**降级旗标**（uring / xattr fallback）、localfs op 错误 |

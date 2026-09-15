@@ -30,14 +30,13 @@ inline std::string strip_quotes(std::string s) {
 }
 
 // Both TSV and headers are line-oriented: CR/LF in metadata values would tear sidecar records apart, and is
-// also a response-header injection surface. First-class fields are rejected just like user-meta (docs/archive/gaps.md
-// §5.2)
+// also a response-header injection surface. First-class fields are rejected just like user-meta
 inline void reject_control_chars(std::string_view name, const std::string& v) {
     if (v.find('\n') != std::string::npos || v.find('\r') != std::string::npos)
         throw S3Error(S3ErrorCode::InvalidArgument, "Header '" + std::string(name) + "' must not contain line breaks.");
 }
 
-// Object tagging (roadmap §2.5): "k=v&k2=v2", both sides percent-encoded. AWS limits:
+// Object tagging: "k=v&k2=v2", both sides percent-encoded. AWS limits:
 // at most 10 tags, unique keys, key 1..128 chars, value 0..256 chars (decoded)
 inline std::vector<std::pair<std::string, std::string>> parse_tagging(const std::string& s) {
     std::vector<std::pair<std::string, std::string>> out;
@@ -74,7 +73,7 @@ inline std::string encode_tagging(const std::vector<std::pair<std::string, std::
 }
 
 // Shared by PutObject / CreateMultipartUpload: extracts Content-Type, x-amz-meta-*, and
-// the first-class S3 metadata fields (docs/archive/gaps.md §5.2), incl. x-amz-tagging
+// the first-class S3 metadata fields, incl. x-amz-tagging
 inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
     storage::ObjectMeta meta;
     if (auto ct = req.headers.get("Content-Type")) meta.content_type = *ct;
@@ -100,20 +99,18 @@ inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
         throw S3Error(S3ErrorCode::InvalidArgument,
                       "x-amz-website-redirect-location must start with '/', 'http://' or "
                       "'https://'.");
-    // x-amz-tagging validated and re-encoded canonically (roadmap §2.5)
+    // x-amz-tagging validated and re-encoded canonically
     if (!meta.tagging.empty()) meta.tagging = encode_tagging(parse_tagging(meta.tagging));
     return meta;
 }
 
-// True when the request carries any response-* override parameter (docs/archive/gaps.md §5.3;
-// the list lives next to apply_response_overrides in objects.cc). dispatch uses this to
-// refuse overrides on anonymous website reads — on a public bucket a crafted link could
-// otherwise hang an arbitrary Content-Disposition off the bucket's domain.
+// True when the request carries any response-* override parameter (the list lives next to apply_response_overrides in
+// objects.cc). dispatch uses this to refuse overrides on anonymous website reads — on a public bucket a crafted link
+// could otherwise hang an arbitrary Content-Disposition off the bucket's domain.
 bool has_response_override(const http::HttpRequest& req);
 
-// Counts the bytes a backend actually pulls through a body (usage accounting,
-// roadmap §3.9 ①): the post-commit delta must be what was written, not what the
-// client declared, and put_object/upload_part read to EOF by contract
+// Counts the bytes a backend actually pulls through a body (usage accounting): the post-commit delta must be what was
+// written, not what the client declared, and put_object/upload_part read to EOF by contract
 class ByteCountingReader final : public http::BodyReader {
 public:
     ByteCountingReader(std::unique_ptr<http::BodyReader> inner, uint64_t* counter)
@@ -176,7 +173,7 @@ inline std::pair<std::string, std::string> parse_copy_source(const std::string& 
     return {std::move(bucket), s.substr(slash + 1)};
 }
 
-// Attach the request's declared checksum to the outgoing meta (roadmap §2.2): the
+// Attach the request's declared checksum to the outgoing meta: the
 // header form fills the value up front (verification happens at body EOF, before any
 // backend commit); the trailer form installs a DigestCaptureReader plus a pending slot
 // the backend serializes once the body drains
@@ -213,7 +210,7 @@ inline std::optional<storage::PartChecksum> extract_part_checksum(http::HttpRequ
     return pc;
 }
 
-// GET/HEAD checksum echo (roadmap §2.2): only under an explicit
+// GET/HEAD checksum echo: only under an explicit
 // x-amz-checksum-mode: ENABLED, and only for full-object responses (AWS omits the
 // checksum on ranged GETs — a full-object digest against partial bytes would mislead)
 inline void apply_checksum_echo(const http::HttpRequest& req, const storage::ObjectMeta& meta,
@@ -228,7 +225,7 @@ inline void apply_checksum_echo(const http::HttpRequest& req, const storage::Obj
     resp.headers.set("x-amz-checksum-type", meta.checksum_type.empty() ? "FULL_OBJECT" : meta.checksum_type);
 }
 
-// PutObject/UploadPart require a request framing that carries a body (roadmap §2.5): a PUT
+// PutObject/UploadPart require a request framing that carries a body: a PUT
 // with neither Content-Length nor Transfer-Encoding has no body per RFC 9112 §6.3 --
 // silently committing an empty object out of a client bug is data loss, 411 is the honest
 // answer (MissingContentLength was previously dead code in the error table)

@@ -1,4 +1,4 @@
-// L2: STS AssumeRole endpoint (roadmap §2.6) — POST / with a form body, signed SigV4
+// L2: STS AssumeRole endpoint — POST / with a form body, signed SigV4
 // with service scope "sts" (exactly how SDKs call a custom STS endpoint). Mints
 // short-lived session credentials (AK/SK/token + TTL) that inherit the caller's
 // policy: this implementation has no role catalog, so RoleArn is accepted and echoed
@@ -65,7 +65,7 @@ Task<http::HttpResponse> S3Service::sts_endpoint(http::HttpRequest& req, const R
         // payload hash only inside the canonical request, so verify needs it up front
         std::string body = co_await handlers::read_body(req, 64 * 1024);
         auto ident = auth_.verify_sts(req, util::sha256_hex(body));
-        // a bound certificate must agree with the caller (backlog-sequence ⑥)
+        // a bound certificate must agree with the caller
         enforce_tls_tenant(req, ident);
         access_key = ident.access_key;
         if (!auth_.enabled()) throw S3Error(S3ErrorCode::AccessDenied, "STS requires authentication to be enabled.");

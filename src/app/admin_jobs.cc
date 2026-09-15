@@ -477,7 +477,7 @@ void AdminJobs::shutdown() {
     for (auto& t : threads) t.join();
 }
 
-// ---------- backend hot add / remove (backlog-sequence ⑦) ----------
+// ---------- backend hot add / remove ----------
 
 void AdminJobs::add_backend(const std::string& name, std::shared_ptr<storage::IStorageBackend> b) {
     std::lock_guard lk(m_);

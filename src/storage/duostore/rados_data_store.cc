@@ -231,7 +231,7 @@ Task<void> RadosDataStore::close() {
 
 // ---------- RadosChunkWriter: slice buffering + aio write_full double-buffered pipeline (§4) ----------
 
-// Owner xattr name (docs/archive/gaps.md §6.1): WriteHint.owner used to be dropped —
+// Owner xattr name: WriteHint.owner used to be dropped —
 // disaster recovery with all meta lost had no way to determine object ownership.
 // The three owner forms (codec::parse_pack_owner) are stored verbatim as the
 // value; offline salvage reverse-looks-up via rados getxattr
@@ -327,18 +327,17 @@ private:
         // crc computation (CPU) stays off the HTTP driver thread
         co_await store_->pool_->schedule();
         rados_ioctx_t ctx = io(store_->conn_);
-        // Batch-allocate contiguous runs with geometric growth (docs/archive/gaps.md §3.9,
-        // same strategy as fs ChunkWriter): interleaved dispatch across concurrent
-        // writers would defeat the manifest's run encoding. Segment allocation and
-        // pinning must precede make_pending: alloc_/pin_one can throw, and at that
-        // point there is no AioPending/completion yet to reclaim
+        // Batch-allocate contiguous runs with geometric growth (same strategy as fs ChunkWriter): interleaved dispatch
+        // across concurrent writers would defeat the manifest's run encoding. Segment allocation and pinning must
+        // precede make_pending: alloc_/pin_one can throw, and at that point there is no AioPending/completion yet to
+        // reclaim
         if (run_next_ == run_limit_) {
             run_len_ = run_len_ == 0 ? 1 : std::min<uint32_t>(run_len_ * 2, kMaxIdRun);
             run_next_ = store_->alloc_(Extent::Kind::kRados, run_len_);
             run_limit_ = run_next_ + run_len_;
         }
         const uint64_t file_id = run_next_++;
-        // Pin upon allocation (docs/archive/gaps.md §1.2): this slice's object lands at T0,
+        // Pin upon allocation: this slice's object lands at T0,
         // but the whole PUT commits meta only at T0+Δ. If Δ exceeds gc_grace, the
         // orphan scan sees an object that is "absent from refs, mtime beyond grace,
         // unpinned" and deletes it outright; the PUT then commits successfully and
@@ -354,7 +353,6 @@ private:
         p->permit = std::move(permit_);
         int r;
         if (int fe = fault::check("rados.submit")) {
-            // roadmap §6.1
             r = -fe;
         } else if (!owner_.empty()) {
             // Ownership persisted with the object (§6.1): a single-object write_op
@@ -471,11 +469,9 @@ public:
         }
         size_t want = size_t(std::min<uint64_t>({buf.size(), e.length - cur_off_, remaining_}));
         AioPending* p = make_pending(exec_, lat_);
-        // Buffer handover with the same strategy as the write side (docs/archive/gaps.md
-        // §3.9): the aio reads into the ticket's own buffer, copied to the caller
-        // after completion. If it wrote into buf directly, a read timeout/cancel
-        // destroying the coroutine frame along with the caller's buffer would let
-        // the remote completion still write through freed memory
+        // Buffer handover with the same strategy as the write side: the aio reads into the ticket's own buffer, copied
+        // to the caller after completion. If it wrote into buf directly, a read timeout/cancel destroying the coroutine
+        // frame along with the caller's buffer would let the remote completion still write through freed memory
         p->data.resize(want);
         int r = fault::check("rados.submit");
         if (r)
@@ -614,7 +610,7 @@ Task<void> RadosDataStore::remove(std::span<const Extent> extents) {
 }
 
 // The absence of a pack layer is a design boundary, not a debt (as characterized
-// in docs/archive/gaps.md §6.1): pack aggregation targets the local fs's per-file cost
+// in): pack aggregation targets the local fs's per-file cost
 // (inode/fd/directory entry), while small-object amplification on the RADOS side
 // is borne by BlueStore's min_alloc_size and the pool's replication policy;
 // stacking another pack layer at the gateway would only introduce cross-object

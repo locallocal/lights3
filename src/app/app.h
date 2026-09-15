@@ -67,7 +67,7 @@ public:
     // Full teardown in reverse dependency order. Idempotent, and safe after
     // a partial startup: only what exists is closed. Failures (a backend
     // close, the pool join) are logged and remembered: shutdown_clean() is
-    // false afterwards and run() exits with kExitUncleanShutdown (roadmap §4.5)
+    // false afterwards and run() exits with kExitUncleanShutdown
     void shutdown() noexcept;
     bool shutdown_clean() const { return shutdown_errors_.load() == 0; }
 
@@ -81,7 +81,7 @@ public:
     uint16_t bound_port() const;
     uint16_t admin_bound_port() const;
 
-    // Config hot reload (roadmap §4.4, docs/usage/config-reload.md): re-read the file,
+    // Config hot reload (docs/usage/config-reload.md): re-read the file,
     // validate it as at startup, apply the runtime-changeable subset, report the
     // rest. Driven by SIGHUP and POST /-/admin/config/reload. Never partial: a
     // file that fails validation changes nothing
@@ -92,7 +92,7 @@ public:
     // The assembled L2 service (null before start_server): tests drive dispatch
     // directly instead of running the listener
     const std::shared_ptr<s3::S3Service>& service() const { return service_; }
-    // Backend hot removal (backlog-sequence ⑦) closes the instance on a retiring
+    // Backend hot removal closes the instance on a retiring
     // thread once its in-flight requests drain; waits for every such thread
     // (shutdown does; tests call it to observe the close)
     void join_retiring();
@@ -112,28 +112,27 @@ private:
     // one reload at a time (SIGHUP and the admin API may race)
     std::mutex reload_mu_;
     std::shared_ptr<std::atomic<long>> stall_sec_;
-    // roadmap §5.3  // transfer_stall_timeout, read per
+    // transfer_stall_timeout, read per
     // request
     std::shared_ptr<http::AdmissionCounters> admission_counters_;
     Config cfg_;
     std::shared_ptr<ThreadPool> pool_;
     std::shared_ptr<MetricsRegistry> metrics_;
     std::map<std::string, std::shared_ptr<storage::IStorageBackend>> backends_;
-    // roadmap §5.1 decorators
+    // decorators
     std::map<std::string, std::shared_ptr<storage::IStorageBackend>> metered_;
     std::mutex retire_mu_;
-    // backlog-sequence ⑦: removed backends draining
+    // removed backends draining
     std::vector<std::thread> retiring_;
     // shutdown: stop waiting, close what is left
     std::atomic<bool> retire_stop_{false};
     std::shared_ptr<s3::CredentialStore> cred_store_;
     std::shared_ptr<s3::WebsiteStore> website_store_;
     std::shared_ptr<s3::CorsStore> cors_store_;
-    // backlog-sequence ⑥
     std::shared_ptr<s3::TlsIdentityStore> tls_identity_store_;
     std::shared_ptr<s3::LifecycleStore> lifecycle_store_;
     std::unique_ptr<s3::LifecycleRunner> lifecycle_runner_;
-    // roadmap §3.9: usage accounting, quotas, tenancy, audit (docs/architecture/multi-tenancy.md)
+    // usage accounting, quotas, tenancy, audit (docs/architecture/multi-tenancy.md)
     std::shared_ptr<s3::AuditLog> audit_;
     std::shared_ptr<s3::UsageTracker> usage_;
     std::shared_ptr<s3::QuotaStore> quota_store_;
@@ -155,7 +154,7 @@ private:
     // /-/admin/fsck|duostore|tier/<backend>[/<op>]
     std::unique_ptr<AdminJobs> admin_jobs_;
     std::unique_ptr<http::IHttpServer> server_;
-    // Separate admin listener (backlog-sequence ②): same driver (builtin when the
+    // Separate admin listener: same driver (builtin when the
     // data plane runs seastar, whose engine is a process singleton), same admission
     // gate and shutdown grace; runs on its own thread inside run()
     std::unique_ptr<http::IHttpServer> admin_server_;

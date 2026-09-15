@@ -114,7 +114,7 @@ public:
             if (fd_ < 0) open_next_chunk();
             size_t n = std::min<uint64_t>(store_->opt_.chunk_size - cur_len_, buf.size());
             if (ws_) {
-                // Pipelined chunk write (roadmap §3.4 ⑤): copy into the stream's block (a
+                // Pipelined chunk write: copy into the stream's block (a
                 // registered fixed buffer when available); up to write_depth writes stay
                 // in flight while the next body block is being received. The copy is
                 // required by the DataWriter contract -- buf is only valid for this call
@@ -144,7 +144,7 @@ public:
 
 private:
     void open_next_chunk() {
-        // Batch-allocate contiguous runs with geometric growth (docs/archive/gaps.md §3.9):
+        // Batch-allocate contiguous runs with geometric growth:
         // handing out ids one by one to concurrent writers interleaves the chunk
         // ids of the same object, defeating the manifest's run encoding and
         // bloating it instead. The first chunk takes 1 (zero waste for small
@@ -177,7 +177,7 @@ private:
 
     Task<void> seal_chunk() {
         if (ws_) {
-            // Final write + fdatasync as one linked chain (roadmap §3.4 ③); -EINVAL
+            // Final write + fdatasync as one linked chain; -EINVAL
             // (filesystem unsupported) is tolerated by the stream, matching fsync_file
             auto ws = std::move(ws_);
             co_await ws->finish(/*fdatasync=*/true);
@@ -300,7 +300,7 @@ public:
             crc_active_ = opt_.verify_chunk_crc && cur_off_ == 0 && remaining_ >= e.length;
             crc_acc_ = 0;
             if (opt_.uring)
-                // Read-ahead chunk stream (roadmap §3.4 ⑤①); fd ownership moves to it
+                // Read-ahead chunk stream; fd ownership moves to it
                 stream_ = std::make_unique<UringReadStream>(opt_.uring, fd, e.offset + cur_off_,
                                                             std::min<uint64_t>(e.length - cur_off_, remaining_));
             else
@@ -507,7 +507,7 @@ Task<std::vector<Extent>> FsDataStore::append_pack_records(std::span<const PackA
     out.reserve(items.size());
 
     // With the uring engine, the end-of-batch fdatasync runs off-lock on a dup of the
-    // pack fd (roadmap §3.4 ⑤): the slot std::mutex cannot be held across a suspension
+    // pack fd: the slot std::mutex cannot be held across a suspension
     // point. Correctness: a whole-file fdatasync needs no lock, and rotation/sealing
     // always run their own blocking sync inside the lock before closing the fd, so a
     // seal's reported file_size still corresponds to persisted bytes; this batch's own
@@ -532,7 +532,7 @@ Task<std::vector<Extent>> FsDataStore::append_pack_records(std::span<const PackA
             lk = std::unique_lock(slot->m);
         }
 
-        // Batching (docs/archive/gaps.md §2.13): per-item pwrite within the batch, fdatasync
+        // Batching: per-item pwrite within the batch, fdatasync
         // converges to one at the batch end. A crash can only lose records "not yet
         // returned to the caller" — swap/meta commits all happen after this function
         // returns, equivalent to a torn tail (§5.2's expected discard-on-restart form)
@@ -540,7 +540,6 @@ Task<std::vector<Extent>> FsDataStore::append_pack_records(std::span<const PackA
         auto sync_slot = [&] {
             if (!dirty) return;
             if (int fe = fault::check("duostore.pack.fdatasync")) {
-                // roadmap §6.1
                 errno = fe;
                 throw_errno("fdatasync pack");
             }
@@ -577,7 +576,7 @@ Task<std::vector<Extent>> FsDataStore::append_pack_records(std::span<const PackA
                 // another instance starting up uses it to distinguish "packs left by my
                 // previous generation" from "packs someone else is writing", avoiding
                 // catch-up sealing the latter and then rewriting or even deleting it as
-                // a low-liveness pack (docs/archive/gaps.md §1.4)
+                // a low-liveness pack
                 if (::flock(slot->fd, LOCK_EX | LOCK_NB) != 0)
                     LOG_WARN(
                         "duostore: cannot lock active pack {} ({}); concurrent-writer "
@@ -597,7 +596,6 @@ Task<std::vector<Extent>> FsDataStore::append_pack_records(std::span<const PackA
             size_t off = 0;
             while (off < rec.size()) {
                 if (int fe = fault::check("duostore.pack.pwrite")) {
-                    // roadmap §6.1
                     errno = fe;
                     throw_errno("pwrite pack record");
                 }
@@ -632,9 +630,8 @@ Task<std::vector<Extent>> FsDataStore::append_pack_records(std::span<const PackA
         if (r < 0 && r != -EINVAL)
             throw S3Error(S3ErrorCode::InternalError, std::string("fdatasync pack: ") + std::strerror(-r));
     }
-    // The seal's meta commit is submitted outside the slot lock (docs/archive/gaps.md
-    // §3.9); failure only warns, and (id,size) stays in the queue for later
-    // writes/close to retry — this batch's own writes are already safely on disk
+    // The seal's meta commit is submitted outside the slot lock; failure only warns, and (id,size) stays in the queue
+    // for later writes/close to retry — this batch's own writes are already safely on disk
     flush_seals(/*rethrow=*/false);
     co_return out;
 }
@@ -673,7 +670,7 @@ bool FsDataStore::slot_aged(const ActivePack& slot) const {
     return std::chrono::steady_clock::now() - slot.opened >= std::chrono::seconds(opt_.pack_max_age_sec);
 }
 
-// Age-based rotation (docs/archive/gaps.md §6.1): the write path only checks age when
+// Age-based rotation: the write path only checks age when
 // "there is a next record to write"; once writes stop, the active pack sits there
 // forever — exactly the low-write-volume scenario. GC calls this function once
 // per round to fill that gap.
@@ -751,7 +748,7 @@ Task<void> FsDataStore::remove(std::span<const Extent> extents) {
         if (e.kind != Extent::Kind::kChunk) {
             // Engine mismatch (fs data engine received a kRados extent): silently
             // skipping would let GC spin uselessly with no way to notice
-            // (docs/archive/gaps.md §4). Warn once to keep the reclaim loop from flooding logs
+            //. Warn once to keep the reclaim loop from flooding logs
             static std::atomic<bool> warned{false};
             if (!warned.exchange(true))
                 LOG_ERROR(
@@ -763,7 +760,7 @@ Task<void> FsDataStore::remove(std::span<const Extent> extents) {
         // idempotent: ENOENT ignored
         if (::unlink(chunk_path(e.file_id).c_str()) != 0 && errno != ENOENT) throw_errno("unlink chunk");
         // TB-scale objects have hundreds of thousands of extents: yield
-        // periodically instead of monopolizing one pool thread for minutes (gaps §2.11)
+        // periodically instead of monopolizing one pool thread for minutes
         if (++done % 1024 == 0) co_await pool_->schedule();
     }
     co_return;
@@ -771,7 +768,7 @@ Task<void> FsDataStore::remove(std::span<const Extent> extents) {
 
 uint64_t FsDataStore::stat_pack(uint64_t pack_id) {
     // Backfill the denominator for crash-leftover seal(0) before the GC decision
-    // (gaps §2.3b): one stat suffices, so a pack with unknown file_size does not
+    //: one stat suffices, so a pack with unknown file_size does not
     // unconditionally go into a full sequential-scan rewrite
     struct stat sb;
     if (::stat(pack_path(pack_id).c_str(), &sb) != 0) return 0;
@@ -845,7 +842,7 @@ Task<GcRewrite> FsDataStore::rewrite_pack(uint64_t pack_id) {
     if (::fstat(rfd, &sb) != 0) throw_errno("fstat pack");
     st.file_size = uint64_t(sb.st_size);
 
-    // Migration batching (gaps §2.13): K records delivered to the callback at
+    // Migration batching: K records delivered to the callback at
     // once — one fdatasync on the append side and owner-aggregated ref swaps on
     // the meta side, replacing the per-record "one fdatasync + one meta commit"
     constexpr size_t kMigrateBatchRecs = 64;

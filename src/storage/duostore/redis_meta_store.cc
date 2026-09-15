@@ -91,7 +91,7 @@ for _ = 1, nc do
   elseif t == 'zcard0' then
     if redis.call('ZCARD', key) ~= 0 then return 0 end
   else
-    -- Fetch the whole hash with a single HGETALL (docs/archive/gaps.md §3.9): previously HKEYS +
+    -- Fetch the whole hash with a single HGETALL: previously HKEYS +
     -- one HGET per field, so completing a 10k-part upload meant 10k redis.calls while the
     -- script's atomic execution monopolized the entire Redis instance.
     -- Sorting/concatenation still happens in Lua (matches the numeric part_no ordering of
@@ -123,8 +123,7 @@ for _ = 1, no do
   elseif k == 'pub' then redis.call('PUBLISH', key, a)
   end
 end
-return 1
-)lua";
+return 1)lua";
 
 // ---- list_objects script (§2.3): algorithm copied from rocks_meta_store.cc §4.4 — seek start
 // is max(prefix, start_after), skip a delimiter group by bumping its last byte +1, token lands
@@ -152,7 +151,7 @@ local min
 if start_after ~= '' and start_after >= prefix then min = '(' .. start_after
 else min = '[' .. prefix end
 
--- Paged scan (docs/archive/gaps.md §3.9): previously one ZRANGEBYLEX + one HGET per key, so
+-- Paged scan: previously one ZRANGEBYLEX + one HGET per key, so
 -- listing 1000 keys meant 2000 redis.calls while the script's atomic execution
 -- monopolized the entire Redis instance. Now keys are fetched a page at a time
 -- (dropping the page and re-seeking on group skips) and values are batch-HMGET'd at
@@ -209,8 +208,7 @@ while i <= #keys do
   end
   i = j + 1
 end
-return { truncated, next_token, objs, groups }
-)lua";
+return { truncated, next_token, objs, groups })lua";
 
 }  // namespace
 
@@ -237,7 +235,7 @@ RedisReplyPtr run_on(redisContext* ctx, const std::vector<std::string>& args, st
         lens[i] = args[i].size();
     }
     if (int fe = fault::check("redis.command")) {
-        // roadmap §6.1: connection-level failure
+        // connection-level failure
         *err = std::string("injected: ") + std::strerror(fe);
         return nullptr;
     }
@@ -271,10 +269,9 @@ class RedisBatch {
 public:
     explicit RedisBatch(RedisMetaStore& store) : store_(store) {}
 
-    // The CAS witness ships a SHA1 fingerprint instead of the whole old value (docs/archive/gaps.md
-    // §3.9): for large manifests the witness shrinks from MB-scale to 40 bytes and retry rounds
-    // no longer resend the full value; the comparison runs redis.sha1hex on the stored value
-    // inside the script. A SHA1 collision would require a chosen-prefix attack on two existing
+    // The CAS witness ships a SHA1 fingerprint instead of the whole old value: for large manifests the witness shrinks
+    // from MB-scale to 40 bytes and retry rounds no longer resend the full value; the comparison runs redis.sha1hex on
+    // the stored value inside the script. A SHA1 collision would require a chosen-prefix attack on two existing
     // validly-encoded values of the same field, and the payoff is merely defeating one's own CAS
     // — not a protection target
     void expect_eq(const std::string& key, std::string_view field, std::string_view expected) {
@@ -297,7 +294,7 @@ public:
     }
     void zrem(const std::string& key, std::string_view member) { add_op("zrem", key, member, {}); }
     void del(const std::string& key) { add_op("del", key, {}, {}); }
-    // Cross-gateway invalidation (backlog-sequence ⑤): PUBLISH runs inside the same
+    // Cross-gateway invalidation: PUBLISH runs inside the same
     // script execution, so a message exists iff the commit landed
     void publish(const std::string& channel, std::string_view payload) { add_op("pub", channel, payload, {}); }
 
@@ -364,7 +361,7 @@ RedisMetaStore::RedisMetaStore(RedisMetaOptions opt) : opt_(std::move(opt)) {
                                          "Connections re-established after a pooled redis connection went bad");
     m_sub_reconnects_ = opt_.metrics.counter(
         "lights3_duostore_redis_invalidation_subscribes_total",
-        "Invalidation feed (re)subscriptions (backlog-sequence ⑤); each one clears the local meta cache");
+        "Invalidation feed (re)subscriptions; each one clears the local meta cache");
 
     // URI parsing (§8): redis://[user][:pass]@host[:port][/db] or unix://<path>
     const std::string& uri = opt_.uri;
@@ -432,7 +429,7 @@ RedisMetaStore::RedisMetaStore(RedisMetaOptions opt) : opt_(std::move(opt)) {
     }
 
     // schema (§2.2): claim with SET NX; if it already exists, validate lineage + run version
-    // evolution (docs/archive/gaps.md §6.1: a stored version < current walks the migration chain,
+    // evolution (a stored version < current walks the migration chain,
     // > current rejects the downgrade — after an upgrade, old-version gateways are refused at
     // startup, naturally preventing mixed deployments from writing back and corrupting the new
     // layout). Every step in the chain must be idempotent: the shared engine has no global
@@ -501,7 +498,7 @@ void RedisMetaStore::close() {
     if (sub_thread_.joinable() && sub_thread_.get_id() != std::this_thread::get_id()) sub_thread_.join();
 }
 
-// ---------- Invalidation feed (backlog-sequence ⑤) ----------
+// ---------- Invalidation feed ----------
 
 std::string RedisMetaStore::invalidation_channel() const { return key("inv"); }
 
@@ -782,7 +779,7 @@ void RedisMetaStore::batch_refs(RedisBatch& bt, const DataRef& ref, bool add, st
 void RedisMetaStore::batch_pack_delta(RedisBatch& bt, const DataRef& ref, int sign, int64_t rec_overhead) {
     // Aggregate multiple extents of the same pack first, then two HINCRBYs per pack (§9.1,
     // adjusted in the same batch as the business script); each record counts payload + header
-    // overhead, the same accounting basis as file_size (docs/archive/gaps.md §2.3a)
+    // overhead, the same accounting basis as file_size
     // pack_id -> (bytes, recs)
     std::map<uint64_t, std::pair<int64_t, int64_t>> agg;
     for (const auto& e : ref.extents) {
@@ -801,7 +798,7 @@ void RedisMetaStore::enqueue_reclaim(RedisBatch& bt, const DataRef& ref, Reclaim
     if (ref.extents.empty()) return;
     // Pre-allocating seq (INCRBY segments) makes gcq enqueueing a pure write op, keeping the
     // script deterministic (§4). CAS retries waste seqs — harmless, seqs only need to be unique
-    // and monotonic. Oversized DataRefs are split into multiple entries (docs/archive/gaps.md §2.11):
+    // and monotonic. Oversized DataRefs are split into multiple entries:
     // GC per-batch decode memory stays bounded, and independent acks are harmless
     const int64_t ts = now_ms();
     for (size_t i = 0; i < ref.extents.size(); i += kReclaimMaxExtents) {
@@ -825,7 +822,7 @@ uint64_t RedisMetaStore::alloc_id(std::string_view counter_suffix, IdRange& r, u
         // have been handed out within the AOF everysec crash window but lost to counter
         // rollback. Wasting segments on crash/restart is harmless (only uniqueness and
         // monotonicity are needed); likewise the residue discarded on a segment switch
-        // (run batch allocation requires contiguity within a segment, docs/archive/gaps.md §3.9)
+        // (run batch allocation requires contiguity within a segment)
         uint64_t take = r.burned ? kIdSegment : 2 * kIdSegment;
         auto reply = exec({"INCRBY", key(counter_suffix), std::to_string(take)},
                           /*read_retry=*/false);
@@ -1182,7 +1179,7 @@ std::vector<PartRec> RedisMetaStore::list_parts(std::string_view b, std::string_
 std::vector<UploadInfo> RedisMetaStore::list_uploads(std::string_view b, std::string_view key_marker,
                                                      std::string_view id_marker, int limit, std::string_view prefix) {
     require_bucket(b);
-    // roadmap §3.5: uz:<b> is a score-0 ZSET over the very same fields as up:<b>
+    // uz:<b> is a score-0 ZSET over the very same fields as up:<b>
     // (<key>\0<id>), so ZRANGEBYLEX walks (key, upload_id) order from any cursor and the
     // page is HMGET'd from the hash -- the old path HSCAN'd the whole table for every
     // page. Index health is a cardinality comparison: tables written before the index
@@ -1439,7 +1436,7 @@ std::vector<std::pair<uint64_t, Reclaim>> RedisMetaStore::peek_reclaims(size_t m
         // first 8 bytes of the member are the seq
         uint64_t seq = codec::parse_be64(member.substr(0, 8));
         out.emplace_back(seq, codec::decode_reclaim(member.substr(8)));
-        // Cumulative extent cap (gaps §2.11): return at least 1 entry (over-fetched members are dropped in place)
+        // Cumulative extent cap: return at least 1 entry (over-fetched members are dropped in place)
         extents += out.back().second.extents.size();
         if (extents >= max_extents) break;
     }
@@ -1453,7 +1450,7 @@ void RedisMetaStore::ack_reclaim(uint64_t seq) {
     require_int("ack_reclaim", r.get());
 }
 
-// Batched ack (docs/archive/gaps.md §6.1 four-engine matrix): previously not overridden, GC paid one RTT
+// Batched ack (four-engine matrix): previously not overridden, GC paid one RTT
 // per entry — thousands of round trips per ack round after a large delete. One script, one RTT
 // deletes them all; a lost ack is harmless (gcq leftovers get retried, unlink is idempotent),
 // so the script needs no guards at all
@@ -1463,8 +1460,7 @@ void RedisMetaStore::ack_reclaims(std::span<const uint64_t> seqs) {
 for i = 1, #ARGV do
   redis.call('ZREMRANGEBYSCORE', KEYS[1], ARGV[i], ARGV[i])
 end
-return #ARGV
-)lua";
+return #ARGV)lua";
     static const std::string kSha = sha1_hex(kBody);
     std::vector<std::string> argv;
     argv.reserve(seqs.size());
@@ -1473,22 +1469,20 @@ return #ARGV
     require_int("ack_reclaims", r.get());
 }
 
-// Multi-gateway GC lease (docs/archive/gaps.md §6.1): SET NX semantics + same-owner renewal, atomic in a
+// Multi-gateway GC lease: SET NX semantics + same-owner renewal, atomic in a
 // single script. TTL is handled by Redis expiry — a crashed holder naturally yields
 bool RedisMetaStore::try_gc_lease(std::string_view owner, int64_t ttl_ms) {
     static const char* kBody = R"lua(
 local cur = redis.call('GET', KEYS[1])
 if cur and cur ~= ARGV[1] then return 0 end
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
-return 1
-)lua";
+return 1)lua";
     static const std::string kSha = sha1_hex(kBody);
     auto r = eval(kSha, kBody, {key("gc_lease")}, {std::string(owner), std::to_string(ttl_ms)}, /*read_retry=*/false);
     return require_int("try_gc_lease", r.get()) == 1;
 }
 
-// Multi-gateway read / write leases (roadmap §3.7; write side:
-// docs/archive/multi-gateway-multipart-design.md §4 ①): plain SET with PX —
+// Multi-gateway read / write leases (write side): plain SET with PX —
 // each gateway only writes its own key, no arbitration needed; a crashed
 // publisher's key expires. Value "<oldest_read_ms> <oldest_write_ms>"; the
 // write field is absent in leases written by builds before the write lease

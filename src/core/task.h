@@ -114,7 +114,7 @@ struct PromiseBase {
     // continuation there instead of doing a symmetric transfer — protocol logic thus
     // returns to the HTTP execution context; child tasks inherit it on co_await
     IExecutor* cont_executor = nullptr;
-    // Cancellation token (docs/architecture/concurrency.md §5, docs/archive/gaps.md §3.1): inherited down
+    // Cancellation token (docs/architecture/concurrency.md §5): inherited down
     // the co_await chain just like cont_executor. Once the request entry point attaches
     // this request's token via Task::with_cancel(), every co_await pool_->schedule()
     // along the whole L2/L3 coroutine chain picks it up automatically — suspension
@@ -167,7 +167,7 @@ std::coroutine_handle<> task_await_suspend(std::coroutine_handle<Promise> task, 
 
 // co_await current_cancel(): the token the current coroutine carries (inherited or
 // attached). Never suspends; used by the metered backend decorator to reach the
-// request-scoped payload (roadmap §5.1)
+// request-scoped payload
 struct CurrentCancel {
     CancelToken tok;
     bool await_ready() const noexcept { return false; }
@@ -231,7 +231,7 @@ public:
             return std::move(std::get<1>(r));
         }
     };
-    // Moved-from guard (docs/archive/gaps.md §4): keeping using an empty handle is a
+    // Moved-from guard: keeping using an empty handle is a
     // programming error; throwing is far more diagnosable than a null-pointer
     // dereference
     Awaiter operator co_await() && {
@@ -319,7 +319,7 @@ public:
             if (h.promise().error) std::rethrow_exception(h.promise().error);
         }
     };
-    // Moved-from guard, same as the primary template (docs/archive/gaps.md §4)
+    // Moved-from guard, same as the primary template
     Awaiter operator co_await() && {
         check_valid("co_await");
         return {h_};
@@ -375,7 +375,7 @@ inline void sync_wait(Task<void> t) {
     t.take_result();
 }
 
-// ---------- sync_wait_pumping: the request thread acts as an executor while it waits (docs/archive/gaps.md §2.10)
+// ---------- sync_wait_pumping: the request thread acts as an executor while it waits
 // ---------- Difference from sync_wait: while waiting, ex's queue is run on the current thread, and the body reader
 // switches blocking reads back onto this thread via resume_on(ex). For the synchronous drivers (builtin/httplib) only.
 
@@ -572,15 +572,12 @@ inline Task<void> when_all(std::vector<Task<void>> tasks) {
 }
 
 // ---------- Started<T>: an eagerly started task collected later (docs/architecture/concurrency.md §2.3) ----------
-// The building block of the drivers' double-buffered response pipeline (roadmap
-// §4.3 ①): start the backend read of the *next* chunk, write the current one to
-// the socket, then collect. One in-flight child per Started; the collector is
-// either a coroutine (co_await, async drivers and the pumped builtin loop) or a
-// plain thread (wait(), httplib's synchronous content provider). The child runs
-// on whatever thread its own suspension points resume it on; co_await resumes
-// the collector on the child's completing thread (or inline when the child
-// already finished), so a driver switches back to its connection context
-// afterwards exactly as after any co_await.
+// The building block of the drivers' double-buffered response pipeline: start the backend read of the *next* chunk,
+// write the current one to the socket, then collect. One in-flight child per Started; the collector is either a
+// coroutine (co_await, async drivers and the pumped builtin loop) or a plain thread (wait(), httplib's synchronous
+// content provider). The child runs on whatever thread its own suspension points resume it on; co_await resumes the
+// collector on the child's completing thread (or inline when the child already finished), so a driver switches back to
+// its connection context afterwards exactly as after any co_await.
 //
 // Lifetime: the child references this object until it completes. Destroying a
 // Started with an uncollected child blocks until the child finishes (the

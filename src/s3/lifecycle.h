@@ -1,4 +1,4 @@
-// Lifecycle minimal subset (roadmap §2.4): Expiration.Days +
+// Lifecycle minimal subset: Expiration.Days +
 // AbortIncompleteMultipartUpload.DaysAfterInitiation per bucket. Rules are managed
 // through ?lifecycle (root credential only), persisted as .sys/lifecycle/<bucket> JSON
 // via SysConfigStore, and enforced by a periodic LifecycleRunner scan. Everything else
@@ -69,7 +69,7 @@ public:
 
     // Test hook: overrides "now" for age decisions (backends stamp real times)
     void set_now_for_tests(std::function<std::chrono::system_clock::time_point()> fn) { now_ = std::move(fn); }
-    // Usage accounting (roadmap §3.9 ①): expirations and aborts adjust the counters
+    // Usage accounting: expirations and aborts adjust the counters
     // like their request-path twins
     void set_usage_tracker(std::shared_ptr<UsageTracker> u) { usage_ = std::move(u); }
     // Buckets the pass must leave alone (docs/architecture/s3-tables-design.md §8.2: table buckets

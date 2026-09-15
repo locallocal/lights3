@@ -1,5 +1,5 @@
 // Application-level maintenance jobs on a live gateway: the offline integrity
-// scrub (`run_scrub_once`, roadmap §3.1, backlog-sequence ③) plus the on-demand
+// scrub (`run_scrub_once`) plus the on-demand
 // background rounds the offline CLI already exposes (`lights3 duostore gc|scan`,
 // `lights3 tier scan|gc|reconcile`, docs/usage/cli.md §2.4) -- each run against the
 // application's backends, one job per backend at a time, on a dedicated thread,
@@ -108,7 +108,7 @@ public:
     // Wait for every running job (backends are closed by the caller first, which
     // makes a round abort promptly)
     void shutdown();
-    // Backend hot add / remove (backlog-sequence ⑦). remove returns false while a
+    // Backend hot add / remove. remove returns false while a
     // job runs on that backend (the caller refuses the removal); the outcomes are
     // dropped with the backend
     void add_backend(const std::string& name, std::shared_ptr<storage::IStorageBackend> b);

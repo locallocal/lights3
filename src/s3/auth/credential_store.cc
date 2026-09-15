@@ -73,7 +73,7 @@ CredentialPolicy policy_from_json_obj(const json& j) {
                 p.buckets.push_back(g.get<std::string>());
             }
         } else if (k == "prefixes") {
-            // Key prefix allowlist (docs/archive/gaps.md §5.10): without it, multi-tenant shared buckets degrade into
+            // Key prefix allowlist: without it, multi-tenant shared buckets degrade into
             // "one bucket per tenant"
             if (!v.is_array())
                 throw S3Error(S3ErrorCode::InvalidRequest, "policy.prefixes must be an array of key prefix strings.");
@@ -142,7 +142,7 @@ std::string serialize(const CredentialInfo& c, const std::optional<util::Aes256K
     // for parsing (no ready-made inverse for iso8601)
     j["created_unix"] = std::chrono::duration_cast<std::chrono::seconds>(c.created.time_since_epoch()).count();
     j["comment"] = c.comment;
-    // monotonic edit counter (roadmap §2.5), independent of "version"
+    // monotonic edit counter, independent of "version"
     j["rev"] = c.rev;
     if (c.policy) j["policy"] = policy_to_json_obj(*c.policy);
     if (!c.tenant.empty()) {
@@ -154,7 +154,7 @@ std::string serialize(const CredentialInfo& c, const std::optional<util::Aes256K
 
 bool parse_role(const std::string& role) { return parse_credential_role(role); }
 
-// ---- STS session objects (backlog-sequence ④): .sys/sts/<ak> ----
+// ---- STS session objects: .sys/sts/<ak> ----
 // Same secrecy rule as credential SKs: with a master key both the SK and the
 // token are AES-256-GCM sealed (version 2), without one they are plaintext
 // (version 1). An instance without the key cannot verify sessions minted by an
@@ -311,7 +311,7 @@ bool CredentialPolicy::allows_bucket(std::string_view bucket) const {
     if (buckets.empty() || bucket.empty()) return true;
     std::string b(bucket);
     for (auto& g : buckets)
-        // FNM_PATHNAME (docs/archive/gaps.md §5.10): without it '*' crosses '/', and when the same matcher is applied
+        // FNM_PATHNAME: without it '*' crosses '/', and when the same matcher is applied
         // to key prefixes, "logs/*" would admit "logs/a/b" as well
         if (::fnmatch(g.c_str(), b.c_str(), FNM_PATHNAME) == 0) return true;
     return false;
@@ -421,7 +421,7 @@ Task<std::shared_ptr<CredentialStore>> CredentialStore::load(std::shared_ptr<sto
                 bool was_plaintext = false;
                 if (auto c = deserialize(ak, body, store->master_key_, &was_plaintext)) {
                     if (was_plaintext && store->master_key_) plaintext_aks.push_back(c->access_key);
-                    // sync change detection (roadmap §2.5)
+                    // sync change detection
                     c->storage_etag = obj.etag;
                     store->creds_.emplace(c->access_key, std::move(*c));
                 } else {
@@ -486,7 +486,7 @@ std::optional<CredentialLookup> CredentialStore::lookup(std::string_view ak) con
         l.tenant_admin = it->second.tenant_admin;
         return l;
     }
-    // STS sessions (roadmap §2.6): expired entries are still returned — verify turns
+    // STS sessions: expired entries are still returned — verify turns
     // them into ExpiredToken, which tells the SDK to re-assume; a plain
     // InvalidAccessKeyId would read as a configuration error
     auto sit = sessions_.find(ak);
@@ -678,7 +678,7 @@ Task<CredentialInfo> CredentialStore::update(std::string_view ak, Update upd) {
     co_return c;
 }
 
-// ---------- STS sessions (roadmap §2.6) ----------
+// ---------- STS sessions ----------
 
 namespace {
 int64_t unix_secs(std::chrono::system_clock::time_point t) {
@@ -950,7 +950,7 @@ Task<void> CredentialStore::sync_now() {
 
     // Full set of dynamic-credential AKs currently in storage, with the listed object
     // ETag: an ETag differing from the one this instance last saw means the credential
-    // was edited elsewhere (policy update, roadmap §2.5) and must be re-read
+    // was edited elsewhere (policy update) and must be re-read
     // ak -> etag
     std::map<std::string, std::string, std::less<>> on_storage;
     if (co_await backend_->bucket_exists(kSysBucket)) {
@@ -984,7 +984,7 @@ Task<void> CredentialStore::sync_now() {
     }
 
     // Additions and edits: in storage but not in memory -> pull in; in memory with a
-    // different storage ETag -> re-read and replace (edit made elsewhere, roadmap §2.5)
+    // different storage ETag -> re-read and replace (edit made elsewhere)
     for (auto& [ak, etag] : on_storage) {
         bool changed = false;
         if (auto cur = find(ak)) {
@@ -1043,7 +1043,7 @@ Task<void> CredentialStore::sync_now() {
         }
     }
     if (added || removed) LOG_INFO("credential sync: {} added, {} revoked", added, removed);
-    // STS sessions (backlog-sequence ④): new ones minted elsewhere, expired ones reaped
+    // STS sessions: new ones minted elsewhere, expired ones reaped
     co_await sync_sessions(/*startup=*/false);
 }
 

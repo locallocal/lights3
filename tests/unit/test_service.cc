@@ -38,7 +38,7 @@ http::HttpRequest make_req(std::string method, std::string path, std::string bod
     }
     req.headers.add("Host", "localhost");
     // Real drivers always see Content-Length (or Transfer-Encoding) on body-bearing
-    // requests; PutObject/UploadPart reject its absence with 411 (roadmap §2.5)
+    // requests; PutObject/UploadPart reject its absence with 411
     req.headers.add("Content-Length", std::to_string(body.size()));
     if (!body.empty()) req.body = std::make_unique<http::StringBodyReader>(std::move(body));
     return req;
@@ -120,7 +120,7 @@ TEST(service_put_get_roundtrip) {
     CHECK(!head.stream_body);
 }
 
-// Listener split (http.admin_port, backlog-sequence ②): with the split on, the
+// Listener split (http.admin_port): with the split on, the
 // /-/ face answers only to admin-face requests, the data plane only to the other
 // listener, and the two probes to both; with it off every face is on every request
 TEST(service_admin_split_gates_faces) {
@@ -228,7 +228,7 @@ TEST(service_not_implemented_apis) {
     auto svc = make_service_noauth();
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
     // Explicitly unsupported subresources (docs/architecture/s3-protocol.md §1) get an explicit 501 instead of
-    // falling into the List/Get catch-all (lifecycle/tagging graduated with roadmap §2.4/§2.5)
+    // falling into the List/Get catch-all (lifecycle/tagging graduated with)
     for (auto* sub : {"acl", "policy", "versioning", "encryption", "replication"}) {
         auto resp = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{sub, ""}})));
         CHECK_EQ(resp.status, 501);
@@ -565,7 +565,7 @@ TEST(service_bucket_website_api) {
     auto store2 = sync_wait(WebsiteStore::load(backend, {}));
     CHECK(WebsiteStore::find(store2->snapshot(), "shop") != nullptr);
 
-    // Rejections: empty RoutingRules → 400 (rules are supported since roadmap §2.3,
+    // Rejections: empty RoutingRules → 400 (rules are supported since
     // but an empty container is a malformed config), bad suffix → 400, missing bucket → 404
     const std::string routed =
         "<WebsiteConfiguration><IndexDocument><Suffix>i.html</Suffix></IndexDocument>"
@@ -852,7 +852,7 @@ TEST(service_observability_endpoints) {
     CHECK_EQ(metrics.status, 200);
     CHECK(contains(metrics.small_body, "lights3_requests_total"));
     CHECK(contains(metrics.small_body, "lights3_request_duration_seconds_bucket"));
-    // roadmap §1.5: the histogram must cover up to the request_timeout default (300s),
+    // the histogram must cover up to the request_timeout default (300s)
     // otherwise everything over 10s piles into +Inf and large-object P99 is unreadable
     CHECK(contains(metrics.small_body, "le=\"300\""));
     CHECK(contains(metrics.small_body, "lights3_inflight_requests"));
@@ -1006,7 +1006,7 @@ TEST(service_vhost_bucket_name_validated) {
         CHECK_EQ(resp.status, 400);
         CHECK(contains(resp.small_body, "InvalidBucketName"));
     }
-    // Domain names are case-insensitive (RFC 4343, docs/archive/gaps.md §2.13): an uppercase Host
+    // Domain names are case-insensitive (RFC 4343): an uppercase Host
     // normalizes to the same bucket as lowercase ("upper" doesn't exist → 404), rather than
     // falling back to path-style or rejecting the uppercase bucket name -- either would make
     // the same URL point to different resources depending on case
@@ -1062,7 +1062,7 @@ TEST(service_valid_bucket_still_works_after_validation) {
     CHECK_EQ(body_of(get), "vh data");
 }
 
-// ---------- gaps §3.4: unsupported request headers must 501, not be silently swallowed ----------
+// ---------- unsupported request headers must 501, not be silently swallowed ----------
 // Silent acceptance is more dangerous than an error: on a 200 the client assumes the object
 // was encrypted/tagged/locked
 TEST(service_unsupported_headers_rejected) {
@@ -1074,7 +1074,7 @@ TEST(service_unsupported_headers_rejected) {
         req.headers.add(std::move(header), std::move(value));
         return sync_wait(svc.dispatch(std::move(req)));
     };
-    // x-amz-tagging left this list with roadmap §2.5 (now a first-class metadata field)
+    // x-amz-tagging left this list with (now a first-class metadata field)
     for (const char* h : {"x-amz-server-side-encryption", "x-amz-server-side-encryption-customer-algorithm",
                           "x-amz-object-lock-mode", "x-amz-grant-read"}) {
         auto resp = try_put(h, "whatever");
@@ -1087,7 +1087,7 @@ TEST(service_unsupported_headers_rejected) {
     CHECK_EQ(try_put("x-amz-acl", "public-read").status, 501);
 }
 
-// ---------- roadmap §2.6: STS tokens are now first-class (real flow tested in test_credentials.cc) ----------
+// ---------- STS tokens are now first-class (real flow tested in test_credentials.cc) ----------
 TEST(service_sts_token_no_longer_501) {
     auto svc = make_service_noauth();
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
@@ -1104,14 +1104,14 @@ TEST(service_sts_token_no_longer_501) {
     CHECK_EQ(q.status, 404);
 }
 
-// ---------- gaps §3.5: query whitelist; unknown params get 501 instead of a silent wrong answer ----------
+// ---------- query whitelist; unknown params get 501 instead of a silent wrong answer ----------
 TEST(service_query_whitelist) {
     auto svc = make_service_noauth();
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
     sync_wait(svc.dispatch(make_req("PUT", "/bkt/k", "0123456789")));
 
     // Exact gaps from the blacklist era: each silently degraded to "read the whole object".
-    // response-* was implemented in §5.3, partNumber in roadmap §2.5 -- unimplemented
+    // response-* was implemented in §5.3, partNumber in unimplemented
     // subresources must still 501
     for (auto q : {std::pair{"attributes", ""}, std::pair{"restore", ""}}) {
         auto resp = sync_wait(svc.dispatch(make_req("GET", "/bkt/k", "", {{q.first, q.second}})));
@@ -1132,7 +1132,7 @@ TEST(service_query_whitelist) {
     CHECK_EQ(pre.status, 200);
 }
 
-// ---------- gaps §3.8: /-/ internal endpoints must not shadow legitimate object keys under vhost ----------
+// ---------- /-/ internal endpoints must not shadow legitimate object keys under vhost ----------
 TEST(service_internal_endpoints_not_shadowing_vhost_keys) {
     S3Service svc(make_router(), SigV4Authenticator::build(AuthConfig{}), "s3.local");
     auto create = make_req("PUT", "/");
@@ -1165,7 +1165,7 @@ TEST(service_internal_endpoints_not_shadowing_vhost_keys) {
     CHECK_EQ(hh.status, 200);
 }
 
-// ---------- gaps §4: syntactically invalid Range ignored → 200; V2 token opaque round-trip ----------
+// ---------- syntactically invalid Range ignored → 200; V2 token opaque round-trip ----------
 TEST(service_malformed_range_ignored) {
     auto svc = make_service_noauth();
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
@@ -1211,7 +1211,7 @@ TEST(service_v2_token_opaque_roundtrip) {
     CHECK(contains(bad.small_body, "InvalidArgument"));
 }
 
-// ---------- gaps §3.9: DeleteObjects malformed inputs and versioned deletes ----------
+// ---------- DeleteObjects malformed inputs and versioned deletes ----------
 TEST(service_delete_objects_malformed_inputs) {
     auto svc = make_service_noauth();
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
@@ -1236,8 +1236,6 @@ TEST(service_delete_objects_malformed_inputs) {
     CHECK(contains(ver.small_body, "NotImplemented"));
     CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/a"))).status, 200);
 }
-
-// ---- docs/archive/gaps.md §5.2 / §5.3 / §5.5 / §5.9 ----
 
 TEST(service_first_class_object_metadata) {
     // First-class metadata (§5.2): previously all of it was dropped on PUT and never returned by
@@ -1656,7 +1654,7 @@ TEST(service_multipart_listing_pagination) {
     auto bad = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"uploads", ""}, {"upload-id-marker", "x"}})));
     CHECK_EQ(bad.status, 400);
 
-    // encoding-type=url (docs/archive/issues.md T13): previously the parameter was accepted but never
+    // encoding-type=url: previously the parameter was accepted but never
     // encoded -- a silent wrong answer
     sync_wait(svc.dispatch(make_req("POST", "/bkt/enc me.bin", "", {{"uploads", ""}})));
     auto encp = sync_wait(
@@ -1668,7 +1666,7 @@ TEST(service_multipart_listing_pagination) {
     CHECK_EQ(bad_enc.status, 400);
 }
 
-// Per-request timeout (config.h request_timeout_sec · docs/archive/issues.md T10): a timeout during
+// Per-request timeout (config.h request_timeout_sec): a timeout during
 // handler execution is broken by cooperative cancellation and converges to 503 SlowDown
 // (retryable) -- this contract previously had zero tests
 TEST(service_request_timeout_cancels_and_returns_503) {
@@ -1697,7 +1695,7 @@ TEST(service_request_timeout_cancels_and_returns_503) {
     CHECK_EQ(ok.status, 200);
 }
 
-// ---- roadmap §2.5: low-cost protocol gaps ----
+// ---- low-cost protocol gaps ----
 
 TEST(service_list_type_3_rejected) {
     auto svc = make_service_noauth();
@@ -1774,7 +1772,7 @@ TEST(service_list_uploads_arbitrary_delimiter) {
     CHECK(!contains(b, "<Key>x|1</Key>"));
 }
 
-// ---- roadmap §2.1: CORS ----
+// ---- CORS ----
 
 namespace {
 // Shared env for CORS tests: root credential + cors store on a memory backend
@@ -1944,7 +1942,7 @@ TEST(service_cors_actual_request_headers) {
     CHECK(!del.headers.has("Access-Control-Allow-Origin"));
 }
 
-// ---- roadmap §2.3: website hosting finishing touches ----
+// ---- website hosting finishing touches ----
 
 namespace {
 // Full-auth env with a website store (dynamic, backed by the shared memory backend)
@@ -2104,7 +2102,7 @@ TEST(service_website_anon_gates) {
              400);
 }
 
-// ---- roadmap §2.2: checksum persistence + echo ----
+// ---- checksum persistence + echo ----
 
 TEST(service_checksum_persist_and_echo) {
     auto svc = make_service_noauth();
@@ -2227,7 +2225,7 @@ TEST(service_checksum_multipart_composite) {
     CHECK_EQ(body_of(gr), "helloworld");
 }
 
-// ---- roadmap §2.5: GET/HEAD ?partNumber ----
+// ---- GET/HEAD ?partNumber ----
 TEST(service_get_object_part_number) {
     auto svc = make_service_noauth();
     svc.set_min_part_size(0);
@@ -2275,7 +2273,7 @@ TEST(service_get_object_part_number) {
     CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/pnb/simple", "", {{"partNumber", "2"}}))).status, 416);
 }
 
-// ---- roadmap §2.5: object tagging ----
+// ---- object tagging ----
 TEST(service_object_tagging) {
     auto svc = make_service_noauth();
     sync_wait(svc.dispatch(make_req("PUT", "/tagb")));
@@ -2332,7 +2330,7 @@ TEST(service_object_tagging) {
     CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/tagb/none", "", {{"tagging", ""}}))).status, 404);
 }
 
-// ---- roadmap §2.4: lifecycle minimal subset ----
+// ---- lifecycle minimal subset ----
 
 TEST(service_bucket_lifecycle_api) {
     // root credential + memory backend; lifecycle store added on top
@@ -2446,7 +2444,7 @@ TEST(lifecycle_runner_pass) {
     CHECK_EQ(s2.objects_expired, uint64_t{0});
 }
 
-// ---------- roadmap §5.3: website-plane events on /-/metrics, /-/metrics root gate ----------
+// ---------- website-plane events on /-/metrics, /-/metrics root gate ----------
 
 TEST(service_website_metrics_events) {
     AuthConfig acfg;

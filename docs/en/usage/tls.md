@@ -1,4 +1,4 @@
-# TLS: HTTPS on Every Driver, Certificate Hot Reload and TLS Knobs (roadmap §4.1)
+# TLS: HTTPS on Every Driver, Certificate Hot Reload and TLS Knobs
 
 > Status: all four items landed (2026-09-05). Code: `src/http/tls.{h,cc}` (the
 > shared OpenSSL layer) and each driver's hook (`src/http/drivers/*/`); unit tests
@@ -55,7 +55,7 @@ identity** — SigV4 remains the only identity source; mTLS is transport admissi
 ("without a certificate from the company CA you cannot even complete the
 handshake").
 
-**Certificate → credential / tenant identity mapping** (backlog-sequence ⑥).
+**Certificate → credential / tenant identity mapping**.
 With `auth.tls_identity: subject-cn | san-uri` one field of the verified client
 certificate becomes its **subject** (the subject CN, or the first URI-type
 subjectAltName — SPIFFE-style deployments use the latter) and takes part in

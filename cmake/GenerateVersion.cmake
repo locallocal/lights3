@@ -1,4 +1,4 @@
-# Build-time version stamp (roadmap §6.3): run in script mode (-P) from the
+# Build-time version stamp: run in script mode (-P) from the
 # lights3_version_gen custom target on every build, so the embedded git commit
 # tracks the checkout instead of the last configure. The file is rewritten only
 # when its content changes, which keeps the version object out of incremental

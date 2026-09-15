@@ -48,19 +48,19 @@ struct CloudProxyConfig {
     int retry_max = 3;
     int retry_base_ms = 100;
     int max_connections = 16;
-    // Connection-pool hygiene (roadmap §3.3): an idle connection older than
+    // Connection-pool hygiene: an idle connection older than
     // pool_idle_timeout is never reused (a NAT/remote that silently dropped it would
     // surface as periodic first-request retry spikes) and is closed by a light reaper;
     // pool_max_lifetime additionally retires connections by age at release (0 = off)
     // 0 = never expire idles
     int pool_idle_timeout_ms = 60'000;
     int pool_max_lifetime_ms = 0;
-    // Circuit breaker (roadmap §3.3): after `breaker_threshold` consecutive definitive
+    // Circuit breaker: after `breaker_threshold` consecutive definitive
     // failures (transport error or 5xx; 429 is neutral) requests fail fast with SlowDown
     // for breaker_cooldown, then a single half-open probe decides. 0 = disabled
     int breaker_threshold = 10;
     int breaker_cooldown_ms = 10'000;
-    // Total per-operation budget across the whole retry loop (roadmap §3.3): a retry is
+    // Total per-operation budget across the whole retry loop: a retry is
     // skipped when its backoff would land past the deadline. Caps the retry loop only —
     // an in-flight transfer is never cut mid-stream. 0 = no cap (legacy worst case
     // (retry_max+1) x request_timeout)
@@ -73,7 +73,7 @@ struct CloudProxyConfig {
     bool verify_etag = true;
     // data-plane BlockQueue capacity (backpressure watermark)
     size_t queue_cap_bytes = 1 << 20;
-    // Spool for length-less uploads (docs/archive/gaps.md §6.2): 0 = disabled (back to
+    // Spool for length-less uploads: 0 = disabled (back to
     // NotImplemented). The cap guards against abuse -- the spool lands on the gateway's
     // local disk, and AWS's 5GiB single-PUT limit is the natural default
     uint64_t spool_max_bytes = 5ull << 30;
@@ -106,13 +106,13 @@ public:
     Task<PutResult> put_object(std::string_view bucket, std::string_view key, ObjectMeta meta, http::BodyReader& body,
                                PutCondition cond = {}) override;
     Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) override;
-    // GET ?partNumber (roadmap §2.5): the remote owns the part layout — resolved with a
+    // GET ?partNumber: the remote owns the part layout — resolved with a
     // HEAD ?partNumber=N upstream (Content-Range + x-amz-mp-parts-count)
     Task<std::optional<ObjectPartExtent>> resolve_object_part(std::string_view bucket, std::string_view key,
                                                               int part_no) override;
-    // ?tagging forwarded to the remote (roadmap §2.5)
+    // ?tagging forwarded to the remote
     Task<void> set_object_tagging(std::string_view bucket, std::string_view key, std::string tagging) override;
-    // Same-backend copy fast path (docs/archive/gaps.md §6.2): remote server-side COPY
+    // Same-backend copy fast path: remote server-side COPY
     // (x-amz-copy-source) -- previously an intra-cloud copy would "download to the gateway
     // and upload back", doubling cross-network traffic and cost
     Task<std::optional<PutResult>> copy_object_fast(std::string_view src_bucket, std::string_view src_key,
@@ -141,7 +141,7 @@ private:
     // Defined in the .cc (used only in that TU)
     template <class Fn>
     Task<std::invoke_result_t<Fn>> control_io(Fn fn);
-    // Coroutine-level retry driver for idempotent control-plane requests (roadmap §3.3):
+    // Coroutine-level retry driver for idempotent control-plane requests:
     // per attempt — breaker gate, async pool lease, one blocking send via control_io —
     // then backoff via the TimerQueue (never sleeping on a pool thread), honoring the
     // remote's Retry-After and the per-op deadline. Returns the last Result after policy
@@ -151,7 +151,7 @@ private:
     // TimerQueue sleep + hop back to a pool thread (the timer callback thread must not
     // run business logic)
     Task<void> async_backoff(int64_t delay_ms);
-    // Outbound hop of the request's trace (roadmap §5.4): when the awaiting chain
+    // Outbound hop of the request's trace: when the awaiting chain
     // carries the request payload (storage/request_stats.h), appends `traceparent`
     // (the gateway's own span, so the remote logs it as parent) and `tracestate`.
     // Background work (tiered demotion, GC) carries no request: nothing is added
@@ -164,7 +164,7 @@ private:
     Task<PutResult> stream_upload(std::string raw_path, std::string raw_query, std::string host,
                                   std::string content_type, std::vector<std::pair<std::string, std::string>> extra,
                                   http::BodyReader& body, std::string resource, bool multipart_ctx);
-    // Length-less upload (docs/archive/gaps.md §6.2): AWS rejects bare chunked, so spool to a local
+    // Length-less upload: AWS rejects bare chunked, so spool to a local
     // temp file first to obtain the length, then go through stream_upload -- previously this
     // was a flat NotImplemented, making chunked PUTs without x-amz-decoded-content-length
     // entirely unusable on this backend

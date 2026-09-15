@@ -81,7 +81,7 @@ inline void case_gc_accounting(const MetaFactory& make) {
     CHECK_EQ(rs[0].second.extents.at(0).file_id, id1);
     // enqueue timestamp returned (GC consumer checks gc_grace, §9.1)
     CHECK(rs[0].second.enqueue_ms > 0);
-    // The entry's origin is persisted with the record (docs/archive/gaps.md §6.1): GC buckets its counts by it
+    // The entry's origin is persisted with the record: GC buckets its counts by it
     CHECK(rs[0].second.reason == ReclaimReason::kOverwrite);
     CHECK(!m->chunk_referenced(id1));
     CHECK(m->chunk_referenced(id2));
@@ -112,7 +112,7 @@ inline void case_gc_accounting(const MetaFactory& make) {
     m->close();
 }
 
-// gcq entry origins (docs/archive/gaps.md §6.1): each of the six origins records its own reason so GC can tell
+// gcq entry origins: each of the six origins records its own reason so GC can tell
 // whether reclaim pressure comes from overwrites, bulk deletes, or abandoned mpu parts. Assert per item
 // rather than by count -- the suite's cases share the underlying storage, and this case only looks at the entries it
 // created
@@ -450,7 +450,7 @@ inline void case_scan_refs(const MetaFactory& make) {
     m->close();
 }
 
-// gcq splitting (gaps §2.11): an oversized DataRef is split into multiple entries by kReclaimMaxExtents on enqueue;
+// gcq splitting: an oversized DataRef is split into multiple entries by kReclaimMaxExtents on enqueue;
 // peek's max_extents cap closes the batch early but returns at least 1 item; after full consumption the extent total is
 // conserved
 inline void case_reclaim_split_and_capped_peek(const MetaFactory& make) {
@@ -484,7 +484,7 @@ inline void case_reclaim_split_and_capped_peek(const MetaFactory& make) {
     m->close();
 }
 
-// swap_extents_batch (gaps §2.13 batched compaction): per-item CAS is independent -- an item with a mismatched
+// swap_extents_batch (batched compaction): per-item CAS is independent -- an item with a mismatched
 // version fails without writing, the rest take effect as usual (rocks/sqlite override with a single-batch commit,
 // redis/tikv use the default per-item forwarding)
 inline void case_swap_extents_batch(const MetaFactory& make) {
@@ -528,7 +528,7 @@ inline void case_swap_extents_batch(const MetaFactory& make) {
     m->close();
 }
 
-// list_uploads pushdown hints (roadmap §3.5): engines that honor `limit` must also honor the
+// list_uploads pushdown hints: engines that honor `limit` must also honor the
 // prefix and the key-marker-only cursor, otherwise the caller's own filtering can empty a page
 // and misreport end-of-list. Every engine must at least return a superset in (key, id) order
 inline void case_list_uploads_hints(const MetaFactory& make) {

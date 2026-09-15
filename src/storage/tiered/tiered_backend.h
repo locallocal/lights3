@@ -29,7 +29,7 @@
 
 namespace lights3::storage {
 
-// Prefix-level policy (roadmap §3.6 ②): glob over "bucket/key" (fnmatch, '*' crosses
+// Prefix-level policy: glob over "bucket/key" (fnmatch, '*' crosses
 // '/'), first match wins; cold_after_sec < 0 pins the objects (never demoted or evicted)
 struct TierRule {
     std::string glob;
@@ -63,7 +63,6 @@ struct TieredConfig {
     int64_t reconcile_interval_sec = 86400;
     bool reconcile_delete_orphans = false;
 
-    // ---- roadmap §3.6 ----
     // ① Incremental scanning: a full enumeration of the local side only every
     // full_scan_interval (enrolls untracked objects, recalibrates the quota books, does
     // crash recovery); rounds in between consume the time wheel. 0 = every round is full
@@ -107,14 +106,14 @@ struct TierReconcileStats {
     uint64_t orphans_skipped = 0;
     // local remote, cloud missing -> warn (data loss; never delete the stub)
     uint64_t refs_missing = 0;
-    // Quarantine ledger movement this round (roadmap §3.6 ④)
+    // Quarantine ledger movement this round
     // findings seen for the first time (logged at WARN/ERROR)
     uint64_t quarantined_new = 0;
     // ledger entries whose finding disappeared
     uint64_t quarantined_resolved = 0;
 };
 
-// One scan round's report (roadmap §3.6 ①)
+// One scan round's report
 struct TierScanStats {
     // full enumeration vs time-wheel round
     bool full = false;
@@ -135,7 +134,7 @@ struct TierScanStats {
     uint64_t need_remaining = 0;
 };
 
-// Quarantine ledger entry (roadmap §3.6 ④): a reconciliation finding that is repeated
+// Quarantine ledger entry: a reconciliation finding that is repeated
 // every round until an operator acts on it
 struct QuarantineEntry {
     // refs_missing | foreign
@@ -173,7 +172,7 @@ public:
                                PutCondition cond = {}) override;
     Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) override;
     // Tier state + local bytes from the local side, followed by the local engine's own
-    // layout (roadmap §6.2 `lights3-ctl object inspect`)
+    // layout (`lights3-ctl object inspect`)
     Task<std::optional<ObjectLayout>> inspect_object(std::string_view bucket, std::string_view key) override;
     Task<void> delete_object(std::string_view bucket, std::string_view key) override;
     Task<void> set_object_tagging(std::string_view bucket, std::string_view key, std::string tagging) override;
@@ -223,7 +222,7 @@ public:
     // findings go to the quarantine ledger and stop re-alerting (④)
     Task<TierReconcileStats> run_reconcile_once();
 
-    // ---- Quarantine ledger (roadmap §3.6 ④; CLI `lights3 tier quarantine`) ----
+    // ---- Quarantine ledger (CLI `lights3 tier quarantine`) ----
     std::vector<QuarantineEntry> quarantine_list() const;
     // Drop an entry without touching data (the operator judged it benign / fixed it by hand)
     bool quarantine_forget(std::string_view bucket, std::string_view key);
@@ -243,7 +242,7 @@ private:
     friend class RangeTeeReader;
     friend struct InflightRelease;
 
-    // ---- Data-plane accounting (docs/archive/gaps.md §7): measure only the four ops where tiered
+    // ---- Data-plane accounting: measure only the four ops where tiered
     // itself has tiering logic; purely delegated multipart/head etc. are covered by
     // local_'s own metrics ----
     enum class Op : size_t { kGet, kPut, kDelete, kList };
@@ -336,7 +335,7 @@ private:
     Task<void> demote_quiet(std::string bucket, std::string key);
     Task<void> promote_quiet(std::string bucket, std::string key);
     Task<void> scan_and_gc();
-    // Incremental quota maintenance (docs/archive/gaps.md §6.3 / docs/architecture/storage/tiered-design.md):
+    // Incremental quota maintenance (docs/architecture/storage/tiered-design.md):
     // PUT/DELETE adjust the estimate in place and kick an early scan round past the
     // watermark; the full scan recalibrates against measured values
     void note_local_delta(int64_t delta);
@@ -381,7 +380,7 @@ private:
 
     // Semaphores uniformly take the pool executor: release posts the waiter's continuation
     // back to a pool thread, eradicating the path where "in-place resume pins blocking IO
-    // on the HTTP response thread" (docs/archive/gaps.md §2.4)
+    // on the HTTP response thread"
     ThreadPoolExecutor pool_exec_{*pool_};
     std::vector<std::unique_ptr<AsyncSemaphore>> key_locks_;
     // max_concurrent_transfers throttle (docs/architecture/storage/tiered-design.md §5.1)

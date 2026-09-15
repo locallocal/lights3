@@ -200,7 +200,7 @@ extent kind 随 `data_kind` 取 kRados（硬编码 kChunk 会被本店 `remove` 
 | write_full/read/remove 负值 | 500 + `lights3_duostore_rados_op_errors_total` 计数（remove 的幂等 -ENOENT 不计） |
 | -ETIMEDOUT（配置了 op 超时） | op 结果不明：writer 进 `failed_` 态，不重试不复用；孤儿由扫描收敛 |
 | 应用层重试 | **不做**：write_full 幂等且 librados 对暂时不可达的 OSD/PG 内部排队重试（默认不设 op 超时，挂起优于误报） |
-| 故障注入 | `core/fault.h:fault::check("rados.submit")`（roadmap §6.1）：writer 的 `start_flush`、reader 的 `rados_aio_read`、`remove` 的 `rados_aio_remove` 三处提交前各过一次，命中即以 `-errno` 代替提交返回值走同一错误路径 |
+| 故障注入 | `core/fault.h:fault::check("rados.submit")`：writer 的 `start_flush`、reader 的 `rados_aio_read`、`remove` 的 `rados_aio_remove` 三处提交前各过一次，命中即以 `-errno` 代替提交返回值走同一错误路径 |
 
 崩溃窗口（对照 fs 版大幅收窄）：write_full 单对象原子 ⇒ 无半截对象；网关
 崩溃只留无主对象（refs 无记录）→ 孤儿扫描回收；无 pack ⇒ 无 torn tail、无

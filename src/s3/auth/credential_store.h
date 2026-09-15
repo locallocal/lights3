@@ -33,20 +33,20 @@ enum class CredSource { kStatic, kFile, kDynamic };
 
 struct CredentialInfo {
     std::string access_key;
-    // wiped on destruction (docs/archive/gaps.md §4)
+    // wiped on destruction
     util::SecretString secret_key;
     CredSource source = CredSource::kDynamic;
     std::string comment;
     std::chrono::system_clock::time_point created;
     // file/dynamic only; static credentials are always unrestricted
     std::optional<CredentialPolicy> policy;
-    // Edit propagation (roadmap §2.5): rev is a monotonic edit counter persisted in the
+    // Edit propagation: rev is a monotonic edit counter persisted in the
     // JSON (distinct from "version", which encodes the encryption format); storage_etag
     // is the credential object's ETag as last seen by this instance — sync re-reads an
     // AK only when the listed ETag differs, so policy edits propagate cheaply
     uint64_t rev = 1;
     std::string storage_etag;
-    // Multi-tenancy (roadmap §3.9 ③, docs/architecture/multi-tenancy.md §4): tenant the credential
+    // Multi-tenancy (docs/architecture/multi-tenancy.md §4): tenant the credential
     // belongs to (empty = legacy credential: no ownership filter, as before) and its
     // role inside that tenant. Static credentials never carry a tenant (they are root)
     std::string tenant;
@@ -59,7 +59,7 @@ struct CredentialInfo {
 // Reserved system bucket and object key prefix (docs/architecture/credential-management.md §4.1)
 inline constexpr std::string_view kSysBucket = ".sys";
 inline constexpr std::string_view kCredPrefix = "credentials/";
-// STS session objects (backlog-sequence ④): .sys/sts/<session-ak>, shared by every
+// STS session objects: .sys/sts/<session-ak>, shared by every
 // instance on the same backend
 inline constexpr std::string_view kStsPrefix = "sts/";
 // Session access keys carry this prefix (never root, never a parent for AssumeRole)
@@ -84,7 +84,7 @@ public:
     ~CredentialStore() { shutdown_background(); }
 
     // ---- ICredentialProvider (verification hot path, read lock) ----
-    // SK and policy snapshot returned in one call (docs/archive/gaps.md §3.7): dispatch's authorization uses the
+    // SK and policy snapshot returned in one call: dispatch's authorization uses the
     // snapshot returned by verify, so an in-flight revocation cannot make the policy vanish
     std::optional<CredentialLookup> lookup(std::string_view ak) const override;
     bool has_credentials() const override;
@@ -108,7 +108,7 @@ public:
     // Nonexistent -> InvalidAccessKeyId; static/file credentials -> MethodNotAllowed (managed by config/file)
     Task<void> remove(std::string_view ak);
 
-    // In-place edit of a dynamic credential (roadmap §2.5): fields present are replaced
+    // In-place edit of a dynamic credential: fields present are replaced
     // (set_policy + empty policy = clear). Write-through with a rev bump; other
     // instances pick the edit up via the sync ETag comparison. Same source rules as
     // remove (static/file -> MethodNotAllowed, missing -> InvalidAccessKeyId)
@@ -123,7 +123,7 @@ public:
     };
     Task<CredentialInfo> update(std::string_view ak, Update upd);
 
-    // ---- STS session credentials (roadmap §2.6, multi-instance since backlog-sequence ④) ----
+    // ---- STS session credentials (multi-instance since) ----
     // AssumeRole mints a session AK/SK/token with a TTL, inheriting the CALLER's policy
     // — this implementation has no role catalog, so a session can never exceed the
     // identity that minted it. Session AKs are L3SA-prefixed and are never root; a
@@ -192,7 +192,7 @@ private:
 
     mutable std::shared_mutex mu_;
     std::map<std::string, CredentialInfo, std::less<>> creds_;
-    // STS sessions (roadmap §2.6): ak -> {sk, token, expiry, policy snapshot}
+    // STS sessions: ak -> {sk, token, expiry, policy snapshot}
     struct SessionEntry {
         util::SecretString secret_key;
         std::string token;

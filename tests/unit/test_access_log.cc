@@ -1,4 +1,4 @@
-// roadmap §5.2: the logging system — text/JSON access lines through the full
+// the logging system — text/JSON access lines through the full
 // dispatch (quoted path, remote/bucket/UA/TTFB slots, end-of-stream emission with
 // the bytes actually sent), the slow-request WARN channel, the JSON envelope of
 // ordinary log lines, and the async + rotating-file sink
@@ -302,7 +302,7 @@ TEST(logger_async_rotating_file) {
     std::filesystem::remove_all(dir);
 }
 
-// roadmap §5.4: trace correlation — an inherited traceparent keeps the client's
+// trace correlation — an inherited traceparent keeps the client's
 // trace id and records the caller's span as parent; without one the gateway starts
 // a trace; the response carries traceresponse either way
 TEST(access_log_trace_fields) {

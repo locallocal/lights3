@@ -130,7 +130,7 @@ private:
     void probe_features(const io_uring_params& p, UringFeatures& feat);
     void register_resources(const UringOptions& opt, UringFeatures& feat);
     void push_sqe_locked(const Sqe& d, uint64_t user_data);
-    // Hand [submitted_, sq_tail_) to the kernel (batched submission, docs/archive/gaps.md §6.3).
+    // Hand [submitted_, sq_tail_) to the kernel (batched submission).
     // Callers other than the on-duty flusher return immediately -- their SQEs are carried
     // along by the one on duty, saving their own io_uring_enter. Returns 0 = success;
     // >0 = unrecoverable errno (at that point failed_ is set and all in-flight Ops except
@@ -266,7 +266,7 @@ UringRing::UringRing(unsigned index, ThreadPool* pool, const UringOptions& opt, 
     register_resources(opt, feat);
 }
 
-// Capability probing (docs/archive/gaps.md §6.3): IORING_REGISTER_PROBE is available since 5.6,
+// Capability probing: IORING_REGISTER_PROBE is available since 5.6,
 // exactly the version where IORING_OP_READ/WRITE landed -- probe failure is treated as
 // 5.1-5.5 and falls back to READV/WRITEV. Probe honestly instead of "try once and check for
 // -EINVAL": that failure would land on some real request

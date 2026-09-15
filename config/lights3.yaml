@@ -20,18 +20,18 @@ http:
   io_threads: 4            # beast=IO thread count / httplib=thread pool / seastar=shard count;
                            # builtin (thread-per-connection) ignores it and WARNs when set explicitly
   max_header_size: 16KiB
-  # ---------- Timeout family (roadmap §4.2, docs/architecture/http-adapter.md §2.2) ----------
+  # ---------- Timeout family (docs/architecture/http-adapter.md §2.2) ----------
   idle_timeout: 60s          # keep-alive: waiting for the next request on an idle connection
   # header_timeout: 30s      # a new connection's request line + headers (slowloris bound)
   # body_timeout: 60s        # inactivity bound on one request-body read (slow uploads)
   # write_timeout: 60s       # inactivity bound on one response write (slow downloads)
   # max_requests_per_connection: 1024   # then Connection: close (LB re-balancing); 0 = unlimited
-  # metrics_access: anonymous  # root = GET /-/metrics must be signed by a root credential (roadmap §5.3, hot-reloadable)
+  # metrics_access: anonymous  # root = GET /-/metrics must be signed by a root credential (hot-reloadable)
   # Minimum size for non-final multipart parts (AWS fixes it at 5MiB). 0 = no limit —
   # relax it when fronted by toolchains that don't honor this rule, or when this
   # instance is merely a proxy for another lights3
   min_part_size: 5MiB
-  # ---------- TLS (roadmap §4.1, docs/usage/tls.md) ----------
+  # ---------- TLS (docs/usage/tls.md) ----------
   # HTTPS is enabled only when both are given; every driver supports it (seastar
   # through seastar::tls, see docs/usage/tls.md §4). SigV4 UNSIGNED-PAYLOAD integrity
   # relies on transport-layer encryption; strongly recommended for public
@@ -48,12 +48,12 @@ http:
   #   - hosts: "s3.example.com, *.s3.example.com"
   #     cert: /etc/lights3/s3.example.com.crt
   #     key: /etc/lights3/s3.example.com.key
-  # ---------- Shutdown/backpressure boundaries (docs/archive/gaps.md §7, values are defaults) ----------
+  # ---------- Shutdown/backpressure boundaries (values are defaults) ----------
   # drain_limit: 4MiB          # max request body drained before erroring (beyond it, close the connection)
   # trailer_max_size: 16KiB    # chunked trailer section cap (builtin/seastar hand-written parsers)
   # io_chunk_size: 64KiB       # streaming read/write block size (one chunk is read ahead of the socket)
   # sendfile: true             # builtin driver: file-backed fixed-length plaintext responses go kernel-side
-  #                            # (sendfile(2)); TLS / chunked / non-file bodies always use the read path (roadmap §4.3)
+  #                            # (sendfile(2)); TLS / chunked / non-file bodies always use the read path
   # body_queue_cap: 256KiB     # push-to-pull queue capacity, i.e. backpressure watermark (httplib only)
   # shutdown_grace: 10s        # grace period waiting for in-flight requests on shutdown (driver
   #                            # connection drain AND admission-permit drain; unclean -> exit code 3)
@@ -63,7 +63,7 @@ runtime:
   io_threads: 16           # blocking IO thread pool size
   max_inflight_requests: 1024
 
-# ---------- Per-client rate limits (roadmap §4.2, docs/architecture/http-adapter.md §2.3) ----------
+# ---------- Per-client rate limits (docs/architecture/http-adapter.md §2.3) ----------
 # Token bucket + concurrency cap per source IP (before signature verification) and per
 # access key (after it). 0 = off. Over the limit: 503 SlowDown + Retry-After: 1
 # ratelimit:
@@ -108,13 +108,13 @@ auth:
 #     error_key: error.html      # served as anonymous 4xx/5xx body (original status kept);
 #                                # omit for a built-in minimal HTML error page
 #     max_rps: 0                 # anonymous requests/second for this bucket (token bucket,
-#                                # burst = rps); 0 = unlimited (roadmap §2.3)
+#                                # burst = rps); 0 = unlimited
 #     redirect_all_host: ""      # non-empty: every anonymous request 301s to this host
 #     redirect_all_protocol: ""  # http|https; empty = follow the request scheme
 #   RoutingRules and CORS/lifecycle rules are managed via the ?website / ?cors /
 #   ?lifecycle APIs (root only) and persisted under .sys/.
 
-# ---------- Lifecycle enforcement (roadmap §2.4) ----------
+# ---------- Lifecycle enforcement ----------
 # How often the runner walks buckets with ?lifecycle rules, expiring objects
 # (Expiration.Days) and aborting stale multipart uploads
 # (AbortIncompleteMultipartUpload.DaysAfterInitiation).
@@ -146,7 +146,7 @@ auth:
 #     delete_enabled: false        # false = run only commits snapshot expiry, deletes nothing
 #     tombstone_ttl: 24h           # dropped-table tombstones are cleaned after this; 0s = keep
 
-# ---------- Usage accounting / quotas (roadmap §3.9, docs/architecture/multi-tenancy.md §2/§7) ----------
+# ---------- Usage accounting / quotas (docs/architecture/multi-tenancy.md §2/§7) ----------
 # Per-bucket object/byte counters kept by the gateway (updated on every write,
 # persisted to .sys/usage/, recounted by a periodic full listing). Bucket quotas
 # (?quota / lights3-ctl quota) and tenant quotas (lights3-ctl tenant) are enforced on them.
@@ -156,7 +156,7 @@ auth:
 #   reconcile_interval: 1d      # full recount of every bucket; 0s = on demand only (lights3-ctl usage --rescan)
 #   reconcile: true             # multi-gateway: true on ONE instance only (bootstrap + periodic recounts)
 
-# ---------- Audit log (roadmap §3.9 ④, docs/architecture/multi-tenancy.md §5) ----------
+# ---------- Audit log (docs/architecture/multi-tenancy.md §5) ----------
 # JSON lines in a dedicated rotating file: credential/tenant/quota lifecycle,
 # STS sessions, bucket create/delete, quota rejections; data_plane adds one
 # record per S3 request. Empty path = off.
@@ -174,14 +174,14 @@ backends:
     staging: ./data/staging            # must be on the same filesystem as root (rename atomicity);
                                        # default <root>/.lights3-staging
     # queue_depth: 256                 # xlocalfs only: io_uring SQ depth
-    # -- roadmap §3.5 (docs/architecture/storage/localfs.md §2/§3/§6/§12; values are defaults) --
+    # -- localfs (docs/architecture/storage/localfs.md §2/§3/§6/§12; values are defaults) --
     # require_xattr: false             # true = refuse to start (and to write) on a filesystem without user xattrs
     # sidecar: sync                    # sync | async (sidecar written after the response) | lazy (none while the xattr succeeds)
     # list_meta_concurrency: 8         # pool workers sharing one listing page's stat+getxattr
     # list_cache_entries: 1M           # per-directory sorted-entry cache budget (entries; 0 = off)
     # list_cache_min_dir_entries: 256  # directories smaller than this are never cached
     # sidecar_scan_interval: 1d        # orphan-sidecar sweep period; 0s = off
-    # -- roadmap §3.8 object metadata cache (docs/architecture/storage/localfs.md §5.1) --
+    # -- object metadata cache (docs/architecture/storage/localfs.md §5.1) --
     # meta_cache_entries: 64K          # cached object records (0 = off); a hit spares the xattr/sidecar read
     # meta_cache_ttl: 0s               # entry expiry; 0s = never (write paths invalidate exactly)
     # meta_cache_validate: true        # HEAD re-checks the inode stamp with one stat; false = trust until invalidated/expired
@@ -199,13 +199,13 @@ backends:
   #   # -- Background GC and orphan scan (all effective; docs/architecture/storage/duostore-design.md §9) --
   #   gc_interval: 300s                # reclaim period; 0s = disable background GC
   #   gc_enabled: true                 # false = non-designated instance in a multi-gateway setup: exactly one gateway runs GC,
-  #                                    # the orphan scan and mpu_ttl cleanup (docs/archive/multi-gateway-multipart-design.md, docs/usage/deployment.md §5)
+  #                                    # the orphan scan and mpu_ttl cleanup (docs/usage/deployment.md §5)
   #   gc_grace: 300s                   # delayed-deletion grace (defense in depth against concurrent reads)
   #   read_lease: 5s                   # multi-gateway read / write lease publish period (docs/architecture/storage/duostore-core.md §8.5): mandatory
   #                                    # when several gateways share redis/tikv meta + rados data, 0s = off (then gc_grace must exceed
   #                                    # the longest expected GET and upload); no effect on rocksdb/sqlite
   #   orphan_scan_interval: 1d
-  #   # -- roadmap §3.8 object metadata cache (docs/architecture/storage/duostore-core.md §7.1) --
+  #   # -- object metadata cache (docs/architecture/storage/duostore-core.md §7.1) --
   #   meta_cache_entries: 64K          # cached ObjectRec budget; default 64K on rocksdb/sqlite, 0 on redis/tikv
   #   meta_cache_ttl: 0s               # required (0 < ttl < gc_grace) when enabling the cache on redis/tikv;
   #                                    # redis pushes peers' commits over pub/sub (docs/architecture/storage/duostore-meta-redis-design.md §3.6),
@@ -277,7 +277,7 @@ backends:
   #   endpoint: https://s3.example.com   # required; scheme://host[:port]
   #   region: us-east-1
   #   access_key: ${REMOTE_AK}           # leave BOTH empty to use the AWS credential chain:
-  #   secret_key: ${REMOTE_SK}           # env → container endpoint (ECS/EKS) → EC2 IMDSv2 (roadmap §3.3)
+  #   secret_key: ${REMOTE_SK}           # env → container endpoint (ECS/EKS) → EC2 IMDSv2
   #   imds_endpoint: http://169.254.169.254  # metadata base URL (override for tests/proxies)
   #   bucket_prefix: ""                  # remote bucket = prefix + local name
   #   force_path_style: true             # false = virtual-hosted style (supported, §7 deployment constraints)
@@ -319,7 +319,7 @@ backends:
   #   gc_retry_cap: 1h                   # backoff cap
   #   reconcile_interval: 0s             # index/cloud reconciliation period; 0s = off (§9)
   #   reconcile_orphans: rebuild         # rebuild = recreate index entries | delete = remove cloud orphans
-  #   # -- roadmap §3.6 (docs/architecture/storage/tiered-design.md §4.3/§5.1/§6.3/§9) --
+  #   # -- tiering (docs/architecture/storage/tiered-design.md §4.3/§5.1/§6.3/§9) --
   #   full_scan_interval: 1d             # full enumeration safety net; rounds in between consume the time wheel; 0s = every round full
   #   evict_size_weight: 0               # eviction score size weighting (log2 of MiB); 0 = ignore size
   #   evict_frequency_weight: 0          # eviction score access-count weighting; 0 = pure LRU
@@ -341,7 +341,7 @@ buckets:
 
 log:
   level: info                          # debug | info | warn | error (hot-reloadable)
-  # -- roadmap §5.2 (docs/architecture/s3-protocol.md §7) --
+  # -- access log (docs/architecture/s3-protocol.md §7) --
   # format: text                       # text = one readable line | json = one JSON object per line (Loki/ELK)
   # file: /var/log/lights3/lights3.log # empty = stderr; otherwise a size-rotated file
   # max_size: 64MiB                    # rotate above this size

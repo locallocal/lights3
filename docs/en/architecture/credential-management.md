@@ -44,7 +44,7 @@ and the caller must be a root credential** (defined in §3).
 | `POST /-/admin/credentials` | Generate an AK/SK pair, optional `?comment=` note | `201` + JSON (the one and only full return of the SK) |
 | `GET /-/admin/credentials` | List all credentials (including static ones, SK masked) | `200` + JSON list |
 | `GET /-/admin/credentials/{ak}` | Query a single credential's metadata; `?show-secret=true` returns the plaintext SK (**dynamic/file credentials only** — static ones stay masked, see §10.5) | `200` + JSON |
-| `PUT /-/admin/credentials/{ak}` | Edit a dynamic credential's policy/comment in place (roadmap §2.5): fields present in the body are replaced, `"policy": null` clears; the persisted `rev` counter bumps and other instances pick the edit up via the sync ETag/rev comparison | `200` + JSON (SK masked) |
+| `PUT /-/admin/credentials/{ak}` | Edit a dynamic credential's policy/comment in place: fields present in the body are replaced, `"policy": null` clears; the persisted `rev` counter bumps and other instances pick the edit up via the sync ETag/rev comparison | `200` + JSON (SK masked) |
 | `DELETE /-/admin/credentials/{ak}` | Revoke (dynamic credentials only; static credentials belong to the config file) | `204` |
 
 Companion ops CLI: `lights3-ctl` (`src/tools/lights3_ctl.cc`, built next to `lights3`,
@@ -418,7 +418,7 @@ a minute-scale operational action anyway).
 - The timer pattern is the same as duostore GC (`BackgroundTaskGroup` +
   `TimerQueue`, re-armed after completion, no overlap); a tick first
   `pool_->schedule()`s onto a pool thread before doing IO;
-- The same round also syncs STS sessions (`.sys/sts/`, backlog-sequence ④):
+- The same round also syncs STS sessions (`.sys/sts/`):
   it pulls sessions minted elsewhere and deletes expired objects; sessions are
   additionally read through on demand before verify, independent of this
   period ([s3-protocol.md §3.5](s3-protocol.md)).
@@ -427,7 +427,7 @@ a minute-scale operational action anyway).
 
 Deliberately kept at the "good enough" tier — no IAM statement/effect/condition
 syntax — but with three dimensions: bucket, key prefix and action
-(docs/archive/gaps.md §5.10):
+:
 
 ```json
 { "policy": { "buckets": ["logs-*", "backup"], "prefixes": ["tenant-a/"],
@@ -473,7 +473,7 @@ syntax — but with three dimensions: bucket, key prefix and action
 - Known trade-off: neither revocation nor policy affects in-flight requests that
   already passed verification (the §7 semantics).
 
-### 10.4a Tenant Fields (roadmap §3.9)
+### 10.4a Tenant Fields
 
 Credential objects and credentials_file entries may carry `"tenant": "<id>"`
 and `"role": "user"|"admin"`: a tenant credential can only reach the buckets
@@ -486,7 +486,7 @@ before. The full model is in [multi-tenancy.md §4](multi-tenancy.md).
 ### 10.5 Static Credential Secrets Are Never Returned by the Admin API
 
 `?show-secret=true` applies only to dynamic and file credentials; static (root)
-credentials always come back masked (docs/archive/gaps.md §5.10). The reason is the trust
+credentials always come back masked. The reason is the trust
 boundary: a static SK comes from the config file or environment, so being able to
 retrieve it downgrades "can read the config file" to "can send one HTTP GET" —
 and a root SK is precisely the one that **cannot** be revoked through the admin

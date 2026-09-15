@@ -43,7 +43,7 @@ struct FdGuard {
     }
 };
 
-// ---- metadata ops through the ring (roadmap §3.4 ③), with blocking fallbacks ----
+// ---- metadata ops through the ring, with blocking fallbacks ----
 // All of these take const char*: the caller keeps the owning fs::path/string alive across
 // the co_await (under SQPOLL the kernel copies the path only when the poll thread picks
 // the SQE up). All return the syscall convention (fd / 0 on success, -errno on failure)
@@ -75,7 +75,7 @@ Task<bool> uring_exists(UringEngine& eng, const char* path) {
     co_return ::stat(path, &st) == 0;
 }
 
-// GET body: thin BodyReader over the read-ahead stream (roadmap §3.4 ①). Range comes
+// GET body: thin BodyReader over the read-ahead stream. Range comes
 // naturally from the stream's [off, off+len) window; fd ownership transfers to the stream,
 // which also keeps buffers/fd alive past an early destruction with reads still in flight
 class UringStreamBodyReader final : public http::BodyReader {
@@ -119,7 +119,7 @@ Task<void> XLocalFsBackend::drain_to_tmp(http::BodyReader& body, UringWriteStrea
             break;
         }
         if (int fe = fault::check("xlocalfs.write")) {
-            // roadmap §6.1: the io_uring write path
+            // the io_uring write path
             ws.commit(0);
             throw s3::S3Error(s3::S3ErrorCode::InternalError,
                               std::string("write staging tmp (uring): ") + std::strerror(fe));
@@ -154,7 +154,7 @@ Task<void> XLocalFsBackend::commit_prepared(fs::path dest, TmpFile& tmp, const O
     if (r < 0) throw S3Error(S3ErrorCode::InternalError, "rename object failed");
     tmp.committed = true;
     co_await sync_dir(dest.parent_path());
-    // Sidecar policy shared with localfs (roadmap §3.5): sync / deferred / lazy
+    // Sidecar policy shared with localfs: sync / deferred / lazy
     if (fsutil::finish_object_sidecar(dest, meta, staging_ / "put", opt_.sidecar, xattr_ok))
         defer_sidecar(std::move(dest), meta);
 }
@@ -172,7 +172,7 @@ Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string
     require_bucket(bucket);
 
     // 1. Stream into the staging temp file through the write pipeline, computing MD5 as we
-    // go (roadmap §3.4 ①: up to write_depth blocks in flight while the next body block is
+    // go (up to write_depth blocks in flight while the next body block is
     // being received)
     TmpFile tmp{staging_ / "put" / next_tmp_name()};
     tmp.fd = co_await uring_open(*uring_, tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
@@ -190,7 +190,7 @@ Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string
 
     // Original commit order preserved: write xattr -> persist data. The pipeline held the
     // final block back, so finish() can send it and the fdatasync as one linked chain
-    // (roadmap §3.4 ③) -- for a small object that is the whole persistence in a single
+    // -- for a small object that is the whole persistence in a single
     // submission
     bool xattr_ok = fsutil::set_meta_xattr(tmp.path, meta, fsutil::TierInfo{}, &xattr_);
     co_await ws.finish(fsutil::fsync_enabled());
@@ -202,7 +202,6 @@ Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string
     // key; the conditional-PUT check is inside the same lock (PutCondition contract)
     auto lk = co_await commit_lock(bucket, key).acquire();
     co_await pool_->schedule();
-    // roadmap §3.8
     auto inv = invalidate_on_exit(bucket, key);
     fs::path dest = object_path(bucket, key);
     fsutil::check_put_condition(dest, cond, key);
@@ -223,9 +222,9 @@ Task<ObjectStream> XLocalFsBackend::get_object(std::string_view bucket, std::str
     co_await pool_->schedule();
     // Same as localfs: bucket existence is an unconditional precondition on every path
     // that reads metadata from disk, skipped only behind a cached record whose inode
-    // stamp matches the fd's fstat (roadmap §3.8)
+    // stamp matches the fd's fstat
     fs::path path = object_path(bucket, key);
-    // OPENAT via the ring (roadmap §3.4 ③): a cold dentry/inode lookup is disk work the
+    // OPENAT via the ring: a cold dentry/inode lookup is disk work the
     // pool thread no longer waits on; fstat afterwards is in-memory (the open just
     // populated the inode) and stays a plain syscall
     int fd = co_await uring_open(*uring_, path.c_str(), O_RDONLY, 0);
@@ -318,7 +317,7 @@ Task<PutResult> XLocalFsBackend::upload_part(std::string_view bucket, std::strin
     }
     tmp.committed = true;
     co_await sync_dir(up.dir);
-    // Verified part checksum rides in the .md5 kv sidecar (roadmap §2.2, same as localfs)
+    // Verified part checksum rides in the .md5 kv sidecar (same as localfs)
     std::vector<std::pair<std::string, std::string>> pkv{{"md5", etag}};
     if (checksum && !checksum->resolved().empty()) {
         pkv.emplace_back("checksum_algorithm", checksum->algorithm);
@@ -367,13 +366,13 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket, std
 
     // 2. Concatenate into the final temp file in declared order: per-part read-ahead
     // stream feeding the shared write pipeline -- part reads run ahead while previous
-    // blocks are still being written (roadmap §3.4 ①)
+    // blocks are still being written
     TmpFile tmp{staging_ / "put" / next_tmp_name()};
     tmp.fd = co_await uring_open(*uring_, tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (tmp.fd < 0) throw_uring("open complete tmp", tmp.fd);
     UringWriteStream ws(uring_, tmp.fd, 0, std::nullopt);
     uint64_t total = 0;
-    // per-part layout for GET ?partNumber (roadmap §2.5)
+    // per-part layout for GET ?partNumber
     std::vector<uint64_t> sizes;
     for (auto& path : paths) {
         int in = co_await uring_open(*uring_, path.c_str(), O_RDONLY, 0);
@@ -407,7 +406,6 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket, std
     meta.last_modified = std::chrono::system_clock::now();
     meta.part_sizes = std::move(sizes);
     PutResult result{meta.etag};
-    // roadmap §2.2
     apply_composite_checksum(digests, meta, result);
     bool xattr_ok = fsutil::set_meta_xattr(tmp.path, meta, fsutil::TierInfo{}, &xattr_);
     // final write + fdatasync linked

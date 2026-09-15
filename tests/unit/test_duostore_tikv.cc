@@ -260,7 +260,7 @@ TEST(duostore_tikv_part_abort_guard) {
     b.close();
 }
 
-// Single-value size protection (gaps §2.12): a manifest exceeding what a raft entry can carry fail-fasts with
+// Single-value size protection: a manifest exceeding what a raft entry can carry fail-fasts with
 // EntityTooLarge (400) instead of a 500 from a permanently failing prewrite -- unable to write yet unable to delete
 // hurts most
 TEST(duostore_tikv_object_manifest_size_guard) {
@@ -539,7 +539,7 @@ TEST(duostore_tikv_bulk_complete_10k_parts) {
     reader_store.close();
 }
 
-// Multi-gateway GC lease (docs/archive/gaps.md §6.1, same semantics as the redis version): of two instances with the
+// Multi-gateway GC lease (same semantics as the redis version): of two instances with the
 // same prefix only one wins; the same owner renews; another owner's expired lease can be taken over
 TEST(duostore_tikv_gc_lease) {
     TIKV_OR_SKIP();
@@ -560,7 +560,7 @@ TEST(duostore_tikv_gc_lease) {
     c.close();
 }
 
-// Multi-gateway read / write leases (roadmap §3.7, multi-gateway-multipart §4 ①):
+// Multi-gateway read / write leases:
 // min across published leases field-wise; expired rows are ignored (and lazily
 // deleted); no publishers = nullopt; a row without the write field (older build)
 // makes the write floor unknown while the read floor still folds
@@ -596,7 +596,7 @@ TEST(duostore_tikv_read_lease) {
     b.close();
 }
 
-// Online meta dump (roadmap §3.7): the snapshot view reads at one fixed TSO —
+// Online meta dump: the snapshot view reads at one fixed TSO —
 // writes committed after snapshot() stay invisible through the whole dump
 TEST(duostore_tikv_snapshot_dump_is_consistent) {
     TIKV_OR_SKIP();
@@ -626,7 +626,7 @@ TEST(duostore_tikv_snapshot_dump_is_consistent) {
     m.close();
 }
 
-// backlog-sequence ⑧: tikv keeps its incremental copies cluster-side (BR/CDC);
+// tikv keeps its incremental copies cluster-side (BR/CDC)
 // the gateway exports a fresh TSO as the restore point of a logical backup
 TEST(duostore_tikv_backup_marker) {
     TIKV_OR_SKIP();
@@ -640,7 +640,7 @@ TEST(duostore_tikv_backup_marker) {
     m.close();
 }
 
-// backlog-sequence ⑨: the write-conflict fallback classification follows the linked
+// the write-conflict fallback classification follows the linked
 // client-c -- structured code when the submodule carries ErrorCodes::WriteConflict
 // (third_party/patches/client-c), message string at @78a557e. No cluster needed
 TEST(duostore_tikv_write_conflict_classification) {
@@ -661,7 +661,7 @@ TEST(duostore_tikv_write_conflict_classification) {
     CHECK(!is_upstream_write_conflict(0, ""));
 }
 
-// ---------- multi-gateway multipart (docs/archive/multi-gateway-multipart-design.md §4 ②) ----------
+// ---------- multi-gateway multipart ----------
 // Two backends over one tikv prefix and one shared data engine; the scenarios
 // live in unit/multi_gateway_suite.h and run identically over redis
 

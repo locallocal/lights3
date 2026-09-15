@@ -1,4 +1,4 @@
-// roadmap §5.1: API x backend dimension — the metered backend decorator (per-op
+// API x backend dimension — the metered backend decorator (per-op
 // histograms, error counting, per-request backend-time accumulation over the
 // cancellation token), Route names, and the (api, backend) series on /-/metrics
 #include <set>

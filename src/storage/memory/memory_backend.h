@@ -1,7 +1,7 @@
 // L3: in-memory backend -- for unit tests and demos, semantics aligned with LocalFs.
 // It is also registered as a first-class backend (storage/registry.cc); misconfiguring it
 // means putting the entire gateway's data into an unbounded heap, hence the capacity gate
-// and mpu expiry cleanup (docs/archive/gaps.md §6.3)
+// and mpu expiry cleanup
 #pragma once
 
 #include <chrono>
@@ -64,7 +64,7 @@ public:
     Task<void> close() override;
 
 private:
-    // data is an immutable shared block (docs/archive/gaps.md §3.9): get_object only grabs the
+    // data is an immutable shared block: get_object only grabs the
     // shared_ptr once inside the lock; large objects are no longer copied wholesale under
     // the global lock. When put overwrites the same key, the old block is held by GETs
     // still streaming it and is released naturally when they finish -- snapshot isolation
@@ -86,7 +86,7 @@ private:
         // part content MD5 hex
         std::string etag;
         std::chrono::system_clock::time_point uploaded;
-        // Verified part checksum (roadmap §2.2); empty = none declared
+        // Verified part checksum; empty = none declared
         std::string checksum_algorithm;
         std::string checksum_value;
     };

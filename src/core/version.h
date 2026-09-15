@@ -1,4 +1,4 @@
-// Build identity (roadmap §6.3): the version from CMake's project(VERSION), the
+// Build identity: the version from CMake's project(VERSION), the
 // git commit stamped at build time (cmake/GenerateVersion.cmake), and the set of
 // drivers / backends compiled into this binary. Surfaces through `--version` on
 // lights3 and lights3-ctl, the startup log line, and the lights3_build_info gauge, so

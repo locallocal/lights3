@@ -1,4 +1,4 @@
-# Prometheus scrape configuration for lights3 (roadmap §5.5, docs/usage/monitoring.md).
+# Prometheus scrape configuration for lights3 (docs/usage/monitoring.md).
 # Drop the `scrape_configs` entry into an existing prometheus.yml, or run this
 # file as-is for a single-gateway lab setup:
 #

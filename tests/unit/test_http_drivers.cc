@@ -57,7 +57,7 @@ private:
     uint64_t pos_ = 0;
 };
 
-// File-backed body for the sendfile contract (roadmap §4.3 ④): pread on the
+// File-backed body for the sendfile contract: pread on the
 // calling thread (tests only), remaining range exposed through try_as_file
 // bytes moved by a driver's sendfile path
 std::atomic<uint64_t> g_file_bytes_sent{0};
@@ -525,7 +525,7 @@ TEST(http_driver_file_body_sendfile_or_read) {
     // Every driver serves a file-backed body correctly; builtin/plaintext takes
     // the sendfile exit (bytes reported through file_bytes_sent), the others
     // (and TLS / sendfile: false) pull through read() -- the decorator sees the
-    // full byte count either way (roadmap §4.3 ④)
+    // full byte count either way
     const uint64_t size = 3 * 1024 * 1024 + 12345, off = 777;
     std::string expect = make_pattern(off + size).substr(off);
     for_each_driver([&](const std::string& d) {
@@ -582,7 +582,7 @@ TEST(http_driver_file_body_short_file_closes_connection) {
 }
 
 TEST(http_driver_backend_error_mid_stream_closes_connection) {
-    // With one read in flight ahead of the socket (roadmap §4.3 ①) an error on
+    // With one read in flight ahead of the socket an error on
     // the k-th chunk must still end in a disconnect, never a silently short
     // body that looks complete
     for_each_driver([](const std::string& d) {
@@ -1025,7 +1025,7 @@ TEST(block_queue_cancel_wakes_blocked_consumer) {
     CHECK(threw.load());
 }
 
-// backlog-sequence ⑩: pieces pushed from a borrowed buffer coalesce into one tail
+// pieces pushed from a borrowed buffer coalesce into one tail
 // block, so the consumer pops them in one go; a block moved in stays its own
 // block; byte order and the byte-capped backpressure are unchanged
 TEST(block_queue_coalesces_borrowed_pieces_and_takes_owned_blocks) {
@@ -1096,7 +1096,7 @@ TEST(block_queue_coalesces_borrowed_pieces_and_takes_owned_blocks) {
     CHECK(pushed.load());
 }
 
-// backlog-sequence ⑩: the 8-bit name tag is a prefilter only -- every operation
+// the 8-bit name tag is a prefilter only -- every operation
 // stays case-insensitive and exact, including after removals shift the table
 TEST(header_map_tag_prefilter_keeps_semantics) {
     CHECK_EQ(HeaderMap::tag("Content-Type"), HeaderMap::tag("content-type"));
@@ -1179,7 +1179,7 @@ TEST(http_driver_head_request) {
     });
 }
 
-// ---------- Driver consistency (gaps §3.9) ----------
+// ---------- Driver consistency ----------
 
 TEST(http_driver_connection_close_token_list) {
     // Connection: close, Upgrade -- a legal token list. An exact-equality comparison would miss the close, so the
@@ -1232,7 +1232,7 @@ TEST(http_driver_rejects_oversized_headers) {
     });
 }
 
-// ---------- TLS（docs/archive/gaps.md §7）----------
+// ---------- TLS----------
 // Self-signed test certificate (CN=localhost, SAN includes 127.0.0.1, valid until 2126 -- embedded in source so the
 // tests have zero external dependencies; the client does no validation, so apart from expiry the certificate content
 // does not matter)
@@ -1373,7 +1373,7 @@ bool eventually(Pred&& pred, int max_ms = 3000) {
 }
 
 TEST(http_driver_tls_round_trip) {
-    // Every OpenSSL-backed driver serves TLS (roadmap §4.1); seastar goes through
+    // Every OpenSSL-backed driver serves TLS; seastar goes through
     // seastar::tls and is covered by its own build. The knobs/SNI/reload cases live in test_tls.cc
     TlsCertFiles certs;
     auto drivers = HttpServerFactory::drivers();
@@ -1440,7 +1440,7 @@ TEST(http_driver_tls_plaintext_client_rejected) {
             // only a disconnect (or TLS alert noise) is possible, never an HTTP 200
             CHECK(!r.ok);
         }
-        // roadmap §5.3: the failed handshake is counted (OpenSSL-backed drivers with
+        // the failed handshake is counted (OpenSSL-backed drivers with
         // their own accept loop; httplib and seastar handshake inside upstream)
         if (d == "builtin" || d == "beast") {
             try {
@@ -1457,7 +1457,7 @@ TEST(http_driver_tls_plaintext_client_rejected) {
     }
 }
 
-// roadmap §5.3: requests parsed at L1 (÷ accepted = keep-alive reuse) and malformed
+// requests parsed at L1 (÷ accepted = keep-alive reuse) and malformed
 // requests — request line, header block, message framing — across the drivers
 TEST(http_driver_request_and_parse_error_counters) {
     for (auto& d : HttpServerFactory::drivers()) {
@@ -1536,9 +1536,9 @@ TEST(http_driver_tls_bad_cert_throws) {
     }
 }
 
-// ---------- Timeouts / connection limit / shutdown contract (config.h timeout knobs section / http-adapter.md §5,
-// docs/archive/issues.md T10): each driver implements these behaviors on its own, most prone to divergence, must be
-// asserted across all four ----------
+// ---------- Timeouts / connection limit / shutdown contract (config.h timeout knobs section / http-adapter.md §5):
+// each driver implements these behaviors on its own, most prone to divergence, must be asserted across all four
+// ----------
 
 TEST(http_driver_idle_timeout_closes_idle_connection) {
     // An idle connection (keep-alive that has completed a request) must be closed by the server after idle_timeout;
@@ -1563,7 +1563,7 @@ TEST(http_driver_idle_timeout_closes_idle_connection) {
     }
 }
 
-// ---------- Timeout family / keep-alive budget / connection counters (roadmap §4.2, http-adapter.md §2.1) ----------
+// ---------- Timeout family / keep-alive budget / connection counters (http-adapter.md §2.1) ----------
 
 TEST(http_driver_header_timeout_bounds_slow_headers) {
     // A fresh connection that never completes its request line/headers is cut by

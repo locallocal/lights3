@@ -1,5 +1,5 @@
 // app/admin_jobs.h: the maintenance jobs of a live gateway -- the offline scrub
-// (backlog-sequence ③) plus the duostore / tier background rounds and the
+// plus the duostore / tier background rounds and the
 // quarantine ledgers (docs/usage/cli.md §3.12): type dispatch, one job per backend
 // whatever the op, polling document, outcome after completion, and the
 // server-side handlers' path / method / error mapping through fake hooks

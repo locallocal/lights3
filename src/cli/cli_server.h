@@ -9,7 +9,7 @@
 
 namespace lights3_cli {
 
-// `lights3 --check-config` (roadmap §6.2): parse + validate the configuration and
+// `lights3 --check-config`: parse + validate the configuration and
 // print what it resolves to, without opening a backend or binding a port. Exit 0 =
 // the server would start with this file (modulo runtime failures such as an
 // unreachable data directory), 1 = the file is rejected, with the same message the

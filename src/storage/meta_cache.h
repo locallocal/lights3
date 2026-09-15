@@ -1,4 +1,4 @@
-// L3 cross-cutting: per-backend object metadata cache (roadmap §3.8).
+// L3 cross-cutting: per-backend object metadata cache.
 // Every HEAD/GET used to pay one metadata round trip -- stat+getxattr (+sidecar) on
 // localfs, one meta-engine RTT on duostore -- even for objects served thousands of times
 // per second. This is a sharded LRU keyed by (bucket, key) that a backend consults before
@@ -16,7 +16,7 @@
 //   modified by another process): a TTL caps how long a peer's write stays invisible.
 //   The caller decides the bound (duostore requires a TTL on shared engines; localfs can
 //   additionally validate a hit against a fresh stat(2) stamp, see localfs_backend.h).
-// Cross-gateway invalidation messaging is a later phase (roadmap §3.8 "可分期").
+// Cross-gateway invalidation messaging is a later phase ("可分期").
 //
 // The value type is opaque here (localfs caches ObjectMeta + a stat stamp, duostore the
 // full ObjectRec incl. manifest); values are shared_ptr<const V> so a hit hands out an

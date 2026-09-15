@@ -33,7 +33,7 @@ namespace {
 // (async-signal-safe); the real shutdown is executed by a watchdog thread.
 // Calling server->shutdown() directly in the handler is unsafe — the httplib
 // driver's implementation takes an internal lock, and a signal landing on a
-// thread already holding that lock self-deadlocks (docs/archive/gaps.md §3.9)
+// thread already holding that lock self-deadlocks
 int g_sig_pipe[2] = {-1, -1};
 
 void on_signal(int sig) {
@@ -47,7 +47,7 @@ void on_signal(int sig) {
 
 Application::Application(const std::string& config_path) : config_path_(config_path), cfg_(Config::load(config_path)) {
     Logger::init(cfg_.log);
-    // Fault injection (roadmap §6.1): LIGHTS3_FAULTS arms named IO failure points
+    // Fault injection: LIGHTS3_FAULTS arms named IO failure points
     fault::arm_from_env();
     if (auto d = fault::describe(); !d.empty()) LOG_WARN("fault injection armed: {}", d);
 }
@@ -59,9 +59,9 @@ void Application::open_storage() {
     // Backend-level metrics registry: build hands each backend a scope
     // labeled backend=<name>, rendered appended to /-/metrics
     metrics_ = std::make_shared<MetricsRegistry>();
-    // Build identity as a constant-1 gauge (the Prometheus *_build_info idiom,
-    // roadmap §6.3): `lights3_build_info{version=,commit=,build_type=}` lets a
-    // fleet dashboard tell which build every instance is running
+    // Build identity as a constant-1 gauge (the Prometheus *_build_info idiom):
+    // `lights3_build_info{version=,commit=,build_type=}` lets a fleet dashboard tell which build every instance is
+    // running
     metrics_
         ->gauge("lights3_build_info", "Build identity of this lights3 process (always 1)",
                 {{"version", version()}, {"commit", git_commit()}, {"build_type", build_type()}})
@@ -70,7 +70,7 @@ void Application::open_storage() {
 }
 
 void Application::start_server() {
-    // The data plane routes to metered decorators (roadmap §5.1: per-backend op
+    // The data plane routes to metered decorators (per-backend op
     // histograms + the per-request backend-time accumulator); the raw instances
     // stay in backends_ for close() and the offline admin tasks
     metered_ = storage::meter_backends(backends_, metrics_);
@@ -87,20 +87,20 @@ void Application::start_server() {
     // the same validation gate as user requests (reserved names fail startup)
     for (auto& w : cfg_.website.buckets) storage::validate_bucket_name(w.bucket);
     website_store_ = sync_wait(s3::WebsiteStore::load(router.default_backend(), cfg_.website.buckets));
-    // CORS rules (roadmap §2.1): dynamic-only (?cors API), persisted next to the
+    // CORS rules: dynamic-only (?cors API), persisted next to the
     // website entries in .sys
     cors_store_ = sync_wait(s3::CorsStore::load(router.default_backend()));
-    // mTLS identity bindings (backlog-sequence ⑥, docs/usage/tls.md §2.1): the table is
+    // mTLS identity bindings (docs/usage/tls.md §2.1): the table is
     // always loaded (root may prepare bindings before switching the mode on)
     tls_identity_store_ = sync_wait(s3::TlsIdentityStore::load(router.default_backend()));
-    // Lifecycle rules (roadmap §2.4): stored next to cors/website; the runner gets its
+    // Lifecycle rules: stored next to cors/website; the runner gets its
     // own router copy (S3Service owns the primary by value)
     lifecycle_store_ = sync_wait(s3::LifecycleStore::load(router.default_backend()));
     // Copies of the one router share its table: rule swaps and backend hot add /
-    // remove (roadmap §4.4, backlog-sequence ⑦) reach the runner and the usage
+    // remove reach the runner and the usage
     // tracker through the same snapshot the service resolves against
     lifecycle_runner_ = std::make_unique<s3::LifecycleRunner>(router, lifecycle_store_);
-    // roadmap §3.9 (docs/architecture/multi-tenancy.md): audit file, usage counters, quotas,
+    // (docs/architecture/multi-tenancy.md): audit file, usage counters, quotas
     // tenants + bucket ownership. All persisted next to the other .sys records
     audit_ = s3::AuditLog::open(cfg_.audit);
     usage_ = sync_wait(s3::UsageTracker::load(router, cfg_.usage, metrics_));
@@ -221,7 +221,7 @@ void Application::start_server() {
     pool_exec_ = std::make_shared<ThreadPoolExecutor>(*pool_);
     inflight_ = std::make_shared<AsyncSemaphore>(cfg_.runtime.max_inflight_requests, pool_exec_.get());
     // Observability for the admission gate and the timer thread
-    // (docs/archive/gaps.md §7): under load testing, "stuck at admission" vs
+    //: under load testing, "stuck at admission" vs
     // "stuck in the pool" and "how long the timer was blocked by a slow
     // callback" can all be read straight from /-/metrics
     admission_counters_ = std::make_shared<http::AdmissionCounters>();
@@ -243,7 +243,7 @@ void Application::start_server() {
     });
     service_->set_metrics_root_only(cfg_.http.metrics_access == "root");
     service_->set_reload_hook([this] { return reload_config(); });
-    // Maintenance jobs on the live gateway (backlog-sequence ③ fsck; duostore
+    // Maintenance jobs on the live gateway (fsck; duostore
     // gc / scan and tier scan / gc / reconcile rounds; the quarantine ledgers):
     // the raw backends (not the metered decorators -- a round is a maintenance
     // traversal, not a request), one job per backend at a time, outcome kept for
@@ -363,7 +363,7 @@ void Application::start_server() {
             }
         });
     service_->set_timer_stats([] { return TimerQueue::instance().stats(); });
-    // L1 connection counters + per-client rate limits (roadmap §4.2)
+    // L1 connection counters + per-client rate limits
     // Both listeners' counters add up (accepted/active/timeouts are per-listener
     // events; the sum is the process-wide view a dashboard wants)
     service_->set_conn_stats([this]() -> http::ConnStats {
@@ -410,7 +410,7 @@ void Application::start_server() {
     // Assembly of queueing / Permit lifetime / cancellation convergence lives in http/admission.h (shared with the unit
     // tests) The stall guard's progress threshold must not exceed the streaming chunk size: with io_chunk_size
     // configured below 64KiB, a single read could never count as progress and every window would kill a healthy slow
-    // connection (roadmap §1.4)
+    // connection
     auto stall_progress = std::min<uint64_t>(http::StallGuardReader::kMinProgressBytes, cfg_.http.io_chunk_size);
     server_->set_handler(http::make_admission_handler(
         inflight_, stall_sec_, shutdown_src_,
@@ -418,7 +418,7 @@ void Application::start_server() {
         admission_counters_));
     server_->listen(cfg_.http.bind, cfg_.http.port);
 
-    // Separate admin listener (http.admin_port, backlog-sequence ②): the same
+    // Separate admin listener (http.admin_port): the same
     // admission gate and cancellation source (its requests count toward
     // max_inflight_requests and drain under the same shutdown_grace), its own
     // driver instance; the handler flags every request as admin-face and the
@@ -461,7 +461,7 @@ int Application::run() {
         unsigned char b = 0;
         while (::read(g_sig_pipe[0], &b, 1) == 1) {
             if (b == SIGHUP) {
-                // Config hot reload (roadmap §4.4) on the watchdog thread: file IO and
+                // Config hot reload on the watchdog thread: file IO and
                 // the apply steps are all off the signal handler and off the request path
                 LOG_INFO("SIGHUP received, reloading {}", config_path_);
                 reload_config();
@@ -507,8 +507,7 @@ int Application::run() {
     g_sig_pipe[0] = -1;
 
     // run() returning does **not** mean in-flight requests have reached
-    // zero (drivers return unconditionally after grace + force close,
-    // docs/archive/gaps.md §2.1). Broadcast cancellation first so in-flight
+    // zero (drivers return unconditionally after grace + force close). Broadcast cancellation first so in-flight
     // requests converge from their suspension points, then wait for
     // permits to return; otherwise the backend close() in shutdown() would
     // touch the same backend concurrently with still-running requests
@@ -516,7 +515,7 @@ int Application::run() {
     inflight_->close();
     int rc = 0;
     {
-        // Permit drain (roadmap §4.5): the same http.shutdown_grace that bounds the
+        // Permit drain: the same http.shutdown_grace that bounds the
         // driver's connection drain bounds how long we wait for permits to return
         // (streaming responses hold theirs past the driver's return). One knob,
         // one meaning; the wait is a condition variable, not a polling loop
@@ -539,7 +538,7 @@ int Application::run() {
     return rc;
 }
 
-// ---------- Config hot reload (roadmap §4.4, docs/usage/config-reload.md) ----------
+// ---------- Config hot reload (docs/usage/config-reload.md) ----------
 
 namespace {
 
@@ -619,7 +618,7 @@ std::vector<std::string> restart_only_changes(const Config& a, const Config& b) 
             a.audit.max_size != b.audit.max_size || a.audit.max_files != b.audit.max_files,
         "audit");
     cmp(a.ratelimit.max_tracked != b.ratelimit.max_tracked, "ratelimit.max_tracked");
-    // Sink and formatter are built once at Logger::init (roadmap §5.2)
+    // Sink and formatter are built once at Logger::init
     cmp(a.log.format != b.log.format || a.log.file != b.log.file || a.log.max_size != b.log.max_size ||
             a.log.max_files != b.log.max_files || a.log.async != b.log.async ||
             a.log.async_queue != b.log.async_queue || a.log.async_overflow != b.log.async_overflow,
@@ -634,7 +633,7 @@ bool rules_differ(const BucketsConfig& a, const BucketsConfig& b) {
     return false;
 }
 
-// Backend instance add / remove on reload (backlog-sequence ⑦): entries are
+// Backend instance add / remove on reload: entries are
 // matched by name. New names are built and routed; names gone from the file are
 // removed once nothing references them; an entry whose type / parameters changed
 // keeps running as configured before and is reported (a parameter change would
@@ -721,7 +720,7 @@ ConfigReloadReport Application::reload_config() {
     // (a backend that does not construct, a rule naming an unknown backend, an
     // unreachable rule) -- refused as a whole before anything else is touched.
     // New instances are built, metered and swapped into the router together with
-    // the rules (one snapshot, backlog-sequence ⑦); removed ones leave the router
+    // the rules (one snapshot); removed ones leave the router
     // here and are closed on a retiring thread once their in-flight requests drain
     BackendPlan plan = plan_backends(cfg_.backends, fresh, cfg_.buckets.default_backend, admin_jobs_.get());
     if (!plan.error.empty()) {
@@ -931,7 +930,7 @@ void Application::close_backends() noexcept {
             sync_wait(backend->close());
         } catch (const std::exception& e) {
             LOG_ERROR("backend {} close failed: {}", name, e.what());
-            // surfaces as a non-zero exit code (roadmap §4.5)
+            // surfaces as a non-zero exit code
             ++shutdown_errors_;
         }
     }
@@ -978,7 +977,7 @@ void Application::shutdown() noexcept {
     // and handler (via server), so clearing backends_ alone triggers
     // no destruction. Release in reverse ownership order so backend
     // destruction happens **before** pool->join() — destructors still use
-    // the pool (docs/archive/gaps.md §3.9)
+    // the pool
     admin_server_.reset();
     server_.reset();
     service_.reset();

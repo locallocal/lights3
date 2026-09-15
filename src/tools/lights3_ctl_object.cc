@@ -1,7 +1,7 @@
 // lights3-ctl `object inspect` — where an object's bytes live inside the routed backend
 // (data path / pack, chunk or rados extents with offsets and CRCs / tier state /
 // metadata source), for troubleshooting without reading logs or hexdumps
-// (roadmap §6.2, docs/usage/cli.md §3.10). Root credential only. Prints the server's
+// (docs/usage/cli.md §3.10). Root credential only. Prints the server's
 // JSON verbatim, or a readable table with --output=text.
 #include "tools/lights3_ctl_object.h"
 
@@ -87,7 +87,7 @@ namespace lights3_ctl {
 std::shared_ptr<ccmd::command> make_object() {
     auto cmd = std::make_shared<ccmd::command>(
         "object", "lights3-ctl object inspect photos 2026/01/a.jpg", "lights3-ctl object <command> [options]",
-        "Object-level operator commands (roadmap §6.2). `inspect` prints the internal "
+        "Object-level operator commands. `inspect` prints the internal "
         "layout of one object; requires the root static credential like `cred`. Options "
         "must follow the leaf subcommand as --name=value.",
         "object-level operator commands.", [](const std::shared_ptr<ccmd::command>& c) {

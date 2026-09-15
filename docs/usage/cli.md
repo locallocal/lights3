@@ -51,7 +51,7 @@ lights3 help [duostore [<sub>] | tier [<sub>] | fsck | tables [<sub>]]
 | 选项 | 适用 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `-c, --config=<path>` | 全部 | `config/lights3.yaml` | YAML 配置文件（格式见 [architecture.md §5](../architecture/overview.md#5-配置文件示例)） |
-| `--version` | 根命令（`lights3-ctl` 同） | — | 打印 `lights3 <ver> (git <commit>, <build type>, <date>)` + `drivers:` / `features:` 两行后退出 0；优先于 `--check-config`（roadmap §6.3，[deployment.md §1](deployment.md)） |
+| `--version` | 根命令（`lights3-ctl` 同） | — | 打印 `lights3 <ver> (git <commit>, <build type>, <date>)` + `drivers:` / `features:` 两行后退出 0；优先于 `--check-config`（[deployment.md §1](deployment.md)） |
 | `--backend=<name>` | `duostore *`、`tier *`、`fsck` | — | 后端名，等价于第一个位置参数 |
 | `--file=<path>` | `duostore dump|load`、`tables export|import` | — | dump / JSON-lines 文件路径，等价于第二个（tables 为第一个）位置参数 |
 | `--to=<dir>` / `--from=<dir>` | `duostore backup` / `restore` | — | 备份链目录（必填） |
@@ -65,7 +65,7 @@ lights3 help [duostore [<sub>] | tier [<sub>] | fsck | tables [<sub>]]
 无子命令即为启动：`Application(config)` → `open_storage()` → `start_server()`
 → `run()`，阻塞到 SIGINT/SIGTERM，按 [architecture.md §4](../architecture/overview.md#4-进程结构与启动流程)
 的顺序优雅关闭，`run()` 的返回值即退出码：`0` 干净退出；`3` 关停不干净
-（roadmap §4.5）——在途请求在 `http.shutdown_grace` 内没有排空，或某个后端
+——在途请求在 `http.shutdown_grace` 内没有排空，或某个后端
 `close()` / 线程池 join 失败（各自 LOG_ERROR，此前进程仍以 0 退出，进程管理器
 无从察觉）。排空死线就是 `http.shutdown_grace`，同一个量同时约束驱动的连接排空
 与许可归还，不再有独立硬编码的 10s。启动期任何异常（配置解析失败、
@@ -78,12 +78,12 @@ export LIGHTS3_SECRET_1=my-secret
 ./build/lights3 -c /etc/lights3/lights3.yaml
 ```
 
-**`--check-config`**（roadmap §6.2）：只做配置解析与校验的 dry-run——不打开后端、
+**`--check-config`**：只做配置解析与校验的 dry-run——不打开后端、
 不绑端口。走与启动完全相同的 `Config::load` 校验，再核对 `http.driver` 与每个
 `backends[].type` 是否编进了本二进制；`type: duostore` 的后端还按构造函数的
 同一套 `from_params` 解析参数（引擎选择、取值范围、未编入的引擎在此即报错），
 共享 meta（redis / tikv）配本地 fs data 的单网关组合以 `config warning:` 打到
-stderr、不改退出码（[archive/multi-gateway-multipart-design.md §4 ④](../archive/multi-gateway-multipart-design.md)）；
+stderr、不改退出码；
 然后打印配置解析出的摘要（驱动/监听/TLS、线程数、凭证数、后端列表——duostore
 带 `meta=… data=…`、路由规则数、网站条目数、日志与审计设置）。退出码
 `0` = 此文件能启动（运行期失败如数据目录不可写除外），`1` = 被拒，错误信息与
@@ -100,7 +100,7 @@ DuoStore 的逻辑 meta 备份与恢复（流格式与不变量见
 仅在 `LIGHTS3_DUOSTORE` 构建中注册；两者都在**不监听端口**的前提下构建全部
 后端，执行完即退出。`<backend>` 必须是配置中 `type: duostore` 的后端名，
 否则报错退出。共享 meta 引擎旁路在线网关执行时：`dump` 在 rocksdb/sqlite/
-tikv 上走引擎快照、在线一致（roadmap §3.7）；redis 无 MVCC，其他网关持续
+tikv 上走引擎快照、在线一致；redis 无 MVCC，其他网关持续
 写入时 dump 不保证一致（入口 WARN 提示，须停写）。`load` 恒要求目标端写
 静默。
 
@@ -119,7 +119,7 @@ tikv 上走引擎快照、在线一致（roadmap §3.7）；redis 无 MVCC，其
 ### 2.2.1 `duostore backup` / `duostore restore`
 
 备份链与恢复到中间点（PITR；目录布局、manifest、各引擎载荷见
-[storage/duostore-core.md §11.1](../architecture/storage/duostore-core.md#111-备份链与-pitrmeta_backuph--meta_backupccbacklog-sequence-)）。
+[storage/duostore-core.md §11.1](../architecture/storage/duostore-core.md#111-备份链与-pitrmeta_backuph--meta_backupcc)）。
 `backup` 向 `--to=<dir>` 追加一条：默认全量，`--incremental` 为自上一条以来的
 增量（目录里还没有全量时拒绝）。引擎差异：sqlite 增量 = WAL 段，需要后端配置
 `sqlite_wal_archive` 指向同一目录；rocksdb 走 BackupEngine，每条都能独立恢复；
@@ -144,7 +144,7 @@ offset / TSO），`--incremental` 拒绝。本地引擎（sqlite / rocksdb）持
 > 与 `lights3-ctl fsck --offline <backend>`（§3.5）。离线 CLI 与 admin 端点共用
 > `app/admin_jobs.h` 的类型分派与结论定义。
 
-离线数据完整性巡检（roadmap §3.1，实现细节见
+离线数据完整性巡检（实现细节见
 [storage/duostore-core.md §8.4](../architecture/storage/duostore-core.md) 与
 [storage/localfs.md §11](../architecture/storage/localfs.md)）。与
 dump/load 同模式：构建全部后端、不监听端口，跑完即退出；**纯只读**，任何
@@ -183,7 +183,7 @@ refs_stale 可能是巡检期间 MPU complete 造成的暂态，复跑确认。�
 
 ### 2.4 后台任务手动触发：`duostore gc|scan|quarantine`、`tier scan|gc|reconcile|quarantine`
 
-后台钩子的 CLI 出口（roadmap §3.2）：`run_gc_once` / `run_orphan_scan_once` /
+后台钩子的 CLI 出口：`run_gc_once` / `run_orphan_scan_once` /
 `scan_once` / `run_gc_once`(tiered) / `run_reconcile_once` 此前只被定时器与单
 测调用，想立即回收空间只能等下一个 tick（GC 默认 5min、孤儿扫描与对账默认
 1 天）。与 dump/load 同模式：构建后端、不监听端口、跑一轮即退出，统计打进
@@ -232,8 +232,7 @@ refs_stale 可能是巡检期间 MPU complete 造成的暂态，复跑确认。�
 
 ### 2.5 配置热重载：`SIGHUP`
 
-`kill -HUP <pid>` 让服务进程重新读取 `--config` 指定的文件（roadmap §4.4，
-[config-reload.md](config-reload.md)）：整体校验后只应用可热更新子集（日志级别、
+`kill -HUP <pid>` 让服务进程重新读取 `--config` 指定的文件（[config-reload.md](config-reload.md)）：整体校验后只应用可热更新子集（日志级别、
 `log.slow_request_threshold`、`request_timeout`/`transfer_stall_timeout`、`http.metrics_access`、
 `max_inflight_requests`、`min_part_size`、
 限流、bucket 路由规则、后端实例的增删、TLS 证书内容），其余改动逐项 WARN "需重启"；文件校验失败
@@ -258,8 +257,7 @@ lights3 tables import catalog.jsonl --backing=duostore --config=/etc/lights3/lig
 
 `src/tools/lights3_ctl*.cc`，构建产物与 `lights3` 同目录。命令组：`cred`（凭证
 管理面）、`website`（桶静态网站配置）、`bench`（压测）、`fsck`（在线对象
-校验）、`quota`（桶配额）、`tenant`（租户与桶归属）、`usage`（用量计数器，
-roadmap §3.9，见 [multi-tenancy.md](../architecture/multi-tenancy.md)）、`reload`（配置热重载，
+校验）、`quota`（桶配额）、`tenant`（租户与桶归属）、`usage`（用量计数器，见 [multi-tenancy.md](../architecture/multi-tenancy.md)）、`reload`（配置热重载，
 [config-reload.md](config-reload.md)）、`object`（对象内部布局，§3.10）、`mpu`（僵尸
 multipart 清理，§3.11）、`duostore` / `tier`（在线网关的后台轮次与隔离区，§3.12）、
 `tables`（S3 Tables 目录：表桶、列表、维护、
@@ -371,7 +369,7 @@ lights3-ctl bench list-buckets  ListBuckets（不需要 --bucket）
 | `--prefix=<p>` | `lights3-ctl-bench/` | 键前缀 |
 | `--max-keys=<n>` | 100 | 仅 `list` |
 | `--keep` | false | 结束后保留对象（默认删除整池） |
-| `-o, --output=text\|json` | `text` | `json`：stdout 只输出一个 JSON 对象（mode、wall_s、workers、keys、size、ops、errors、ops_per_s、mib_per_s、latency_ms{avg,p50,p90,p99,max}），每秒表格与准备/清理提示改到 stderr——`scripts/bench_gate.sh` 的基线比对输入（roadmap §6.2） |
+| `-o, --output=text\|json` | `text` | `json`：stdout 只输出一个 JSON 对象（mode、wall_s、workers、keys、size、ops、errors、ops_per_s、mib_per_s、latency_ms{avg,p50,p90,p99,max}），每秒表格与准备/清理提示改到 stderr——`scripts/bench_gate.sh` 的基线比对输入 |
 
 首个错误打印到 stderr（`lights3-ctl: bench: first error: …`），其余只计入 err
 计数；准备阶段（建桶/预上传）失败直接以 `1` 退出。
@@ -386,7 +384,7 @@ lights3-ctl bench list-buckets -j 16
 
 ### 3.5 `fsck` —— 在线对象校验 / 服务端 scrub
 
-**`--offline <backend>`**（backlog-sequence ③）：不走 S3 API，而是让**运行中的网关**
+**`--offline <backend>`**：不走 S3 API，而是让**运行中的网关**
 对指定后端跑一轮离线 scrub（duostore 的 manifest/crc/refs 对账，localfs/xlocalfs 的
 ETag 全量 verify——与 `lights3 fsck` 同一实现），经 admin 面：
 
@@ -512,7 +510,7 @@ lights3-ctl reload
 lights3-ctl reload --endpoint=https://s3.example.com
 ```
 
-### 3.10 `object` —— 对象内部布局（roadmap §6.2）
+### 3.10 `object` —— 对象内部布局
 
 `GET /-/admin/objects/<bucket>/<key>`（root 专属）的 CLI 包装：打印对象在路由到的
 后端里的物理布局，排障不再靠读日志或 hexdump。
@@ -535,7 +533,7 @@ lights3-ctl object inspect photos 2026/01/a.jpg              # 服务端 JSON �
 lights3-ctl object inspect photos 2026/01/a.jpg -o text      # 表格
 ```
 
-### 3.11 `mpu` —— 僵尸 multipart 清理（roadmap §6.2）
+### 3.11 `mpu` —— 僵尸 multipart 清理
 
 走标准 S3 API（ListMultipartUploads / AbortMultipartUpload），任何对桶有权限的
 凭证都能用，不涉及 admin 面。`list` 翻完所有分页，每个上传一行（发起时间、

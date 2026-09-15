@@ -1,4 +1,4 @@
-// L3: ITierLocal over DuoStoreBackend (roadmap §3.6 ⑥): tier state lives in the object
+// L3: ITierLocal over DuoStoreBackend: tier state lives in the object
 // record (meta_store.h TierState, codec v3), a stub is a record without extents, the two
 // commits are CAS meta transactions (the old extents enter duostore's own gcq), the
 // upload snapshot is a normal duostore GET (extents are immutable, GC grace covers the

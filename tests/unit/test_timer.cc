@@ -157,7 +157,7 @@ TEST(timer_add_earlier_item_preempts_wait) {
 }
 
 TEST(timer_callback_exception_does_not_wedge_cancel) {
-    // gaps §2.2: when a callback throws, resetting running_id_ and the notify must still happen,
+    // when a callback throws, resetting running_id_ and the notify must still happen
     // otherwise cancel(that id) blocks forever (it is the first step of every backend's shutdown path)
     TimerQueue q;
     Signal s;
@@ -174,7 +174,7 @@ TEST(timer_callback_exception_does_not_wedge_cancel) {
     CHECK(s2.wait_for_count(1, 5000ms));
 }
 
-// ---------- Callback thread separated from the scheduling thread (gaps §3.2) ----------
+// ---------- Callback thread separated from the scheduling thread ----------
 
 TEST(slow_callback_does_not_stall_deadline_tracking) {
     // A cancel callback unwinds the cancelled coroutine chain in place -- bounded but nonzero work. It must run on a
@@ -217,7 +217,7 @@ TEST(cancel_waits_for_due_but_unstarted_callback) {
 }
 
 TEST(timer_stats_track_fired_and_pending) {
-    // Timer observability (docs/archive/gaps.md §7): pending/fired/latency histogram have an outlet
+    // Timer observability: pending/fired/latency histogram have an outlet
     TimerQueue q;
     std::atomic<int> fired{0};
     // long-hanging: permanently pending

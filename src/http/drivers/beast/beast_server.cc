@@ -83,7 +83,7 @@ IoAwaiter<std::decay_t<Init>> io_op(Init&& init) {
 // thread before starting the next socket operation
 struct ResumeOn {
     asio::any_io_executor ex;
-    // Fast path (roadmap §4.3 ⑥): a coroutine that is already running on this
+    // Fast path: a coroutine that is already running on this
     // connection's io thread (the previous await completed inline, or the
     // handler resumed there) continues without an asio::post round trip. The
     // connection executors are the plain executors of the per-thread
@@ -463,7 +463,7 @@ struct BodyCtx {
     bhttp::request_parser<bhttp::buffer_body>* parser;
     Stream* stream;
     beast::flat_buffer* buffer;
-    // body_timeout: inactivity bound on one body read (roadmap §4.2)
+    // body_timeout: inactivity bound on one body read
     int idle_timeout_sec;
     driver::ConnCounters* counters = nullptr;
     // watchdog owner (Session outlives the request)
@@ -529,12 +529,12 @@ class BeastServer final : public IHttpServer {
 public:
     explicit BeastServer(const HttpConfig& cfg)
         : cfg_(cfg), io_(make_io_threads(cfg)), ctl_strand_(asio::make_strand(io_[0]->ioc)) {
-        // TLS (docs/archive/gaps.md §7): certificates are loaded at construction; a
+        // TLS: certificates are loaded at construction; a
         // bad path / bad PEM throws right here — must not be discovered only
         // at the first connection's handshake
         if (!cfg.tls_cert.empty()) {
             // Certificates/SNI/client CA come from the shared holder's snapshot at
-            // handshake time (roadmap §4.1, http/tls.h); the asio context only carries
+            // handshake time (http/tls.h); the asio context only carries
             // the static knobs the holder configures onto its SSL_CTX
             try {
                 tls_holder_ = std::make_shared<tls::Holder>(cfg);
@@ -691,7 +691,7 @@ private:
                 // loop
                 LOG_WARN("TLS handshake failed from client: {}", hec.message());
             } else {
-                // Verified client certificate (backlog-sequence ⑥): once per connection
+                // Verified client certificate: once per connection
                 co_await session_loop(sess, tls, tls::peer_identity(tls.native_handle()));
                 // Best-effort close_notify (with a timeout backstop); failure is fine, TCP gets closed right after
                 // anyway
@@ -714,7 +714,7 @@ private:
         // Socket reads are sized by beast::read_size = max(512, capacity - size):
         // an unreserved flat_buffer grows to 512 bytes on the first read and then
         // stays there, so a 4MiB request body was pulled in ~8000 recv calls
-        // (measured 40ms vs 6ms on builtin, roadmap §4.3 baseline). Reserving one
+        // (measured 40ms vs 6ms on builtin, baseline). Reserving one
         // io chunk makes every body read a full-size recv
         buffer.reserve(cfg_.io_chunk_size);
         bool keep = true;
@@ -730,7 +730,7 @@ private:
             // in memory; no object-size cap is set (consistent with the other
             // drivers — an S3-semantics decision)
             parser.body_limit(boost::none);
-            // Phase timeouts (roadmap §4.2): a fresh connection's request line + headers
+            // Phase timeouts: a fresh connection's request line + headers
             // are bounded by header_timeout, a reused one's wait by idle_timeout (one
             // read op covers both, so the two cannot be told apart finer than this)
             bool fresh = served == 0;
@@ -744,7 +744,7 @@ private:
                 if (ec == beast::error::timeout)
                     driver::count_timeout(counters_, fresh ? driver::Phase::Header : driver::Phase::Idle);
                 // A parser verdict (bad request line / header, header_limit) is a
-                // malformed request (roadmap §5.3); a peer that closed mid-message
+                // malformed request; a peer that closed mid-message
                 // (end_of_stream / partial_message) or a transport error is not
                 else if (ec && ec.category() == bhttp::make_error_code(bhttp::error::bad_method).category() &&
                          ec != bhttp::error::end_of_stream && ec != bhttp::error::partial_message)
@@ -915,7 +915,7 @@ private:
         }
 
         // One backend read in flight while the previous chunk is on the wire
-        // (roadmap §4.3 ①/②: pooled buffers, no per-response zeroed vector)
+        // (pooled buffers, no per-response zeroed vector)
         driver::StreamPrefetch pf(*resp.stream_body, cfg_.io_chunk_size);
         uint64_t written = 0;
         for (;;) {
@@ -1068,7 +1068,7 @@ private:
     // on_stop_signal has run (guarded by m_)
     bool stop_handled_ = false;
     std::set<std::shared_ptr<Session>> sessions_;
-    // IHttpServer::stats() (roadmap §4.2)
+    // IHttpServer::stats()
     driver::ConnCounters counters_;
     std::once_flag finish_once_;
 };

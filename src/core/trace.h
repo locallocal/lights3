@@ -1,4 +1,4 @@
-// L4: W3C Trace Context (roadmap §5.4, lightweight tier). The gateway accepts an
+// L4: W3C Trace Context (lightweight tier). The gateway accepts an
 // incoming `traceparent` (+ `tracestate`, passed through verbatim), starts a trace
 // of its own when none is present or the header is malformed, stamps the ids on
 // the request's log lines / access record / audit record, and forwards its own

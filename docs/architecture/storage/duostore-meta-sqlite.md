@@ -137,8 +137,7 @@ RocksDB 版同一取舍。
 - `swap_extents` / `swap_extents_batch`：单项 CAS 内核
   `sqlite_meta_store.cc:SqliteMetaStore::apply_swap`——version/extents 不符返回
   false 不落写；refs 走 `meta_util.h:refs_delta` 差集（全量先加后删会抹掉 to/from
-  共享 chunk 的 refs，孤儿扫描会误删存活数据）。batch 版整批一个事务一次 fsync
-  （gaps §2.13），逐项独立，全败不提交。
+  共享 chunk 的 refs，孤儿扫描会误删存活数据）。batch 版整批一个事务一次 fsync，逐项独立，全败不提交。
 - **单写连接的后果**：`ack_reclaim`/`seal_pack`/`drop_pack_stat` 这类盲写也必须持
   `mu_`（否则语句会混进别的线程的开放事务）——RocksDB 版"GC 销账不排队"的性质在
   SQLite 单写者约束下保不住。因此 GC 消费端应走批量 `ack_reclaims`（覆写为单事务
@@ -168,7 +167,7 @@ run ≤ `data_ref.h:kMaxIdRun`=64；kRados 与 kChunk 共用计数器防跨 kind
   RocksDB 版按次覆写 sync 标志更干净）；崩溃丢预留会重发已用 file_id、与已落盘
   chunk 的 O_EXCL 冲突，故必须先持久后派发。
 - **锁序 `alloc_mu_ → mu_`**：预留期间持 `mu_` 把进程内唯一写者挡在门外
-  （docs/archive/gaps.md §3.9）——否则号段 UPDATE 与业务事务在 db 级写锁上打 busy_timeout
+  ——否则号段 UPDATE 与业务事务在 db 级写锁上打 busy_timeout
   彩票（busy handler 不公平排队，写热点下连输 4 轮 = 20s，正常 PUT 变 500）。有界
   重试保留（`step_busy` ≤4 轮）但只针对绕过 flock 的进程外来客（裸 sqlite3 工具），
   超限抛 InternalError"id reservation starved"。alloc 由数据面在业务事务之外调用，
@@ -192,9 +191,9 @@ run ≤ `data_ref.h:kMaxIdRun`=64；kRados 与 kChunk 共用计数器防跨 kind
   `sqlite_meta_store.h:SqliteMetaStore::set_list_pause_for_test` 在发出首条后回调
   一次，供并发提交注入验证 snapshot 岿然不动（设计文档 §9 S4）。
 - **`list_uploads`**：`kUpList` 用**行值比较** `(key,id) > (?2,?3)` 做复合游标下推
-  （恰为主键序；docs/archive/gaps.md §5.1），另附 `AND (?5 = 0 OR key > ?2) AND key >= ?6`：
+  （恰为主键序），另附 `AND (?5 = 0 OR key > ?2) AND key >= ?6`：
   `?5=1` 表示只给了 key_marker（语义 `key > key_marker`），`?6` 是 `prefix` 下界
-  （roadmap §3.5；上界由读侧越出 prefix 即断兑现），`LIMIT ?4`（≤0 绑 −1 = 不限）。
+  （上界由读侧越出 prefix 即断兑现），`LIMIT ?4`（≤0 绑 −1 = 不限）。
 - `list_parts`/`scan_parts`：`kPartScan` 按 `part_no` 数值序；`list_buckets`：
   `kBucketList` 主键序免费排序。
 - `peek_reclaims`：`kGcqPeek`（`seq>=? ORDER BY seq LIMIT ?`）+ 累计 extent 上限
@@ -202,7 +201,7 @@ run ≤ `data_ref.h:kMaxIdRun`=64；kRados 与 kChunk 共用计数器防跨 kind
   = `kRefScan` 全扫回调（弱一致快照，孤儿扫描契约允许）。
 - `require_upload`/`bucket_exists`/`get_object`/`head_object`：读池单语句；
   `head_object` 用 `codec.cc:decode_object_meta` 免物化 manifest。
-- **`snapshot()`**（在线 dump，roadmap §3.7）：
+- **`snapshot()`**（在线 dump）：
   `sqlite_meta_store.cc:SqliteMetaStore::SnapshotView` 租一条读池连接并在其上开
   `Txn(immediate=false)` 读事务持到析构——deferred BEGIN 要到首次读才取 WAL 快照，
   故构造时先发一条 `SELECT 1 FROM buckets LIMIT 1` 把快照钉住；`list_buckets` /
@@ -216,8 +215,7 @@ run ≤ `data_ref.h:kMaxIdRun`=64；kRados 与 kChunk 共用计数器防跨 kind
 一个事务）；版本超前本构建 → 拒绝降级运行；版本落后 →
 `sqlite_meta_store.cc:SqliteMetaStore::migrate_schema` 沿 `kSchemaMigrations` 迁移链
 逐级升级——**每步一个事务，含 `PRAGMA user_version` 盖章**，中途崩溃重启从断点续走；
-缺迁移路径经 `meta_util.h:throw_no_migration` 响亮失败。策略与其余三引擎统一
-（docs/archive/gaps.md §6.1）；记录级演进仍走 codec 的 `read_ver` 容错读，此链保留给表/列
+缺迁移路径经 `meta_util.h:throw_no_migration` 响亮失败。策略与其余三引擎统一；记录级演进仍走 codec 的 `read_ver` 容错读，此链保留给表/列
 布局变更。
 
 ## 8. 错误映射与损坏指标
@@ -249,7 +247,7 @@ InternalError（500 而非崩溃）；析构兜底调 close 并吞异常。
 
 ## 10. 备份链与 PITR
 
-总体约定（目录、manifest、恢复计划、CLI）见[主文档 §11.1](duostore-core.md#111-备份链与-pitrmeta_backuph--meta_backupccbacklog-sequence-)；
+总体约定（目录、manifest、恢复计划、CLI）见[主文档 §11.1](duostore-core.md#111-备份链与-pitrmeta_backuph--meta_backupcc)；
 本节只讲 sqlite 的载荷：**全量 = 整库在线拷贝，增量 = WAL 段归档**。
 
 - **配置**：`sqlite_wal_archive: <dir>` 指向备份链目录（`SqliteMetaOptions::wal_archive`）。

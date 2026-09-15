@@ -67,13 +67,13 @@
 | `default` | `schema` | STRING | 打开时 `SET NX` 写 `"r1"`，已存在则读出校验；谱系与 RocksDB 的 schema 区分。不设 `instance`——meta 本就为多网关共享，不绑实例 |
 | `buckets` | `buckets` | HASH：field=`<bucket>`，value=`encode_bucket` | `create_bucket` = `HSETNX` 单命令即原子，返回 0 → BucketAlreadyOwnedByYou，无需脚本；`list_buckets` = `HGETALL` + 客户端按名排序（桶数小） |
 | `objects` | `o:<b>` + `oz:<b>` | HASH + ZSET（§2.1 原则 3） | 点查 `HGET o:<b> <key>`；迭代走 `oz:<b>` |
-| `uploads` | `up:<b>` + `uz:<b>` | HASH：field=`<key>\0<id>`，value=`encode_upload`；ZSET（score 0）member 同 field（§2.1 原则 3，roadmap §3.5） | `list_uploads` = `ZRANGEBYLEX uz:<b>` 从游标/prefix 起分页 + `HMGET up:<b>` 取值，游标与 prefix 下推（与 RocksDB 前缀扫同序、同成本形态）；`ZCARD≠HLEN`（建索引前的存量表 / 老版本网关写入）时回退 `HSCAN COUNT 512` 全表分批并重建索引，见 [storage/duostore-meta-redis.md](duostore-meta-redis.md) §5.2 |
+| `uploads` | `up:<b>` + `uz:<b>` | HASH：field=`<key>\0<id>`，value=`encode_upload`；ZSET（score 0）member 同 field（§2.1 原则 3） | `list_uploads` = `ZRANGEBYLEX uz:<b>` 从游标/prefix 起分页 + `HMGET up:<b>` 取值，游标与 prefix 下推（与 RocksDB 前缀扫同序、同成本形态）；`ZCARD≠HLEN`（建索引前的存量表 / 老版本网关写入）时回退 `HSCAN COUNT 512` 全表分批并重建索引，见 [storage/duostore-meta-redis.md](duostore-meta-redis.md) §5.2 |
 | `parts` | `pt:<b>\0<key>\0<id>` | HASH：field=十进制 `part_no`，value=`encode_part` | 每 upload 一个 HASH；`complete/abort` 整键 `DEL`（对应 RocksDB 的范围删）；≤1 万 field，`HGETALL` + 客户端数值排序 |
 | `refs` | `refs` | HASH：field=十进制 `file_id`，value=owner 简述 | `chunk_referenced` = `HEXISTS`，O(1) |
 | `gcq` | `gcq` | ZSET：score=`seq`，member=`be64(seq) ‖ encode_reclaim(...)` | be64 前缀保证 member 唯一且自含 seq；`peek_reclaims` = `ZRANGEBYSCORE gcq -inf +inf LIMIT 0 max`（seq 从 member 前 8 字节精确解析）；`ack_reclaim` = `ZREMRANGEBYSCORE gcq seq seq`。约束：score 为 double，要求 seq < 2^53——每秒 1 万次删除可用 2.8 万年，声明即可 |
 | `stats`（号段计数器） | `ctr:chunk` / `ctr:pack` / `ctr:seq` | STRING（整数） | `INCRBY` 号段预留（§4） |
 | `stats`（pack 存活账） | `pack:<id>` | HASH：live_bytes / live_recs / file_size / sealed | `HINCRBY` 即增量记账（替代 RocksDB merge operator，提交脚本增 `hincr` op 与业务写同批）；`pack_stats()` = SCAN MATCH `pack:*` + 逐 key HGETALL（GC 低频路径）；`seal_pack` file_size=0 走 HSETNX 不覆盖已知值 |
-| —（多网关租约） | `gc_lease` / `readlease:<owner>` | STRING（PX 过期） | `try_gc_lease` = Lua SET-NX/续期脚本（崩溃持有者自动让出）；`publish_lease` 每网关一键 `"<oldest_read_ms> <oldest_write_ms>"`，`min_lease` = SCAN + MGET 逐字段取最小（roadmap §3.7） |
+| —（多网关租约） | `gc_lease` / `readlease:<owner>` | STRING（PX 过期） | `try_gc_lease` = Lua SET-NX/续期脚本（崩溃持有者自动让出）；`publish_lease` 每网关一键 `"<oldest_read_ms> <oldest_write_ms>"`，`min_lease` = SCAN + MGET 逐字段取最小 |
 | —（失效推送） | `inv` | Pub/Sub 频道 | 提交脚本内 `PUBLISH "<origin>\0<bucket>\0<key>"`（§3.6） |
 | `tc` | `tc` / `tce` / `tcz` | HASH（key→value）/ HASH（key→etag）/ ZSET（字典序索引） | S3 Tables 目录的 KV 门面（`kv_*`） |
 
@@ -94,7 +94,7 @@ RocksDB Iterator 换成 `ZRANGEBYLEX oz:<b> [<seek> + LIMIT 0 <batch>`。
    上限 1000，不会长阻塞 server。
 
 脚本内按 `ZRANGEBYLEX … LIMIT 0 200` 分批取 key，循环结束后以批量 `HMGET o:<b>`
-（每次 500 个）取 value 一并返回（gaps §3.9，原先逐 key HGET）；解码在 C++ 侧
+（每次 500 个）取 value 一并返回（原先逐 key HGET）；解码在 C++ 侧
 （`codec::decode_object_meta`，跳过 extent runs 不物化，与 RocksDB 版
 同一优化）。delimiter 组收尾且恰好收满时，`next_token` 需落在组尾：脚本
 内 `ZREVRANGEBYLEX oz:<b> (<组后继> - LIMIT 0 1` 取组内最后一条 key
@@ -199,7 +199,7 @@ RedisMetaStore **不持业务互斥**（仅保留号段派发的内存小锁，�
   发送前就失败（连接从池中取出即坏）的请求（§5.4）。CAS 返回 0 的重试
   不在此列——0 是明确结果，安全。
 
-### 3.6 跨网关缓存失效广播（backlog-sequence ⑤）
+### 3.6 跨网关缓存失效广播
 
 对象元数据缓存（[storage/duostore-core.md §7.1](duostore-core.md)）在共享
 meta 上的困境是"对端网关的写本进程看不见"。redis 有发布订阅，于是：

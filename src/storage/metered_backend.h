@@ -1,6 +1,5 @@
-// L3 decorator: per-backend operation timing and error counting (roadmap §5.1,
-// docs/architecture/s3-protocol.md §7). Wraps a backend behind the bucket router so every
-// data-plane call is measured once, uniformly for all six implementations:
+// L3 decorator: per-backend operation timing and error counting (docs/architecture/s3-protocol.md §7). Wraps a backend
+// behind the bucket router so every data-plane call is measured once, uniformly for all six implementations:
 //   - lights3_backend_op_seconds{backend,op} histogram (+ _count/_sum),
 //     lights3_backend_errors_total{backend,op} — an error is anything that is not
 //     an S3 4xx (NoSuchKey on a HEAD is the client's problem, a 5xx or a
@@ -12,7 +11,7 @@
 // includes streaming the body in (which is what the backend spends its time on),
 // for get_object it is the open only — bytes stream afterwards through the driver.
 // The decorator also keeps the per-backend in-flight count that backend hot
-// removal drains on (backlog-sequence ⑦): every call holds a lease for its
+// removal drains on: every call holds a lease for its
 // duration, and a get_object lease travels with the returned body until the
 // stream is released, so "in flight" covers streaming reads as well.
 #pragma once
@@ -42,7 +41,7 @@ public:
     long inflight() const;
     // Block until nothing is in flight or the deadline passes; true = drained.
     // The lease release signals the condition, no polling (the
-    // AsyncSemaphore::wait_drained shape, roadmap §4.5)
+    // AsyncSemaphore::wait_drained shape)
     bool wait_idle(std::chrono::milliseconds timeout);
 
     Task<void> create_bucket(std::string_view bucket) override;

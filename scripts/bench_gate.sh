@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Performance regression gate (roadmap §6.1, docs/development/testing.md §5): starts a
+# Performance regression gate (docs/development/testing.md §5): starts a
 # memory-backend gateway, runs `lights3-ctl bench put` and `get`, and fails when the
 # throughput floor or the p99 ceiling is missed. Thresholds are deliberately
 # loose defaults for a shared/loaded developer box — tighten per environment
@@ -75,7 +75,7 @@ done
 [[ -z "$PORT" ]] && { echo "gateway did not report its port"; cat "$WORK/server.log"; exit 1; }
 BASE="http://127.0.0.1:$PORT"
 
-# `lights3-ctl bench --output=json` (roadmap §6.2) is the parsing contract: one JSON object on stdout
+# `lights3-ctl bench --output=json` is the parsing contract: one JSON object on stdout
 run_mode() {  # run_mode <put|get> <min-ops>
     local mode=$1 min=$2 out parsed ok err ops p99
     out=$(LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$LIGHTS3_CTL" bench "$mode" --bucket=benchgate \

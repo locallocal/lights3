@@ -71,8 +71,7 @@ CREATE TABLE IF NOT EXISTS pack_stats(
   pack_id INTEGER PRIMARY KEY, file_size INTEGER NOT NULL DEFAULT 0,
   live_bytes INTEGER NOT NULL DEFAULT 0, live_recs INTEGER NOT NULL DEFAULT 0,
   sealed INTEGER NOT NULL DEFAULT 0
-) STRICT;
-)";
+) STRICT;)";
 
 // SQL constants (§5.3): each connection keeps a resident prepared-statement cache
 // keyed by the literal's address; all parameters are bound via ?N — string
@@ -104,7 +103,7 @@ constexpr const char* kUpGet = "SELECT val FROM uploads WHERE bucket=?1 AND key=
 constexpr const char* kUpPut = "INSERT INTO uploads(bucket,key,id,val) VALUES(?1,?2,?3,?4)";
 constexpr const char* kUpDel = "DELETE FROM uploads WHERE bucket=?1 AND key=?2 AND id=?3";
 constexpr const char* kUpAny = "SELECT 1 FROM uploads WHERE bucket=?1 LIMIT 1";
-// Composite-cursor pushdown (docs/archive/gaps.md §5.1): (key,id) > (?2,?3) uses row-value
+// Composite-cursor pushdown: (key,id) > (?2,?3) uses row-value
 // comparison, which follows primary-key order exactly; ?4<=0 means unlimited rows
 // (a negative LIMIT in SQLite means no limit)
 // ?5=1 selects key-marker-only semantics ("key > key_marker"); ?6 is the prefix lower
@@ -376,7 +375,7 @@ void SqliteMetaStore::check_lineage(Conn& c) {
     }
     if (app_id != kAppId)
         throw S3Error(S3ErrorCode::InternalError, "duostore meta(sqlite): not a duostore meta database: " + opt_.path);
-    // Version-evolution policy matches the other three engines (docs/archive/gaps.md §6.1):
+    // Version-evolution policy matches the other three engines:
     // a newer database refuses to run downgraded, an older one climbs the migration
     // chain step by step (user_version is an integer lineage, no string prefix)
     if (ver > kSchemaVersion)
@@ -468,7 +467,7 @@ SqliteMetaStore::SqliteMetaStore(SqliteMetaOptions opt) : opt_(std::move(opt)) {
         wc_->exec(kKvDdl, "create kv table");
         // id-segment connection is always FULL (§4)
         ac_ = open_conn(/*full_sync=*/true);
-        // Backup chain (backlog-sequence ⑧): an existing chain in wal_archive means
+        // Backup chain: an existing chain in wal_archive means
         // the WAL must keep every commit until the next segment is archived
         if (!opt_.wal_archive.empty()) {
             auto m = BackupManifest::load(opt_.wal_archive);
@@ -631,14 +630,14 @@ uint64_t SqliteMetaStore::alloc_id(std::string_view counter, IdRange& r, uint32_
     std::lock_guard lk(alloc_mu_);
     if (r.limit - r.next < n) {
         // discard the remainder when switching segments (run batch dispatch requires
-        // contiguity within a segment, docs/archive/gaps.md §3.9)
+        // contiguity within a segment)
         // The segment reservation must be persisted before dispensing — the dedicated
         // connection is always synchronous=FULL (independent of opt_.sync); otherwise
         // a crash losing the reservation would re-issue used file_ids after restart,
         // colliding via O_EXCL with chunk files already on disk. Wasting a segment on
         // crash is harmless (file_ids only need to be unique and monotonic, not
         // contiguous). Mutual exclusion with business write transactions on the
-        // db-level write lock is made **deterministic** (docs/archive/gaps.md §3.9): mu_ is
+        // db-level write lock is made **deterministic**: mu_ is
         // held during reservation — the process's only writer is kept out, so we can
         // no longer end up in a busy_timeout lottery against our own business
         // transactions (the busy handler queues unfairly; under write hotspots,
@@ -717,7 +716,7 @@ void SqliteMetaStore::write_pack_delta(Conn& c, const DataRef& ref, int sign, in
     // Aggregate multiple extents of the same pack first, then one arithmetic UPDATE
     // per pack (§9.1: increments/decrements batched with the business transaction);
     // each record counts payload + header overhead, same accounting basis as
-    // file_size (docs/archive/gaps.md §2.3a)
+    // file_size
     // pack_id -> (bytes, recs)
     std::map<uint64_t, std::pair<int64_t, int64_t>> agg;
     for (const auto& e : ref.extents) {
@@ -739,7 +738,7 @@ void SqliteMetaStore::enqueue_reclaim(Conn& c, const DataRef& ref, ReclaimReason
     // rolled back in the same batch — a rolled-back transaction produces no
     // off-the-books seq, and restart neither rewinds nor re-issues (sqlite_sequence
     // shares the business transaction), sparing an id-segment counter. Oversized
-    // DataRefs split into multiple entries (docs/archive/gaps.md §2.11): GC per-batch decode
+    // DataRefs split into multiple entries: GC per-batch decode
     // memory stays bounded, and independent acks are harmless
     const int64_t ts = now_ms();
     for (size_t i = 0; i < ref.extents.size(); i += kReclaimMaxExtents) {
@@ -985,7 +984,7 @@ ListResult SqliteMetaStore::list_objects(std::string_view b, const ListOptions& 
 }
 
 // Transaction managed by the caller: the live path wraps one read transaction per
-// call, the snapshot view (roadmap §3.7) runs every call inside its one long-held
+// call, the snapshot view runs every call inside its one long-held
 // read transaction — an inner BEGIN here would nest and fail
 ListResult SqliteMetaStore::list_objects_in(Conn& c, std::string_view b, const ListOptions& opt) {
     require_bucket(c, b);
@@ -1134,7 +1133,7 @@ std::vector<UploadInfo> SqliteMetaStore::list_uploads(std::string_view b, std::s
     st.blob(6, prefix);
     while (st.step()) {
         std::string_view k = st.col_blob(0);
-        // ordered: past the prefix range (roadmap §3.5)
+        // ordered: past the prefix range
         if (k.substr(0, prefix.size()) != prefix) break;
         auto rec = codec::decode_upload(std::string(k), std::string(st.col_blob(1)), st.col_blob(2));
         out.push_back({rec.meta.key, rec.upload_id, codec::from_unix_ms(rec.initiated_ms)});
@@ -1241,7 +1240,7 @@ std::vector<std::pair<uint64_t, Reclaim>> SqliteMetaStore::peek_reclaims(size_t 
     size_t extents = 0;
     while (st.step()) {
         out.emplace_back(uint64_t(st.col_i64(0)), codec::decode_reclaim(st.col_blob(1)));
-        // Cumulative extent cap (gaps §2.11): at least 1 item is returned
+        // Cumulative extent cap: at least 1 item is returned
         extents += out.back().second.extents.size();
         if (extents >= max_extents) break;
     }
@@ -1354,7 +1353,7 @@ bool SqliteMetaStore::swap_extents(std::string_view b, std::string_view k, uint6
 }
 
 std::vector<bool> SqliteMetaStore::swap_extents_batch(std::span<const SwapReq> reqs) {
-    // Batched compaction (gaps §2.13): the whole batch is one transaction with one
+    // Batched compaction: the whole batch is one transaction with one
     // fsync — per-item swap would commit independently per item while contending
     // with business writes for the same db-level write lock. Per-item CAS stays
     // independent: a failed item writes nothing and does not affect the rest
@@ -1389,7 +1388,7 @@ void SqliteMetaStore::scan_refs(const std::function<void(uint64_t)>& cb) {
     while (st.step()) cb(uint64_t(st.col_i64(0)));
 }
 
-// Online-dump snapshot view (roadmap §3.7): one leased pool connection with an
+// Online-dump snapshot view: one leased pool connection with an
 // open WAL read transaction for the view's lifetime — every read observes the
 // state the transaction first materialized, while the write connection keeps
 // committing. Member order matters: txn_ is declared after lease_, so it is
@@ -1422,7 +1421,7 @@ private:
 
 std::unique_ptr<IMetaReadView> SqliteMetaStore::snapshot() { return std::make_unique<SnapshotView>(*this); }
 
-// ---------- Backup chain (backlog-sequence ⑧) ----------
+// ---------- Backup chain ----------
 
 namespace {
 

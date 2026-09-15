@@ -22,7 +22,7 @@ namespace lights3::storage::fsutil {
 
 inline constexpr const char* kSidecarSuffix = ".lights3-meta";
 inline constexpr const char* kBucketMarker = ".lights3-bucket";
-// Directory-marker object (docs/archive/gaps.md §6.3): a trailing '/' in a key has no
+// Directory-marker object: a trailing '/' in a key has no
 // corresponding file name on the filesystem; its carrier is this reserved file inside the
 // directory -- "a/b/" ⇔ <bucket>/a/b/.lights3-dir. Listing restores it to the key "a/b/"
 // (its sort key is the empty string, so it sorts right before the other keys in the same
@@ -63,7 +63,7 @@ void write_tsv(const std::filesystem::path& dest, const std::filesystem::path& t
                const std::vector<std::pair<std::string, std::string>>& kv);
 std::vector<std::pair<std::string, std::string>> read_tsv(const std::filesystem::path& path);
 
-// Metadata-xattr accounting and policy (roadmap §3.5): setxattr failure used to be a
+// Metadata-xattr accounting and policy: setxattr failure used to be a
 // single startup-time WARN line -- silently falling back to the two-rename sidecar
 // consistency model. The backend owns one of these, wires the gauge/counter into its
 // MetricsScope, and hands a pointer down every write path. required=true turns a failed
@@ -91,7 +91,7 @@ struct MetaXattrPolicy {
 // require_xattr
 int probe_meta_xattr(const std::filesystem::path& dir);
 
-// Sidecar write policy (roadmap §3.5): the xattr is the authoritative read source, the
+// Sidecar write policy: the xattr is the authoritative read source, the
 // sidecar exists for external tools / legacy objects / filesystems without xattr. In the
 // default kSync mode a small-object PUT costs 4 fsyncs + 2 renames, half of it the
 // sidecar. kAsync takes the sidecar off the latency path (written by a background task
@@ -124,7 +124,7 @@ bool commit_object_file(const std::filesystem::path& dest, TmpFile& tmp, const O
 
 // The two synchronous halves of commit_object_file, exposed separately so xlocalfs can run
 // the data rename and the directory fsync in between through io_uring (RENAMEAT + FSYNC
-// SQE, roadmap §3.4 ③) with byte-identical on-disk semantics:
+// SQE) with byte-identical on-disk semantics:
 // prepare_object_dest = create parent dirs + directory-conflict checks;
 // write_object_sidecar = the trailing sidecar write
 void prepare_object_dest(const std::filesystem::path& dest, std::string_view key);
@@ -168,7 +168,7 @@ bool set_meta_xattr(const std::filesystem::path& path, const ObjectMeta& meta, c
 // docs/architecture/storage/tiered-design.md §4.1).
 // Missing / not a regular file throws NoSuchKey.
 ObjectMeta load_object_meta(const std::filesystem::path& data_path, std::string key, TierInfo* tier_out = nullptr);
-// Whether the data file carries the metadata xattr (operator introspection, roadmap §6.2)
+// Whether the data file carries the metadata xattr (operator introspection)
 bool has_meta_xattr(const std::filesystem::path& data_path);
 
 // Same as above, but reuses a stat result the caller already holds. GET must use **fstat
@@ -190,7 +190,7 @@ struct StubRace : s3::S3Error {
 // Stubbing commit (docs/architecture/storage/tiered-design.md §5.2 steps b/c): first write the tier=remote
 // sidecar, then rename a 0-length tmp over the data file. Idempotent; the caller must hold
 // the per-key lock.
-// In-place metadata rewrite for an existing object (roadmap §2.5 ?tagging): xattr
+// In-place metadata rewrite for an existing object (?tagging): xattr
 // first (authoritative), sidecar after — same consistency model as commit paths.
 // Under SidecarMode::kLazy the sidecar is rewritten only if one exists or the xattr
 // failed (a rare operator path: async deferral is not worth its complexity here).
@@ -221,7 +221,7 @@ public:
 
     Task<size_t> read(std::span<std::byte> buf) override;
     std::optional<uint64_t> length() const override { return total_; }
-    // sendfile exit (roadmap §4.3 ④): the remaining range, as-is
+    // sendfile exit: the remaining range, as-is
     std::optional<http::FileSpan> try_as_file() override { return http::FileSpan{fd_, offset_, remaining_}; }
     void file_bytes_sent(uint64_t n) override {
         n = std::min(n, remaining_);

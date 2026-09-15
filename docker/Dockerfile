@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# LightS3 container image (roadmap §6.3, docs/usage/deployment.md §4). The build
+# LightS3 container image (docs/usage/deployment.md §4). The build
 # context is the repository root (run from there; .dockerignore lives next to it):
 #
 #   docker build -f docker/Dockerfile -t lights3 .                # builtin/beast/httplib drivers,

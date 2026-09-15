@@ -1,6 +1,6 @@
 #!/bin/sh
 # Shared post-install / pre-remove logic for every distribution channel
-# (roadmap §6.3): scripts/install.sh, the deb maintainer scripts and the rpm
+#: scripts/install.sh, the deb maintainer scripts and the rpm
 # scriptlets all call this file instead of carrying their own copy of the
 # user / directory / secrets / systemd handling. POSIX sh: dpkg and rpm run
 # maintainer scripts under /bin/sh, which is dash on Debian.

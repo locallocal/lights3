@@ -127,7 +127,7 @@ with `Bg` + `...`):
 | `gcq` | `G<be64 seq>` | `encode_reclaim` | `peek_reclaims` = prefix Scan limit max; seq is the key order |
 | `stats` counters | `C<kind>` (kind ∈ {`0`,`1`,`q`}) | 8B little-endian i64 (reusing the codec counter format) | Segment reservation (§5) |
 | `stats` pack accounting | `S<be64 id>d<be64 delta_id>` (delta rows) / `S<be64 id>s` (seal row) | delta = le64 bytes‖le64 recs; seal = le64 file_size | Lands with pack aggregation (P2) as **delta rows + folding**: each business transaction writes a unique delta row (id from the 'd' segment counter), pure writes without conflict — a read-modify-write on a shared account row would make small-object PUT prewrites on the same active pack collide (the materialized solution to the original warning); `pack_stats()` aggregates via prefix scan, and when a single pack exceeds 16 delta rows it folds them into one row in passing (delete old rows + write the merged row, no conflict with concurrent additions) |
-| — (multi-gateway leases) | `Lgc` / `Lr<owner>` | GC lease owner; `<oldest_read_ms>\0<expiry_ms>\0<oldest_write_ms>` | `try_gc_lease` = atomic CAS+TTL; `publish_lease` writes one row per gateway, `min_lease` prefix-scans them and lazily deletes expired rows (roadmap §3.7) |
+| — (multi-gateway leases) | `Lgc` / `Lr<owner>` | GC lease owner; `<oldest_read_ms>\0<expiry_ms>\0<oldest_write_ms>` | `try_gc_lease` = atomic CAS+TTL; `publish_lease` writes one row per gateway, `min_lease` prefix-scans them and lazily deletes expired rows |
 | `tc` | `T<key>` | opaque | KV facade for the S3 Tables catalog (`kv_get/put/delete/scan/put_batch`, one optimistic transaction per batch) |
 
 ### 3.3 list_objects: Snapshot + Scanner, Algorithm Copied from the RocksDB Version
@@ -698,7 +698,7 @@ with a WARN (§7.1).
 dependent on the upstream process)**: contribute to tikv/client-c the 2PC
 mutation op extension and the `Snapshot::Get` not_found overload; once merged,
 upgrade the submodule pointer and retire the sidecar accordingly. The
-message-string coupling (backlog-sequence ⑨, 2026-09-06): the upstream patch is
+message-string coupling (2026-09-06): the upstream patch is
 prepared in `third_party/patches/client-c` (adds `ErrorCodes::WriteConflict`,
 LockResolver throws it, RegionClient's two bare throws get LogicalError; PR text
 in that directory's README); the sidecar's `is_upstream_write_conflict` chooses

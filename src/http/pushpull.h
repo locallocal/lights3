@@ -5,7 +5,7 @@
 // consumer has cancelled; consumer pop returning 0 means EOF, and pop after
 // close(ok=false) propagates as an exception (matching the "peer failed
 // mid-transfer" contract).
-// Block shaping (backlog-sequence ⑩): a producer that hands over pieces it does
+// Block shaping: a producer that hands over pieces it does
 // not own (httplib's content receiver: 16 KiB slices of its own buffer) has them
 // appended to one growing tail block of up to kBlockTarget bytes, so the consumer
 // pops large blocks and the two threads hand off per block, not per slice; a
@@ -133,7 +133,7 @@ private:
 
 class QueueBodyReader : public BodyReader {
 public:
-    // When request_thread is non-null (httplib driver, docs/archive/gaps.md §2.10): the
+    // When request_thread is non-null (httplib driver): the
     // cv-blocking pop first switches back to the request's own thread (which is
     // idling in sync_wait_pumping), so it does not occupy a shared pool thread;
     // when null, it blocks in place (cloudproxy's pump direction already yields

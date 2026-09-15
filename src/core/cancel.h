@@ -30,9 +30,8 @@ public:
     // Callback contract (docs/architecture/concurrency.md §5): **must be lightweight**. The
     // cancellation source is often TimerQueue's single timer thread, and resuming a
     // continuation directly inside a callback would run the whole request chain on
-    // the timer thread, stalling every timer in the process meanwhile (docs/archive/gaps.md
-    // §3.2). Consumers that need to resume coroutines always go through an executor
-    // (see ThreadPool::ScheduleAwaiter / AsyncSemaphore::AcquireAwaiter)
+    // the timer thread, stalling every timer in the process meanwhile. Consumers that need to resume coroutines always
+    // go through an executor (see ThreadPool::ScheduleAwaiter / AsyncSemaphore::AcquireAwaiter)
     void request_cancel() {
         std::map<uint64_t, std::function<void()>> cbs;
         {
@@ -60,7 +59,7 @@ public:
 
     bool cancelled() const { return cancelled_.load(std::memory_order_acquire); }
 
-    // Request-scoped payload riding on the token (roadmap §5.1): the request entry
+    // Request-scoped payload riding on the token: the request entry
     // attaches e.g. its backend-time accumulator, and anything down the inherited
     // co_await chain (the metered backend decorator) reaches it without threading a
     // parameter through every call. Shared ownership: a frame outliving the request
@@ -107,7 +106,7 @@ public:
     // Deregister: on return, the callback is guaranteed to never run again — if
     // cancellation is currently firing (the callback batch runs outside the lock),
     // block until the batch finishes, same semantics as TimerQueue::cancel
-    // (docs/archive/gaps.md §3.9). Self-deregistration on the firing thread (from inside a
+    //. Self-deregistration on the firing thread (from inside a
     // callback) does not wait, preventing self-deadlock; while waiting, do not hold
     // locks the callbacks need
     void remove_callback(uint64_t id) {

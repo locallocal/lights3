@@ -105,10 +105,10 @@ struct HttpServerFactory {
   driver 负责在自己的执行环境里驱动这个协程直至完成
   （方式见 [concurrency.md](concurrency.md)）。
 
-### 2.1 TLS 与停机/背压参数（docs/archive/gaps.md §7）
+### 2.1 TLS 与停机/背压参数
 
 - **TLS**：`http.tls_cert` + `http.tls_key`（PEM，两个都给才启用）。**四个驱动
-  都支持**（roadmap §4.1，[tls.md](../usage/tls.md)）：builtin/beast/httplib 共用
+  都支持**（[tls.md](../usage/tls.md)）：builtin/beast/httplib 共用
   `src/http/tls.h` 的 OpenSSL 证书回调层（SNI 多证书、mTLS、最低版本、cipher、
   证书热重载都在那一处），seastar 走 `seastar::tls`（无 SNI）。证书加载失败在
   启动期抛出——SigV4 `UNSIGNED-PAYLOAD` 的完整性依赖传输层加密，"配了但静默
@@ -116,11 +116,10 @@ struct HttpServerFactory {
 - **可配置边界**（曾是四驱动各写一份的硬编码，默认值即旧常量）：
   `drain_limit`（4MiB，回错前排空请求体上限）、`trailer_max_size`（16KiB）、
   `io_chunk_size`（64KiB 流式块）、`body_queue_cap`（256KiB，仅 httplib 的
-  推转拉背压水位）、`shutdown_grace`（10s；也是关停时等待许可归还的排空死线，
-  roadmap §4.5）、`shutdown_force_wait`（5s）、`sendfile`（true，builtin 的文件
+  推转拉背压水位）、`shutdown_grace`（10s；也是关停时等待许可归还的排空死线）、`shutdown_force_wait`（5s）、`sendfile`（true，builtin 的文件
   body 零拷贝出口，§2.4 ④）。关停失败（后端 close / 池 join）
   以退出码 `3` 上报，见 [cli.md §2.1](../usage/cli.md)。
-- **独立 admin 端口**（backlog-sequence ②）：`http.admin_port`（缺省 = 不起；`0` =
+- **独立 admin 端口**：`http.admin_port`（缺省 = 不起；`0` =
   内核选端口，同 `port`）+ `http.admin_bind`（空 = 同 `bind`）。配置后再起一个
   **同驱动**的 `IHttpServer`（数据面是 seastar 时 admin 面用 builtin——seastar 引擎是
   进程单例），只服务 `/-/` 面：`/-/metrics` 与全部 `/-/admin/*` 搬到 admin 端口，
@@ -136,7 +135,7 @@ struct HttpServerFactory {
   （[cli.md §3.1](../usage/cli.md)），Prometheus 抓 admin 端口（[monitoring.md](../usage/monitoring.md)）。
 - `http.io_threads` 的语义随驱动漂移，见 §2.2 的矩阵。
 
-### 2.2 超时体系与连接治理（roadmap §4.2）
+### 2.2 超时体系与连接治理
 
 原先一个 `idle_timeout` 撑起四类语义，"空闲连接 5s 回收"与"慢客户端 body 允许
 300s"无法分开。现拆为四项，四驱动各接一遍：
@@ -163,7 +162,7 @@ httplib 上游只有一个读超时，**头部阶段由 `body_timeout` 约束**�
 `lights3_http_connections_total{result=accepted|rejected_limit}`、
 `lights3_http_connections_active`、`lights3_http_keepalive_closes_total`、
 `lights3_http_timeouts_total{phase}`。httplib 跑上游的 accept 循环，四组都为 0
-（文档化限制）。roadmap §5.3 追加 `lights3_http_requests_total`（L1 解析成功的
+（文档化限制）。另有 `lights3_http_requests_total`（L1 解析成功的
 请求数，÷ accepted = keep-alive 复用率）、`lights3_http_tls_handshakes_total{result=ok|failed}`
 （builtin/beast 自持握手可计；httplib/seastar 的握手在上游内部，恒 0）、
 `lights3_http_parse_errors_total`（请求行/头部块/framing 畸形，无论静默关闭还是
@@ -178,7 +177,7 @@ httplib 上游只有一个读超时，**头部阶段由 `body_timeout` 约束**�
 | httplib | 请求线程池大小，下限 8 | `io_threads=N -> request thread pool of max(N,8)` |
 | seastar | shard 数（进程内引擎只启一次，之后不可变） | `io_threads=N -> smp=N shard(s)` |
 
-### 2.3 per-IP / per-AK 限流（roadmap §4.2）
+### 2.3 per-IP / per-AK 限流
 
 全局 `runtime.max_inflight_requests` 之外的按客户端闸门（`src/s3/ratelimit.h`）：
 
@@ -202,10 +201,10 @@ ratelimit:
 - 反向代理后的部署要么把限流放在代理，要么让 per-IP 关掉——网关看到的是
   代理地址（`X-Forwarded-For` 不被信任）。
 
-**客户端断连独立取消源**仍是刻意取舍（roadmap §4.2 末项）：长 handler 靠
+**客户端断连独立取消源**仍是刻意取舍：长 handler 靠
 `request_timeout` 兜底，驱动只在下一次 socket 操作时发现断连。
 
-### 2.4 数据面性能（roadmap §4.3）
+### 2.4 数据面性能
 
 响应路径的四项改动（①②④⑤）全部在 L1 内、不改 `BodyReader` 的串行单消费者契约；
 后续按基线跑出的问题补做的 ⑨–⑬ 见表末。基线数据见
@@ -219,7 +218,7 @@ ratelimit:
 | ⑤ | **builtin 流式写进 pumping** | 整个 body 循环是一个协程，由 `sync_wait_pumping` 驱动（此前每 64KiB 一次裸 `sync_wait`：condvar + 两次线程跳转，1GiB = 16384 次）；每块前 `co_await resume_on(exec)` 把续体拉回连接线程发送（慢客户端不占共享池），`PumpExecutor::running_in_this_thread()` 已在本线程时内联继续 |
 | ⑥ | **beast `ResumeOn` 快路径** | 连接 executor 是所在 io 线程 `io_context` 的普通 executor（⑩ 之后不再有 strand）；`any_io_executor::target<io_context::executor_type>()` 探到后 `running_in_this_thread()` 为真即 `await_ready`，省一次 `asio::post`。seastar 的 `ResumeOnShard` 本就有同样判断 |
 | ⑦ | **per-bucket 指标去锁** | `CountingBodyReader` 每块只加全局原子计数（`add_bytes_*_total`），桶维度累计到流末或每 16MiB 才 `add_bucket_bytes` 进一次互斥锁（此前每 64KiB 一次全局锁） |
-| ⑧ | **HeaderMap 预筛 / BlockQueue 块整形**（backlog-sequence ⑩，2026-09-06 补做） | `HeaderMap` 仍是保序 vector，每项旁存一个 8 位 tag（名字长度 + 小写首尾字符折叠，O(1)——整名 FNV 哈希的代价与它省下的扫描相当，实测反让命中变慢）+ 256 位"在场 tag"集合：未命中（L2 探测的可选头多数不在请求里）不扫描直接返回，命中先比 tag 再做大小写折叠比较。微基准（25 个头、-O2）：未命中 15→1.8 ns，命中 8.3→8.0 ns。`BlockQueue`：借用缓冲的 push（httplib 的 16 KiB 片）拼进同一尾块（≤256 KiB），消费方按块而不是按片 pop（16384→约 4.6K 次/256 MiB）；`push(std::string&&)` 整块移交（cloudproxy 出方向上传每轮读进新分配的 64 KiB string 后移入，锁内不再拷贝）。空 push 被丢弃（零长块会被 pop 当作 EOF）。绝对量仍小，与 backlog 当初的判断一致 |
+| ⑧ | **HeaderMap 预筛 / BlockQueue 块整形**（2026-09-06 补做） | `HeaderMap` 仍是保序 vector，每项旁存一个 8 位 tag（名字长度 + 小写首尾字符折叠，O(1)——整名 FNV 哈希的代价与它省下的扫描相当，实测反让命中变慢）+ 256 位"在场 tag"集合：未命中（L2 探测的可选头多数不在请求里）不扫描直接返回，命中先比 tag 再做大小写折叠比较。微基准（25 个头、-O2）：未命中 15→1.8 ns，命中 8.3→8.0 ns。`BlockQueue`：借用缓冲的 push（httplib 的 16 KiB 片）拼进同一尾块（≤256 KiB），消费方按块而不是按片 pop（16384→约 4.6K 次/256 MiB）；`push(std::string&&)` 整块移交（cloudproxy 出方向上传每轮读进新分配的 64 KiB string 后移入，锁内不再拷贝）。空 push 被丢弃（零长块会被 pop 当作 EOF）。绝对量仍小，与 backlog 当初的判断一致 |
 | ⑨ | **beast 请求体读粒度**（基线跑出的发现） | 会话的 `flat_buffer` 不预留容量时，beast 的 `read_size = max(512, capacity − size)` 让每次 socket 读只取 512 字节：4 MiB 请求体 = 8192 次 `recvmsg` + 同样多次 `timerfd_settime`（每次 `expires_after`）+ 7.7 万次 futex，单次 PUT 40 ms 对 builtin 6 ms。修复：`buffer.reserve(io_chunk_size)`，PUT 4 MiB 91 → 914 ops/s |
 | ⑩ | **beast 每 io 线程一个 `io_context`**（todo 条目 "beast TLS GET 明显落后"，2026-09-13 做完删除） | 此前 N 个 io 线程共跑一个 `io_context`：任何 socket 完成回调都要经全局队列唤醒别的线程，`strace -c` 实测一次 4 MiB TLS GET 约 655 次 futex（每条 16 KiB TLS 记录约 2.5 对唤醒/等待）。现在每个 io 线程独占一个 `io_context`（并发提示 1），连接在 accept 时轮询钉到某个线程、不再需要 strand，完成回调全是同线程续体；控制面（acceptor / 停机 eventfd / grace、force 定时器）留在 `io_[0]` 的 strand 上，force 停机与 `finish()` 遍历全部上下文。池线程经 `ResumeOn` 投递回 io 线程仍是跨线程 post（每块一次，不是每记录一次）。TLS GET 1560 → 2406 ops/s，明文 GET +21%，PUT +13～19% |
 | ⑪ | **beast 会话级看门狗替换逐操作超时** | `beast::basic_stream` 一旦设了 expiry，每次 `async_read_some` / `async_write_some` 都要 `timer.async_wait` 再 `cancel`——TLS 下就是每条记录两次定时器操作（实测每次 4 MiB GET 263 次 `timerfd_settime`）。请求体读、排空与全部响应写改为 `expires_never()`，由 `Session` 上一个 `steady_timer` 兜底：`wd_begin()` 只记录在飞操作的起点与阶段，定时器整个会话只武装一次，到期时在飞操作超时则计数该阶段并 `close()`（操作以错误结束），未超时按剩余时间续武装，无在飞操作则休眠到下次 `wd_begin()`。头部读与握手仍用流 expiry（单次操作，且要区分 header/idle 两类超时）。吞吐变化在噪声内，TLS GET p99 14.4 → 8.1 ms |

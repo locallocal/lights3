@@ -7,10 +7,10 @@
 //   lights3 duostore dump <backend> <file> [...]  duostore meta admin     (cli/cli_duostore.cc)
 //   lights3 duostore load <backend> <file> [...]  (docs/architecture/storage/duostore-core.md §11)
 //   lights3 duostore backup|restore <backend> ...  meta backup chains / PITR (§11.1)
-//   lights3 duostore gc|scan <backend> [...]      run one GC / orphan-scan round (roadmap §3.2)
-//   lights3 duostore quarantine list|release|purge ...  corrupt-pack quarantine (roadmap §3.7)
+//   lights3 duostore gc|scan <backend> [...]      run one GC / orphan-scan round
+//   lights3 duostore quarantine list|release|purge ...  corrupt-pack quarantine
 //   lights3 tier scan|gc|reconcile <backend> [..] tiered background tasks (cli/cli_tier.cc)
-//   lights3 tier quarantine list|forget|purge ...  tiered reconcile quarantine ledger (roadmap §3.6)
+//   lights3 tier quarantine list|forget|purge ...  tiered reconcile quarantine ledger
 //   lights3 fsck <backend> [--max-mbps=<n>] [...] offline integrity scrub (cli/cli_fsck.cc)
 //
 // This file holds only the root command and main; each command group lives in
@@ -55,10 +55,10 @@ int main(int argc, char** argv) {
     add_config_flag(root);
     root->var<bool>("check-config", false,
                     "Parse and validate the config, print what it resolves to, exit 0/1 "
-                    "without opening backends or binding a port (roadmap §6.2)");
+                    "without opening backends or binding a port");
     root->var<bool>("version", false,
                     "Print version, git commit, build type and the compiled-in drivers / "
-                    "backends, then exit (roadmap §6.3)");
+                    "backends, then exit");
 #ifdef LIGHTS3_DUOSTORE
     root->add_subcommand(make_duostore());
 #endif

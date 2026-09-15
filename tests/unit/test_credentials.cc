@@ -388,7 +388,7 @@ TEST(admin_api_policy_flow) {
     CHECK_EQ(env.call("PUT", "/logs-a/new", dyn, {}, "x").status, 403);
     // outside the allowlist
     CHECK_EQ(env.call("GET", "/private/k", dyn).status, 403);
-    // ListBuckets is now filtered by policy (docs/archive/gaps.md §5.10): bucket names are precisely the first step
+    // ListBuckets is now filtered by policy: bucket names are precisely the first step
     // of an attack chain, and a restricted credential should not see that buckets outside its allowlist exist
     auto lb = env.call("GET", "/", dyn);
     CHECK_EQ(lb.status, 200);
@@ -542,7 +542,7 @@ TEST(credstore_sync_tombstone_blocks_revival) {
     CHECK(!store->secret_for(c.access_key));
 }
 
-// gaps §3.7: authorization uses the policy snapshot taken at signature-verification time. When a credential is
+// authorization uses the policy snapshot taken at signature-verification time. When a credential is
 // revoked after verification (sync_now bulk-deletes every sync cycle, so the window can be hit), the old behavior
 // was that the table lookup failed -> the policy vanished entirely -- a readonly credential became unrestricted
 // within the window. The snapshot makes in-flight requests complete strictly with the semantics of verification
@@ -696,7 +696,7 @@ TEST(policy_prefix_batch_delete_and_listing) {
     CHECK_EQ(env.call("GET", "/shared/logs/mine", root).status, 404);
 }
 
-// ---- roadmap §2.5: in-place credential policy/comment update + multi-instance propagation ----
+// ---- in-place credential policy/comment update + multi-instance propagation ----
 
 TEST(admin_api_update_credential) {
     SvcEnv env;
@@ -775,7 +775,7 @@ TEST(credstore_update_propagates_via_sync) {
     CHECK_EQ(b->find(c.access_key)->rev, uint64_t{2});
 }
 
-// ---- roadmap §2.6: STS session credentials ----
+// ---- STS session credentials ----
 
 namespace {
 std::string xtext(const std::string& xml, const std::string& tag) {
@@ -854,7 +854,7 @@ TEST(sts_assume_role_flow) {
     CHECK_EQ(sts_call(env, root, "Action=AssumeRole&DurationSeconds=60").status, 400);
 }
 
-// Sessions are shared across instances through .sys/sts/<ak> (backlog-sequence ④):
+// Sessions are shared across instances through .sys/sts/<ak>:
 // instance B verifies a session minted on A the first time it sees the AK (read-through
 // before verify), the periodic sync pulls sessions ahead of time, and expiry is reaped
 // by whichever instance notices, after which both reject

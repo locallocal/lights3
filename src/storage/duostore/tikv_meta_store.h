@@ -52,7 +52,7 @@ struct TikvMetaOptions {
 class TikvMetaStore final : public IMetaStore {
 public:
     // Current schema version (marker = "t" + version; existing stores are upgraded
-    // along the migration chain at open, docs/archive/gaps.md §6.1)
+    // along the migration chain at open)
     static constexpr int64_t kSchemaCurrent = 1;
 
     explicit TikvMetaStore(TikvMetaOptions opt);
@@ -95,18 +95,17 @@ public:
                                                             size_t max_extents = SIZE_MAX) override;
     void ack_reclaim(uint64_t seq) override;
     bool try_gc_lease(std::string_view owner, int64_t ttl_ms) override;
-    // Multi-gateway read / write leases (roadmap §3.7, multi-gateway-multipart
-    // §4 ①): 'L' table rows "r<owner>" with the value
+    // Multi-gateway read / write leases: 'L' table rows "r<owner>" with the value
     // "<oldest_read_ms>\0<expiry_ms>\0<oldest_write_ms>" (same wall-clock TTL
     // arithmetic as the GC lease; rows from older builds stop after expiry_ms =
     // write floor unknown); min_lease scans them, lazily deleting expired rows
     bool publish_lease(std::string_view owner, const LeaseInfo& info, int64_t ttl_ms) override;
     std::optional<LeaseInfo> min_lease() override;
-    // Online-dump snapshot (roadmap §3.7): a fixed TSO version — MVCC makes every
+    // Online-dump snapshot: a fixed TSO version — MVCC makes every
     // read at it a consistent view. The cluster GC safepoint must not pass the
     // version while the view lives: keep gc_retention above the dump duration
     std::unique_ptr<IMetaReadView> snapshot() override;
-    // Restore marker (backlog-sequence ⑧): a fresh PD TSO -- the --backupts / point
+    // Restore marker: a fresh PD TSO -- the --backupts / point
     // in time for the cluster-side BR restore that precedes a logical load
     std::string restore_marker() override;
     // batch write-off in one transaction
@@ -221,7 +220,7 @@ private:
     // pure-write, no conflict). Independent of mut_refs: complete's refs transfer
     // (owner rewrite) must be a no-op for packs — mixing them would double-count.
     // rec_overhead: per-record header overhead (codec::pack_rec_overhead*); live_bytes
-    // uses the same accounting basis as file_size (docs/archive/gaps.md §2.3a)
+    // uses the same accounting basis as file_size
     void mut_pack_delta(std::vector<TikvMutation>& muts, const DataRef& ref, int sign, int64_t rec_overhead);
     // Full read of parts (ascending by part_no; the be16 suffix is naturally ordered)
     std::vector<PartRec> scan_parts(uint64_t ver, std::string_view b, std::string_view k, std::string_view id);

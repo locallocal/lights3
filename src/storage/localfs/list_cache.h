@@ -1,4 +1,4 @@
-// L3: per-directory sorted-entry cache for localfs listing (roadmap §3.5 ②).
+// L3: per-directory sorted-entry cache for localfs listing.
 // Paging through a large directory used to redo readdir + sort of the whole directory
 // on every page, so the cost of page N grew with N. The name list of a directory is
 // invalidated by the directory's own inode identity + mtime/ctime (POSIX updates both on

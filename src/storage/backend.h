@@ -37,7 +37,7 @@ struct ObjectMeta {
     // x-amz-meta-* kv pairs with the prefix stripped
     std::map<std::string, std::string> user_meta;
 
-    // First-class S3 object metadata (docs/archive/gaps.md §5.2): previously all dropped on PUT and
+    // First-class S3 object metadata: previously all dropped on PUT and
     // never returned on GET. Dropping content_encoding=gzip leaves browsers with a byte
     // stream they cannot decompress -- these are not "extra user metadata" but part of
     // content negotiation. Empty string = unset, header is not returned
@@ -55,9 +55,9 @@ struct ObjectMeta {
     // STANDARD storage class; storing the client-reported value and echoing it back would
     // make the storage layer lie (the object sits on local disk yet reports GLACIER);
     // non-STANDARD gets a direct 501 at L2, consistent with the handling of x-amz-acl
-    // (docs/archive/gaps.md §5.2)
+    //
 
-    // Checksum closure (roadmap §2.2): the client-declared, gateway-verified checksum
+    // Checksum closure: the client-declared, gateway-verified checksum
     // persists with the object and is echoed on GET/HEAD under x-amz-checksum-mode.
     // algorithm is the uppercase wire name (CRC32/CRC32C/CRC64NVME/SHA1/SHA256), value
     // is base64 (composite values carry the "-N" suffix), type is FULL_OBJECT or
@@ -70,12 +70,12 @@ struct ObjectMeta {
     // put_object contract guarantees happens before the backend commits. Serializers
     // read through resolved_checksum_value(); never persisted itself
     std::shared_ptr<const std::string> checksum_pending;
-    // Multipart part layout recorded at complete (roadmap §2.5 GET ?partNumber):
+    // Multipart part layout recorded at complete (GET ?partNumber):
     // part_sizes[i] is the size of part i+1. Empty = single-part or unknown (objects
     // completed before this field existed)
     std::vector<uint64_t> part_sizes;
 
-    // Object tagging (roadmap §2.5): canonical URL-encoded "k=v&k2=v2" (both sides
+    // Object tagging: canonical URL-encoded "k=v&k2=v2" (both sides
     // aws_uri_encoded — safe for every text serializer), empty = no tags. Rides
     // kStdMetaFields for extraction/persistence but is never echoed as a header
     // (GET answers x-amz-tagging-count instead; ?tagging returns the XML)
@@ -132,7 +132,7 @@ struct ObjectStream {
     std::optional<ByteRange> range;
 };
 
-// Object layout for operators (roadmap §6.2, `lights3-ctl object inspect` via
+// Object layout for operators (`lights3-ctl object inspect` via
 // GET /-/admin/objects/<bucket>/<key>): where the bytes live inside the engine.
 // attrs are engine-specific key/values in display order; extents are the physical
 // pieces (a file, pack/chunk records, rados objects). Engines without an internal
@@ -157,7 +157,7 @@ struct ObjectLayout {
 struct PutResult {
     std::string etag{};
     // Filled by complete_multipart when a composite checksum was computed from the
-    // stored per-part values (roadmap §2.2); the handler echoes it in the response XML
+    // stored per-part values; the handler echoes it in the response XML
     std::string checksum_algorithm{};
     std::string checksum_value{};
     std::string checksum_type{};
@@ -205,7 +205,7 @@ struct PartInfo {
     int part_no = 0;
     // may be quoted; quotes are stripped before comparison
     std::string etag{};
-    // Optional client-declared part checksum from the complete XML (roadmap §2.2):
+    // Optional client-declared part checksum from the complete XML:
     // validated at L2 against the stored per-part value; never trusted as a source
     std::string checksum_algorithm{};
     // base64
@@ -213,7 +213,7 @@ struct PartInfo {
 };
 
 // Client-declared, gateway-verified checksum accompanying an UploadPart body
-// (roadmap §2.2): persisted with the part record so complete can compute the
+//: persisted with the part record so complete can compute the
 // composite ("-N") object checksum from verified values only
 struct PartChecksum {
     // uppercase wire name: CRC32 / CRC32C / SHA1 / SHA256
@@ -247,7 +247,7 @@ struct UploadInfo {
     std::chrono::system_clock::time_point initiated;
 };
 
-// Pagination for the two multipart listing APIs (docs/archive/gaps.md §5.1). They used to return
+// Pagination for the two multipart listing APIs. They used to return
 // bare vectors with IsTruncated always false: clients took that as "reached the end", so
 // with 5000 active uploads they would only ever see the first page without knowing it,
 // while a single request built the whole table in memory
@@ -304,7 +304,7 @@ struct IStorageBackend {
     virtual Task<PutResult> put_object(std::string_view bucket, std::string_view key, ObjectMeta meta,
                                        http::BodyReader& body, PutCondition cond = {}) = 0;
     virtual Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) = 0;
-    // Same-backend copy fast path (docs/archive/gaps.md §6.3): when src and dst both belong to this
+    // Same-backend copy fast path: when src and dst both belong to this
     // backend, the CopyObject handler tries this hook first. Returning nullopt = no fast
     // path / unavailable this time (tier stub, cross-device, etc.); the caller falls back
     // to "get_object streaming read + put_object streaming write" -- semantically
@@ -318,7 +318,7 @@ struct IStorageBackend {
                                                             std::string_view /*dst_key*/, ObjectMeta /*meta*/) {
         co_return std::nullopt;
     }
-    // GET ?partNumber support (roadmap §2.5): byte extent of one part of a completed
+    // GET ?partNumber support: byte extent of one part of a completed
     // multipart object. The default resolves nothing — L2 falls back to the part_sizes
     // layout in ObjectMeta; proxy backends whose remote owns the layout (cloudproxy)
     // override this with a remote lookup. nullopt = layout unknown here
@@ -332,7 +332,7 @@ struct IStorageBackend {
         co_return std::nullopt;
     }
 
-    // PUT/DELETE ?tagging (roadmap §2.5): replace an existing object's tag set in place
+    // PUT/DELETE ?tagging: replace an existing object's tag set in place
     // (canonical URL-encoded form; empty = delete all tags) without rewriting the data.
     // Default is an honest 501 — backends whose meta lives inside an atomic data commit
     // record (duostore) have no in-place meta update primitive yet; tags supplied at
@@ -354,7 +354,7 @@ struct IStorageBackend {
     // Returns upload_id; meta carries the desired content_type/user_meta, applied at complete
     virtual Task<std::string> create_multipart(std::string_view bucket, std::string_view key, ObjectMeta meta) = 0;
     // part_no ∈ [1,10000]; re-uploading the same number is last-write-wins; returns the
-    // part's ETag (content MD5). checksum (roadmap §2.2): nullopt = no checksum declared;
+    // part's ETag (content MD5). checksum: nullopt = no checksum declared;
     // implementations persist checksum->resolved() with the part record AFTER draining
     // the body (trailer-form values only exist by then). Overrides must re-export the
     // convenience overload with `using IStorageBackend::upload_part;`
@@ -383,7 +383,7 @@ struct IStorageBackend {
     // Active uploads of the bucket, ascending by (key, upload_id), report is_truncated truthfully
     virtual Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket, const ListUploadsOptions& opt) = 0;
 
-    // Operator introspection (roadmap §6.2): nullopt = this engine exposes no layout.
+    // Operator introspection: nullopt = this engine exposes no layout.
     // Missing bucket/key throw NoSuchBucket/NoSuchKey like head_object
     virtual Task<std::optional<ObjectLayout>> inspect_object(std::string_view /*bucket*/, std::string_view /*key*/) {
         co_return std::nullopt;
@@ -406,7 +406,7 @@ void validate_bucket_name(std::string_view bucket, bool allow_reserved = false);
 // (the latter is unsafe for any forwarding backend that splices the key into a URL path --
 // RFC 3986 dot-segment normalization would rewrite the object's identity)
 void validate_object_key(std::string_view key);
-// Additional constraints for path-mapping backends (localfs/xlocalfs) (docs/archive/gaps.md §6.3):
+// Additional constraints for path-mapping backends (localfs/xlocalfs):
 // no leading '/', no empty segments, each segment ≤255B. Trailing-'/' directory-marker
 // objects are **not** forbidden -- localfs represents them with a reserved marker file
 // inside the directory; the S3 console's "create folder" and the directory semantics of

@@ -1,4 +1,4 @@
-// L2: ?lifecycle subresource (roadmap §2.4) — minimal subset: Expiration.Days +
+// L2: ?lifecycle subresource — minimal subset: Expiration.Days +
 // AbortIncompleteMultipartUpload.DaysAfterInitiation, prefix filters only. Root
 // (static credential) only: lifecycle rules delete data, an operator decision. Every
 // unsupported element of the full AWS surface answers 501 rather than being silently

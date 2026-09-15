@@ -1,5 +1,5 @@
-// lights3-ctl `mpu` command group: list / abort multipart uploads (zombie cleanup,
-// roadmap §6.2). Implementation in lights3_ctl_mpu.cc.
+// lights3-ctl `mpu` command group: list / abort multipart uploads (zombie cleanup). Implementation in
+// lights3_ctl_mpu.cc.
 #pragma once
 
 #include <ccmd.h>

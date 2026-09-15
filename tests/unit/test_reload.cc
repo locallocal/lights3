@@ -1,4 +1,4 @@
-// roadmap §4.4: configuration hot reload (docs/usage/config-reload.md) — the runtime
+// configuration hot reload (docs/usage/config-reload.md) — the runtime
 // primitives (semaphore capacity, router table swap), the Application-level
 // reload with its applied / requires-restart report, and the admin endpoint
 #include <unistd.h>
@@ -99,7 +99,7 @@ TEST(reload_semaphore_capacity_grows_and_shrinks) {
 }
 
 TEST(shutdown_drain_waits_on_the_semaphore) {
-    // roadmap §4.5: the drain deadline waits on a condition variable that fires when
+    // the drain deadline waits on a condition variable that fires when
     // the last permit returns, instead of polling
     AsyncSemaphore sem(2);
     // nothing out: immediately
@@ -219,12 +219,12 @@ TEST(reload_application_applies_subset_and_reports_rest) {
                                  "' applied=" + std::to_string(r3.applied.size()));
     CHECK_EQ(app.config().http.request_timeout_sec, 120);
     app.shutdown();
-    // roadmap §4.5: a clean teardown reports clean
+    // a clean teardown reports clean
     CHECK(app.shutdown_clean());
     std::filesystem::remove(path);
 }
 
-// Separate admin listener (http.admin_port, backlog-sequence ②): the application
+// Separate admin listener (http.admin_port): the application
 // binds a second listener, and moving it is a restart-only change
 TEST(application_admin_listener_bound_and_restart_only) {
     std::string path = temp_path("admin.yaml");
@@ -313,7 +313,7 @@ TEST(reload_admin_endpoint_root_only) {
     CHECK_EQ(calls, 2);
 }
 
-// ---------- backlog-sequence ⑦: backend instances added / removed at runtime ----------
+// ---------- backend instances added / removed at runtime ----------
 
 // The router swaps rules and backend set in one snapshot; iteration snapshots stay
 // stable; the default backend must survive (same instance)

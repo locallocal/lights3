@@ -126,7 +126,7 @@ RocksMetaStore::RocksMetaStore(RocksMetaOptions opt) : opt_(std::move(opt)) {
     if (!s.ok()) throw_status("open", s);
     db_.store(db, std::memory_order_release);
 
-    // Schema version check + migration hook (§4.1 / docs/archive/gaps.md §6.1). This used to
+    // Schema version check + migration hook (§4.1). This used to
     // be a hard "must exactly equal the current constant" check — any value-layout
     // change would make existing databases fail to start. Now:
     //   stored version == current → pass through;
@@ -157,7 +157,7 @@ RocksMetaStore::RocksMetaStore(RocksMetaOptions opt) : opt_(std::move(opt)) {
         throw;
     }
 
-    // Meta engine observability (docs/archive/gaps.md §6.1: the default engine rocksdb
+    // Meta engine observability (the default engine rocksdb
     // previously had no metrics at all; redis/sqlite/tikv each have busy/corruption/
     // conflict counters). Property gauges are read live at render time; they return 0
     // after the db is closed (weak-pointer semantics carried by the atomic null check
@@ -276,7 +276,7 @@ void RocksMetaStore::batch_pack_delta(rocksdb::WriteBatch& batch, const DataRef&
     // Aggregate multiple extents of the same pack first, then two merges per pack
     // (§9.1: incremented/decremented in the same batch as the business transaction);
     // each record counts payload + header overhead, matching the file_size accounting
-    // basis (docs/archive/gaps.md §2.3a)
+    // basis
     // pack_id -> (bytes, recs)
     std::map<uint64_t, std::pair<int64_t, int64_t>> agg;
     for (const auto& e : ref.extents) {
@@ -294,7 +294,7 @@ void RocksMetaStore::batch_pack_delta(rocksdb::WriteBatch& batch, const DataRef&
 void RocksMetaStore::enqueue_reclaim_locked(rocksdb::WriteBatch& batch, const DataRef& ref, ReclaimReason reason) {
     if (ref.extents.empty()) return;
     // Split oversized DataRefs (TB-scale objects = hundreds of thousands of extents)
-    // into multiple gcq entries (docs/archive/gaps.md §2.11): decoded resident memory per GC
+    // into multiple gcq entries: decoded resident memory per GC
     // batch stays bounded; acks are independent per entry, and splitting does not
     // change crash semantics (unlink is idempotent)
     const int64_t ts = now_ms();
@@ -320,8 +320,7 @@ uint64_t RocksMetaStore::alloc_id(std::string_view counter_key, IdRange& r, uint
         // then collide with chunk files already on disk via O_EXCL (§6.3's "still
         // self-consistent" depends on the unconditional sync here). Wasting a segment
         // on crash is harmless; likewise the leftover discarded when switching
-        // segments (run batch dispatch requires contiguity within a segment,
-        // docs/archive/gaps.md §3.9)
+        // segments (run batch dispatch requires contiguity within a segment)
         rocksdb::WriteBatch batch;
         batch.Merge(cfs_[kStats], slice(counter_key), codec::encode_counter_delta(int64_t(kIdSegment)));
         rocksdb::WriteOptions wo;
@@ -658,11 +657,11 @@ std::vector<UploadInfo> RocksMetaStore::list_uploads(std::string_view b, std::st
     // pure read; the lock-free get is idempotent and safe
     require_bucket_locked(b);
     std::string prefix = std::string(b) + '\0';
-    // Cursor pushdown (docs/archive/gaps.md §5.1): the key encoding is already in
+    // Cursor pushdown: the key encoding is already in
     // (key, upload_id) order, so seeking past the marker suffices — not a single
     // skipped entry is read. Key-marker-only means "key > key_marker": keys contain no
     // NUL, so key_marker+'\x01' is the smallest possible greater key. The prefix raises
-    // the seek point further (roadmap §3.5) and bounds the scan below
+    // the seek point further and bounds the scan below
     std::string seek = prefix;
     if (!id_marker.empty()) {
         seek += std::string(key_marker);
@@ -777,7 +776,7 @@ std::vector<std::pair<uint64_t, Reclaim>> RocksMetaStore::peek_reclaims(size_t m
     for (it->Seek(start); it->Valid() && out.size() < max; it->Next()) {
         uint64_t seq = codec::parse_be64({it->key().data(), it->key().size()});
         out.emplace_back(seq, codec::decode_reclaim({it->value().data(), it->value().size()}));
-        // Cumulative extent cap (gaps §2.11): return at least 1 entry (oversized single entries left from before
+        // Cumulative extent cap: return at least 1 entry (oversized single entries left from before
         // splitting)
         extents += out.back().second.extents.size();
         if (extents >= max_extents) break;
@@ -896,7 +895,7 @@ bool RocksMetaStore::swap_extents(std::string_view b, std::string_view k, uint64
 }
 
 std::vector<bool> RocksMetaStore::swap_extents_batch(std::span<const SwapReq> reqs) {
-    // Batched compaction (gaps §2.13): the whole batch commits in one WriteBatch.
+    // Batched compaction: the whole batch commits in one WriteBatch.
     // Per-item CAS is independent — a failed item simply stays out of the batch and
     // does not affect the rest
     std::lock_guard lk(mu_);
@@ -923,7 +922,7 @@ void RocksMetaStore::scan_refs(const std::function<void(uint64_t)>& cb) {
     if (!it->status().ok()) throw_status("scan_refs", it->status());
 }
 
-// Online-dump snapshot view (roadmap §3.7): pins one RocksDB snapshot for its
+// Online-dump snapshot view: pins one RocksDB snapshot for its
 // lifetime; every read is routed through the store's snapshot-parameterized
 // bodies. Borrows the store — the caller (run_meta_dump) destroys it before close
 class RocksMetaStore::SnapshotView final : public IMetaReadView {
@@ -947,7 +946,7 @@ private:
 
 std::unique_ptr<IMetaReadView> RocksMetaStore::snapshot() { return std::make_unique<SnapshotView>(*this, db()); }
 
-// ---------- Backup chain (backlog-sequence ⑧) ----------
+// ---------- Backup chain ----------
 
 namespace {
 rocksdb::BackupEngineOptions backup_options(const std::filesystem::path& dir) {

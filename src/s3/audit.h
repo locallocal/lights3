@@ -1,4 +1,4 @@
-// L2: audit log (roadmap §3.9 ④). One JSON object per line, written to a dedicated
+// L2: audit log. One JSON object per line, written to a dedicated
 // rotating file separate from the operational log, so it can be shipped to a
 // compliance sink without filtering. Two classes of records:
 //   - control plane (always when the log is configured): credential lifecycle,
@@ -32,7 +32,7 @@ struct AuditEvent {
     // actor's tenant (empty = none / root)
     std::string_view tenant;
     std::string_view request_id;
-    // W3C trace id of the request (roadmap §5.4), data plane
+    // W3C trace id of the request, data plane
     std::string_view trace_id;
     std::string_view bucket;
     std::string_view key;

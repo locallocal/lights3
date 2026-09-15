@@ -1,4 +1,4 @@
-// L2: CORS (roadmap §2.1) — ?cors subresource (Get/Put/DeleteBucketCors, root
+// L2: CORS — ?cors subresource (Get/Put/DeleteBucketCors, root
 // credential only, same two-tier model as ?website), OPTIONS preflight, and
 // response-header injection for cross-origin actual requests. Preflight runs before
 // signature verification by design: browsers never attach signature material to
@@ -190,7 +190,7 @@ Task<http::HttpResponse> S3Service::delete_bucket_cors(std::string bucket, const
     co_return resp;
 }
 
-// OPTIONS preflight (roadmap §2.1): unauthenticated by design — browsers attach no
+// OPTIONS preflight: unauthenticated by design — browsers attach no
 // signature material to preflights, and the preflighted request is verified on its own.
 // The only information disclosed is whether a CORS rule admits the (origin, method)
 // pair; object existence is never consulted

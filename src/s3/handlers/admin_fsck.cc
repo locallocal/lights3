@@ -1,5 +1,5 @@
-// L2: POST/GET /-/admin/fsck/<backend> (backlog-sequence ③, `lights3-ctl fsck --offline`):
-// the offline integrity scrub (roadmap §3.1) triggered on a live gateway and
+// L2: POST/GET /-/admin/fsck/<backend> (`lights3-ctl fsck --offline`):
+// the offline integrity scrub triggered on a live gateway and
 // polled for its outcome. Root only; the application supplies the job manager
 // through hooks (the service never sees backend types). POST starts one round
 // in the background and answers 202 with the job id -- 409 while a round runs

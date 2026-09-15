@@ -641,6 +641,38 @@ TEST(sigv4_presigned_url_expiry) {
     auth.verify(skewed);
 }
 
+// x-amz-decoded-content-length becomes the de-framed body's length() all the way down to
+// the backend, so it is parsed with the same strictness L1 applies to Content-Length
+// (http/model.h). std::stoull used to accept "-1" as 2^64-1, " 5" and "5abc" as 5 — and
+// the quota gate, the backend's expected length and the metrics all believed the result
+TEST(sigv4_decoded_content_length_parsed_strictly) {
+    AuthConfig cfg;
+    cfg.credentials = {{"TESTAK", "test-secret-key"}};
+    auto auth = SigV4Authenticator::build(cfg);
+
+    // Signed, so the header's exact text is covered by the signature: whatever the parser
+    // sees is what the client sent
+    auto declaring = [&](const char* value) {
+        http::HttpRequest req;
+        req.method = "PUT";
+        req.raw_path = "/bkt/big";
+        req.path = "/bkt/big";
+        req.headers.add("Host", "localhost");
+        req.headers.add("x-amz-decoded-content-length", value);
+        auth.sign(req, cfg.credentials[0], "STREAMING-UNSIGNED-PAYLOAD-TRAILER");
+        req.body = std::make_unique<http::StringBodyReader>("0\r\n\r\n");
+        return req;
+    };
+    for (const char* bad : {"-1", "+7", " 5", "5abc", "0x10", "", "18446744073709551616"}) {
+        auto req = declaring(bad);
+        CHECK_THROWS_S3(auth.verify(req), S3ErrorCode::InvalidRequest);
+    }
+    auto ok = declaring("0");
+    auth.verify(ok);
+    CHECK_EQ(*ok.body->length(), uint64_t(0));
+    CHECK_EQ(read_all_body(*ok.body), "");
+}
+
 // ---------- Auth disabled: the transport framing still comes off ----------
 //
 // aws-chunked is the transport encoding named by x-amz-content-sha256, not an
@@ -718,9 +750,13 @@ TEST(sigv4_disabled_keeps_the_streaming_contract) {
         return req;
     };
 
-    // The de-framer reports this length downstream, so it stays mandatory
+    // The de-framer reports this length downstream, so it stays mandatory -- and is parsed
+    // as strictly here as on the signed path
     auto no_len = streaming_put("STREAMING-UNSIGNED-PAYLOAD-TRAILER");
     CHECK_THROWS_S3(auth.verify(no_len), S3ErrorCode::InvalidRequest);
+    auto negative_len = streaming_put("STREAMING-UNSIGNED-PAYLOAD-TRAILER");
+    negative_len.headers.add("x-amz-decoded-content-length", "-1");
+    CHECK_THROWS_S3(auth.verify(negative_len), S3ErrorCode::InvalidRequest);
 
     // A payload type this implementation cannot de-frame must refuse loudly rather than
     // store the framing -- which is the whole point of the fix

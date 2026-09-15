@@ -92,7 +92,10 @@ both done by `ChunkedSigV4BodyReader`, but the former does not depend on having 
 credential. With no credential configured (auth disabled) `verify_impl` returns on its
 first line, and it now calls `SigV4Authenticator::strip_transport_framing` there to
 install a de-frame-only decorator: chunk headers and the trailer signature line are parsed
-and discarded, `x-amz-decoded-content-length` stays mandatory, and declared
+and discarded, `x-amz-decoded-content-length` stays mandatory and is parsed with the
+same strict Content-Length syntax (`parse_content_length` in `http/model.h`: no empty
+value, no sign, no surrounding garbage, no overflow -- this number becomes the body's
+`length()` all the way down to the backend), and declared
 `x-amz-checksum-*` trailers are still verified (like Content-MD5 they do not depend on the
 signature). Otherwise the framing is written into the object as content -- an 11-byte body
 stored as 21 bytes, the ETag computed over the framing, with a 200 and no error anywhere;

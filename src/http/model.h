@@ -163,6 +163,26 @@ private:
     std::array<uint64_t, 4> present_{};
 };
 
+// A byte-count header value: 1*DIGIT, rejecting empty / signs / leading whitespace /
+// trailing garbage / overflow. std::stoull accepts all of those -- "-1" comes back as
+// 2^64-1, " 5" and "5abc" as 5 -- and every one of them is a hang or smuggling vector once
+// the value is believed as a body length.
+// Lives on the L1/L2 boundary because both sides parse the same syntax: L1 for
+// Content-Length while determining request framing (drivers/common.h parse_body_framing),
+// L2 for x-amz-decoded-content-length on aws-chunked uploads (s3/auth/sigv4.cc), where the
+// value is what the de-framer reports downstream as the object's length
+inline bool parse_content_length(std::string_view s, uint64_t& out) {
+    if (s.empty()) return false;
+    uint64_t v = 0;
+    for (char c : s) {
+        if (c < '0' || c > '9') return false;
+        if (v > (UINT64_MAX - static_cast<uint64_t>(c - '0')) / 10) return false;
+        v = v * 10 + static_cast<uint64_t>(c - '0');
+    }
+    out = v;
+    return true;
+}
+
 // Zero-copy exit for file-backed bodies (docs/architecture/http-adapter.md §1):
 // the reader's *remaining* bytes are exactly this contiguous range of fd
 struct FileSpan {

@@ -536,12 +536,11 @@ void install_chunked_body(http::HttpRequest& req, const StreamingPayload& p, std
     // "verify when fully read" trigger cannot fire, and the length cannot be reported to the backend
     const std::string* dl = req.headers.find("x-amz-decoded-content-length");
     if (!dl) throw S3Error(S3ErrorCode::InvalidRequest, "Missing required header: x-amz-decoded-content-length");
+    // Strict, like Content-Length at L1 (http/model.h): this number becomes the body's
+    // length() all the way down to the backend, so "-1" must not arrive there as 2^64-1
     uint64_t decoded_len = 0;
-    try {
-        decoded_len = std::stoull(*dl);
-    } catch (...) {
+    if (!http::parse_content_length(*dl, decoded_len))
         throw S3Error(S3ErrorCode::InvalidRequest, "Invalid x-amz-decoded-content-length.");
-    }
     const bool verify = signing && p.signed_chunks;
     req.body = std::make_unique<ChunkedSigV4BodyReader>(
         std::move(req.body), verify, signing ? signing->key : util::Sha256Digest{},

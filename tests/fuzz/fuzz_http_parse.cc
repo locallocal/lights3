@@ -22,7 +22,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         }
         case 1: {
             uint64_t v = 0;
-            (void)driver::parse_content_length(rest, v);
+            (void)parse_content_length(rest, v);
             break;
         }
         case 2: {

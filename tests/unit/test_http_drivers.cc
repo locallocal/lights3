@@ -1096,6 +1096,30 @@ TEST(block_queue_coalesces_borrowed_pieces_and_takes_owned_blocks) {
     CHECK(pushed.load());
 }
 
+// The byte-count field parser shared by L1 (Content-Length) and L2
+// (x-amz-decoded-content-length). Every form std::stoull would have let through is a
+// length the rest of the stack then believes, so they are all rejected here
+TEST(parse_content_length_is_strict) {
+    uint64_t v = 0;
+    CHECK(parse_content_length("0", v));
+    CHECK_EQ(v, uint64_t(0));
+    CHECK(parse_content_length("18446744073709551615", v));
+    CHECK_EQ(v, UINT64_MAX);
+    CHECK(parse_content_length("0000042", v));
+    CHECK_EQ(v, uint64_t(42));
+
+    // stoull would return 2^64-1 for "-1", 5 for " 5" and "5abc", 7 for "+7", 0 for "0x10"
+    for (const char* bad : {"", "-1", "+7", " 5", "5 ", "5abc", "0x10", "1e3", "\t9"}) {
+        v = 12345;
+        CHECK(!parse_content_length(bad, v));
+        // a rejected value never touches the output
+        CHECK_EQ(v, uint64_t(12345));
+    }
+    // one past UINT64_MAX, and a digit string long enough to wrap several times over
+    CHECK(!parse_content_length("18446744073709551616", v));
+    CHECK(!parse_content_length("99999999999999999999999999", v));
+}
+
 // the 8-bit name tag is a prefilter only -- every operation
 // stays case-insensitive and exact, including after removals shift the table
 TEST(header_map_tag_prefilter_keeps_semantics) {

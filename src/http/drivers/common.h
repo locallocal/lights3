@@ -234,19 +234,8 @@ inline void parse_target(std::string_view target, HttpRequest& req) {
 
 // ---------- HTTP/1.1 message framing helpers: shared by the builtin/seastar hand-written parsers ----------
 
-// Content-Length: 1*DIGIT; rejects empty/signs/leading whitespace/trailing garbage/overflow
-// (stoull would accept "-1" wrapping to 2^64-1 and truncate "5abc" to 5 — both smuggling/hang vectors)
-inline bool parse_content_length(std::string_view s, uint64_t& out) {
-    if (s.empty()) return false;
-    uint64_t v = 0;
-    for (char c : s) {
-        if (c < '0' || c > '9') return false;
-        if (v > (UINT64_MAX - static_cast<uint64_t>(c - '0')) / 10) return false;
-        v = v * 10 + static_cast<uint64_t>(c - '0');
-    }
-    out = v;
-    return true;
-}
+// Content-Length lives in http/model.h: L2 parses the same field syntax for
+// x-amz-decoded-content-length and must not reach into a driver-internal header
 
 // chunk-size line: 1*HEXDIG, followed only by an optional ";ext" (extension content ignored); rejects
 // empty/signs/whitespace/overflow

@@ -148,6 +148,10 @@ Detached spawn_detached(Task<void> t, Done done) {
 struct Session {
     beast::tcp_stream stream;
     std::atomic<bool> in_flight{false};
+    // Resolved once at accept: remote_endpoint() is a getpeername(2) plus an
+    // address-to-string format, and it was being paid per request even though a
+    // connection's peer cannot change
+    std::string remote_addr;
 
     // Inactivity watchdog for the multi-operation phases -- body reads and
     // streaming writes (http-adapter.md §2.4 ⑪). beast::basic_stream arms and
@@ -678,6 +682,11 @@ private:
     // — destroyed only after session_loop completes, so nothing dangles
     Task<void> session_run(std::shared_ptr<Session> sess) {
         sess->stream.socket().set_option(tcp::no_delay(true));
+        {
+            beast::error_code epc;
+            auto ep = sess->stream.socket().remote_endpoint(epc);
+            if (!epc) sess->remote_addr = ep.address().to_string();
+        }
         // handshake: header bound
         auto idle = std::chrono::seconds(cfg_.header_timeout_sec);
         if (tls_ctx_) {
@@ -759,11 +768,7 @@ private:
             req.method = std::string(preq.method_string().data(), preq.method_string().size());
             driver::parse_target(std::string_view(preq.target().data(), preq.target().size()), req);
             for (auto& f : preq.base()) req.headers.add(std::string(f.name_string()), std::string(f.value()));
-            {
-                beast::error_code epc;
-                auto ep = beast::get_lowest_layer(stream).socket().remote_endpoint(epc);
-                if (!epc) req.remote_addr = ep.address().to_string();
-            }
+            req.remote_addr = sess->remote_addr;
             req.tls_identity = tls_identity;
 
             // Message framing validation (drivers/common.h parse_body_framing):

@@ -316,8 +316,18 @@ bool commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& me
     // fallback on filesystems without xattr support)
     if (!opt.prepared) {
         xattr_ok = set_meta_xattr(tmp.path, meta, TierInfo{}, opt.xattr);
-        // persist the data content first, then splice it into the tree
-        fsync_path(tmp.path);
+        // persist the data content first, then splice it into the tree.
+        // Through the fd the data was written on when the caller still holds it: the
+        // by-path variant has to open the file again for the same fdatasync, so the object
+        // commit was paying an extra open + close per write that upload_part (which has
+        // always fsynced its own fd) never did
+        if (tmp.fd >= 0) {
+            fsync_file(tmp.fd);
+            ::close(tmp.fd);
+            tmp.fd = -1;
+        } else {
+            fsync_path(tmp.path);
+        }
     }
     if (int fe = fault::check("localfs.rename"))
         ec = std::error_code(fe, std::generic_category());

@@ -265,6 +265,33 @@ httplib 的推转拉需要第二个线程驱动 `ContentReader`（请求线程�
 **PUT +20%**（中位 38.6 → 46.5k），均值延迟 −17%，p99 −40%。GET 无 body、不走泵，作为
 对照未变。注意 httplib 的定位仍是功能验证而非性能路径，这条只是把一处纯粹的浪费去掉。
 
+### 4.6 O1–O6：请求路径上的分配与系统调用
+
+走查 §3 的六条纯性能项一起做：SigV4 规范化请求改成单缓冲装配 + 头名 tag 预筛
+（O1）、请求路径上的 `headers.get()` 换 `find()`（O2，52 处降到 18 处，其余是冷路径）、
+请求 id 直接写十六进制（O3）、localfs 提交改用已有 fd 做 fdatasync 而不是按路径重开
+（O4）、beast 每连接解析一次对端地址（O5）、`parse_target` 用 string_view 切分查询串
+（O6）。
+
+改前/改后两个二进制交错跑（每轮先 before 后 after，规避机器漂移），16 KiB 对象：
+
+| 驱动 / 并发 | 轮数 | 改前 | 改后 | |
+| --- | --- | --- | --- | --- |
+| beast / 32（`bench_matrix`） | 8 | PUT 95.0–99.3k | PUT 100.8–103.1k | **区间不重叠，+3.0%** |
+| beast / 32 | 8 | GET 167.5–176.2k | GET 177.4–182.0k | **区间不重叠，+3.3%** |
+| builtin / 64 | 3 | PUT 中位 224.8k | PUT 中位 224.8k | 无可测差异 |
+| builtin / 64 | 3 | GET 中位 314.5k | GET 中位 318.5k | 噪声内 |
+
+两点要说清楚：
+
+- **收益不来自 O5**。单独把 O5 退回（只恢复 beast 每请求一次 `remote_endpoint()`）再跑
+  4 轮，成绩与全量改动持平（100.8 / 100.8 / 100.8 / 98.5k PUT），仍高于改前区间 ——
+  那一次系统调用不是瓶颈，起作用的是每请求那几十次小分配（O1 / O2 / O6）。没有继续
+  逐项二分：总收益 3%，再拆下去已经在这套测量的分辨率边缘。
+- **builtin 测不出来**，很可能是它在 225k ops/s 上已经被压测客户端卡住（同机同进程数）：
+  服务端省下的时间没地方体现。这不是"改动对 builtin 无效"，是这套 harness 在那个点上
+  看不见。
+
 ## 5. 复现
 
 ```bash
@@ -285,4 +312,4 @@ scripts/bench_matrix.sh build-seastar/lights3 build-rel/lights3-ctl --drivers se
 | --- | --- | --- |
 | 2026-09-05 | §4.3 数据面优化（预取、缓冲池、sendfile、pumping、ResumeOn 快路径、per-bucket 指标去锁、beast 读缓冲预留） | 大对象 GET +14～52%，beast PUT 3.5～10× |
 | 2026-09-13 | beast 每线程 io_context、会话看门狗、内存 BIO TlsStream；PipelinedMd5 请求体 MD5 流水化（http-adapter.md §2.4 ⑩–⑬） | beast TLS GET 4 MiB +93%（与其他驱动持平），4 MiB PUT 四驱动 +12～55%，p50 7.2 → 6.2 ms |
-| 2026-09-15 | 请求尾部去锁 + `log.async` 默认开（§4.0–4.2）；aws-chunked 解帧直读（§4.3）；路由只解析一次（§4.4，性能上是阴性结果）；httplib 泵线程池（§4.5） | 64 并发 16 KiB：PUT +8.1%、GET +19.2%，GET p99 1.01 → 0.87 ms；128 MiB 分块 PUT +19%，与普通 body 持平 |
+| 2026-09-15 | 请求尾部去锁 + `log.async` 默认开（§4.0–4.2）；aws-chunked 解帧直读（§4.3）；路由只解析一次（§4.4，性能上是阴性结果）；httplib 泵线程池（§4.5）；请求路径分配与系统调用（§4.6） | 64 并发 16 KiB：PUT +8.1%、GET +19.2%，GET p99 1.01 → 0.87 ms；128 MiB 分块 PUT +19%，与普通 body 持平 |

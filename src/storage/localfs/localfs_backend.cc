@@ -358,8 +358,8 @@ Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_
         }
         total += n;
     }
-    ::close(tmp.fd);
-    tmp.fd = -1;
+    // fd stays open: commit_object_file fdatasyncs it and closes it there, one open/close
+    // pair fewer than persisting by path
 
     meta.key = std::string(key);
     meta.size = total;
@@ -1237,8 +1237,7 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket, std:
         ::close(in);
         sizes.push_back(part_bytes);
     }
-    ::close(tmp.fd);
-    tmp.fd = -1;
+    // same as PUT: commit_object_file syncs and closes this fd
 
     // 3. Commit (same atomic path as PUT), then clean up the mpu directory
     ObjectMeta meta = std::move(up.meta);

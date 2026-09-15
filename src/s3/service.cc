@@ -32,24 +32,32 @@ std::mt19937_64& id_rng() {
     return rng;
 }
 
-std::string make_request_id() {
-    uint64_t v = id_rng()();
-    uint8_t bytes[8];
-    memcpy(bytes, &v, 8);
-    std::string hex = util::to_hex(std::span(bytes, 8));
-    for (char& c : hex) c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
-    return hex;
+// Random hex straight into the returned string: the id is built once per request, and the
+// previous shape rendered through to_hex and then walked the result again to upper-case it
+std::string random_hex(size_t bytes, bool upper) {
+    static constexpr char kLower[] = "0123456789abcdef";
+    static constexpr char kUpper[] = "0123456789ABCDEF";
+    const char* digits = upper ? kUpper : kLower;
+    std::string out;
+    out.resize(bytes * 2);
+    for (size_t i = 0; i < bytes; i += 8) {
+        uint64_t v = id_rng()();
+        for (size_t b = 0; b < 8 && i + b < bytes; ++b) {
+            uint8_t byte = static_cast<uint8_t>(v >> (b * 8));
+            out[(i + b) * 2] = digits[byte >> 4];
+            out[(i + b) * 2 + 1] = digits[byte & 0xf];
+        }
+    }
+    return out;
 }
 
-// x-amz-id-2 is longer than the request id (AWS uses a base64 string): hex here as well, 24 bytes
-std::string make_host_id() {
-    uint8_t bytes[24];
-    for (size_t i = 0; i < sizeof(bytes); i += 8) {
-        uint64_t v = id_rng()();
-        memcpy(bytes + i, &v, 8);
-    }
-    return util::to_hex(std::span(bytes, sizeof(bytes)));
-}
+std::string make_request_id() { return random_hex(8, /*upper=*/true); }
+
+// x-amz-id-2 is longer than the request id (AWS uses a base64 string): hex here as well, 24 bytes.
+// Kept fully random rather than "process prefix + counter": it is echoed to clients and
+// lands in their logs, and the allocation it would save is the one the return type needs
+// anyway
+std::string make_host_id() { return random_hex(24, /*upper=*/false); }
 
 http::HttpResponse error_response(const S3Error& e, const RequestContext& ctx, bool head_only) {
     http::HttpResponse resp;
@@ -406,7 +414,7 @@ void enforce_query_whitelist(const http::HttpRequest& req, const S3Service::Rout
 
 S3Service::Address S3Service::resolve_address(const http::HttpRequest& req) const {
     if (!base_domain_.empty()) {
-        if (auto host = req.headers.get("Host")) {
+        if (const std::string* host = req.headers.find("Host")) {
             std::string h = *host;
             // Domain names are case-insensitive (RFC 4343): without normalization, Host: B.GW.EXAMPLE.COM
             // silently degrades to path-style, the same URL in two cases points at different resources, and the
@@ -478,7 +486,7 @@ namespace {
 // Scheme can only be relayed by a reverse proxy (same reasoning as request_base_url in
 // multipart.cc): direct connections are plaintext HTTP here
 std::string req_scheme(const http::HttpRequest& req) {
-    if (auto p = req.headers.get("X-Forwarded-Proto"); p && !p->empty()) return *p;
+    if (const std::string* p = req.headers.find("X-Forwarded-Proto"); p && !p->empty()) return *p;
     return "http";
 }
 
@@ -992,7 +1000,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                         // CopyObject / UploadPartCopy carry the source in a header, bypassing the check above:
                         // do a separate read authorization for the source bucket+key, so policy credentials cannot use
                         // copy to read data outside the allowlist
-                        if (auto src = req.headers.get("x-amz-copy-source")) {
+                        if (const std::string* src = req.headers.find("x-amz-copy-source")) {
                             auto [sb, sk] = handlers::parse_copy_source(*src);
                             if (!ident.policy->allows(sb, sk, Action::Read)) deny();
                         }
@@ -1045,7 +1053,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                 // 301 — the header value was prefix-validated at PUT, so it is Location-safe.
                 // Signed (REST) requests keep the object body + echo header, matching AWS
                 if (anon_site && (resp.status == 200 || resp.status == 206)) {
-                    if (auto loc = resp.headers.get("x-amz-website-redirect-location")) {
+                    if (const std::string* loc = resp.headers.find("x-amz-website-redirect-location")) {
                         http::HttpResponse redirect;
                         redirect.status = 301;
                         redirect.headers.set("Location", *loc);
@@ -1149,7 +1157,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     access->query = req.raw_query;
     access->bucket = bucket;
     access->key = key;
-    if (auto ua = req.headers.get("User-Agent")) access->user_agent = *ua;
+    if (const std::string* ua = req.headers.find("User-Agent")) access->user_agent = *ua;
     access->api = std::string(api_name);
     access->backend = backend_name;
     access->trace_id = ctx.trace.trace_id;

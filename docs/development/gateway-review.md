@@ -9,11 +9,12 @@
 覆盖 L1 HTTP 适配层（`src/http/`）、L2 S3 协议层（`src/s3/`）、L4 运行时
 （`src/core/`），L3 存储层（`src/storage/`）只走了 localfs 写路径与公共约定。
 读码为主，其中 R3 / R11 与 §7 的 Range 行为用一个**无凭证**的 builtin 实例现场跑过
-（复现步骤见 §5），R2 的 `stoull` 语义单独写程序确认过。标注 **实测** 的结论有现场
-证据，其余是读码推断，落地前请各自补一个用例。
+（复现步骤见 §5）。标注 **实测** 的结论有现场证据，其余是读码推断，落地前请各自补一
+个用例。
 
-R1（auth 关闭时 aws-chunked 不解帧）已修复并删除，编号留空不再复用；回归用例在
-`tests/unit/test_sigv4.cc` 的 `sigv4_disabled_*` 三条。
+已修复并删除的条目，编号留空不再复用：R1（auth 关闭时 aws-chunked 不解帧，回归用例
+`sigv4_disabled_*` 三条）、R2（`x-amz-decoded-content-length` 解析过宽，回归用例
+`parse_content_length_is_strict` 与 `sigv4_decoded_content_length_parsed_strictly`）。
 
 等级：高＝可能损坏数据或绕过约束；中＝可被外部输入放大，或明显偏离 AWS 语义；
 低＝加固/一致性问题。
@@ -22,7 +23,6 @@ R1（auth 关闭时 aws-chunked 不解帧）已修复并删除，编号留空不
 
 | 编号 | 位置 | 等级 | 一句话 |
 | --- | --- | --- | --- |
-| R2 | `s3/auth/sigv4.cc:541` | 中 | `x-amz-decoded-content-length` 用 `std::stoull`，`-1` 变 2^64-1 且不抛 |
 | R3 | `s3/handlers/common.h:86` | 中 | 用户元数据无总量上限（AWS 限 2KB），8KB 可写入（**实测**） |
 | R4 | `core/log.cc:232` 等 | 中 | 请求尾部有 4 处进程级锁 + 默认同步日志 |
 | R5 | `s3/auth/sigv4.cc:271` | 中 | 分块解帧固定 16KiB 中转缓冲，压低所有签名流式 PUT 的吞吐 |
@@ -32,31 +32,11 @@ R1（auth 关闭时 aws-chunked 不解帧）已修复并删除，编号留空不
 | R9 | `core/thread_pool.cc:52` | 低 | `backlog_` 无界，"有界队列 + 背压"的实际语义需要写清 |
 | R10 | `http/drivers/builtin/builtin_server.cc:482` | 低 | obs-fold 折行头未按 RFC 9112 §5.2 拒绝 |
 | R11 | `http/drivers/builtin/builtin_server.cc:754` | 低 | 关连接前未 `shutdown(SHUT_WR)`，极端情况客户端只看到 RST |
-| R12 | `s3/auth/sigv4.cc:774` | 低 | presigned 一律按 `UNSIGNED-PAYLOAD` 计签 |
+| R12 | `s3/auth/sigv4.cc:773` | 低 | presigned 一律按 `UNSIGNED-PAYLOAD` 计签 |
 | R13 | `config/lights3.yaml` | 低 | `/-/metrics` 默认匿名，暴露桶名与后端拓扑 |
 | O1–O6 | 见 §4 | — | 纯性能项（SigV4 规范化、header 访问、id 生成、fsync、beast 每请求系统调用） |
 
 ## 3. 风险项
-
-### R2（中）`x-amz-decoded-content-length` 解析过宽
-
-`install_chunked_body`（`sigv4.cc:541`）用 `std::stoull`。已验证的 `stoull` 语义：
-
-```
-"-1"   -> 18446744073709551615     " 5"   -> 5
-"5abc" -> 5                        "+7"   -> 7
-```
-
-驱动层对 `Content-Length` 已经有严格版本 `driver::parse_content_length`
-（`http/drivers/common.h:239`，注释里专门论证过"stoull 会把 -1 变成 2^64-1"），
-L2 这里却没用它。后果：`BodyReader::length()` 报出天文数字，一路流进 quota 计算
-（`objects.cc:167` 的 `declared` 转 `int64_t` 后是 -1）、后端的预期长度、指标，
-最后才在 EOF 处以 InvalidRequest 收场。
-
-建议：改用 `driver::parse_content_length`，失败即 InvalidRequest。仓里其它
-`std::sto*` 调用点都是守住的，可以直接抄：`sts.cc:85` 有范围检查、
-`admin_fsck.cc:38` 先查字符集、`tables/rest_api.cc:282` 检查 `pos` 与正负 ——
-`sigv4.cc:541` 是唯一的漏网点。
 
 ### R3（中）用户元数据无总量上限
 
@@ -187,7 +167,7 @@ RST，客户端可能读不到已经写出去的 4xx。
 
 ### R12（低）presigned 一律按 UNSIGNED-PAYLOAD 计签
 
-`sigv4.cc:773-774`：只要是 presigned 就把 payload_hash 固定成 `UNSIGNED-PAYLOAD`。
+`sigv4.cc:772-773`：只要是 presigned 就把 payload_hash 固定成 `UNSIGNED-PAYLOAD`。
 `X-Amz-Content-Sha256` 在通用查询白名单里（`service.cc:370`）却不参与这个选择，
 所以用真实 payload hash 预签的客户端会拿到 SignatureDoesNotMatch。与 AWS 主流行为
 一致，但既然放行了这个查询参数，就应该在它出现时采用它的值。
@@ -202,7 +182,7 @@ RST，客户端可能读不到已经写出去的 4xx。
 
 | 编号 | 位置 | 内容 |
 | --- | --- | --- |
-| O1 | `s3/auth/sigv4.cc:591-605` | canonical headers 是 O(signed × headers) 的 `ieq` 扫描，且 `split` 每次分配一串 `std::string`；`canonical_query`（66-85）对 raw query 做 decode→encode→sort，又是一轮分配。小对象高 QPS 下 SigV4 是 CPU 大头之一，值得先建一次小索引再扫 |
+| O1 | `s3/auth/sigv4.cc:590-604` | canonical headers 是 O(signed × headers) 的 `ieq` 扫描，且 `split` 每次分配一串 `std::string`；`canonical_query`（66-85）对 raw query 做 decode→encode→sort，又是一轮分配。小对象高 QPS 下 SigV4 是 CPU 大头之一，值得先建一次小索引再扫 |
 | O2 | 全仓 | `headers.get()` 用了 52 处，`headers.find()` 只有 1 处 —— 而 `http/model.h:43` 的注释明确写着"存在性判断/比较请用 find，get 每次拷贝值"。改造是机械的，每请求能省十几次小分配 |
 | O3 | `s3/service.cc:35-52` | 每请求生成 16 字符 request-id + 48 字符 host-id（两次 `to_hex` + 两次分配）。`x-amz-id-2` 可以退化成"每进程前缀 + 每连接计数"，它只是给日志关联用的 |
 | O4 | `storage/localfs/fs_util.cc:87-94` | 对象提交走 `fsync_path`（按路径重新 `open` 再 `fdatasync` 再 `close`），而 upload_part 走的是 fd 版 `fsync_file`（`localfs_backend.cc:1134`）。PUT 路径每次多一对 open/close 系统调用，两条路径的写法也不一致 |
@@ -253,7 +233,7 @@ R2 的 `stoull` 语义用一个三行程序即可确认（`-1` → 1844674407370
 ## 6. 建议的推进顺序
 
 1. **R5**（下面这条实测数据摆着，且 R1 的修复让更多部署走到这条路径上）；
-2. **R2 + R3**（输入校验，各自一个小闸门 + 一条用例）；
+2. **R3**（输入校验，一个小闸门 + 一条用例）；
 3. **R6 + R4**（请求尾部的固定开销，改完跑一次
    `scripts/bench_matrix.sh` 对照 [performance-baseline.md](performance-baseline.md)）；
 4. **R7**（可观测性自愈）；
@@ -272,7 +252,7 @@ R2 的 `stoull` 语义用一个三行程序即可确认（`-1` → 1844674407370
 - 取消（超时/断连/关停）的竞态协议（claim + 单次 resume）在 `ThreadPool::
   ScheduleAwaiter`、`AsyncSemaphore::Waiter`、`CancelState` 三处写法一致；
 - SigV4 的 host 必签、scope/日期一致性、STS token 与 AK 的绑定关系、presigned 的
-  未来时间上限都做了（`sigv4.cc:696-765`）；
+  未来时间上限都做了（`sigv4.cc:695-764`）；
 - 桶名校验是唯一权威闸门且 copy-source 单独复用同一函数
   （`s3/handlers/common.h:172`）；
 - 指标标签基数有上限（api 与 bucket 两个维度都有），限流表有 LRU 上限；

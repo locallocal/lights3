@@ -85,7 +85,9 @@ PutObject/UploadPart 缺 Content-Length/Transfer-Encoding → 411
 chunk 签名链校验虽然由同一个 `ChunkedSigV4BodyReader` 承担，但前者与是否有凭证无关。
 未配置任何凭证（auth 关闭）时，`verify_impl` 在首行就返回，此时仍会调用
 `SigV4Authenticator::strip_transport_framing` 安装**只解帧、不验签**的装饰器：
-chunk 头和 trailer 签名行被解析后丢弃，`x-amz-decoded-content-length` 照旧强制，
+chunk 头和 trailer 签名行被解析后丢弃，`x-amz-decoded-content-length` 照旧强制、
+照旧按 Content-Length 的严格语法解析（`http/model.h` 的 `parse_content_length`：
+拒绝空/正负号/前后杂字符/溢出——这个值会一路变成 body 的 `length()` 传到后端），
 声明的 `x-amz-checksum-*` trailer 照旧校验（它和 Content-MD5 一样不依赖签名）。
 否则分块框架会被当作对象内容写下去——11 字节的 body 存成 21 字节、ETag 算在框架上，
 而且一路 200 没有任何错误信号；2025 年起的 SDK 默认就发这种 payload 类型。

@@ -7,10 +7,16 @@
 // Positioning: functional validation, low-concurrency scenarios; not a performance path.
 #include <httplib/httplib.h>
 
+#include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 #include "core/log.h"
 #include "core/task.h"
@@ -27,6 +33,99 @@ namespace {
 // The push-to-pull BlockQueue / QueueBodyReader have been extracted into a
 // shared component (http/pushpull.h, also used by the cloudproxy backend,
 // docs/architecture/storage/cloudproxy-design.md §3.1)
+
+// Body-pump workers.
+// The push-to-pull inversion needs a second thread per body-carrying request: httplib's
+// ContentReader is a push API that has to be driven by someone while the request thread
+// runs the handler coroutine. That thread used to be a fresh std::thread per request --
+// a create and a join on every PUT, plus a default 8MiB of stack address space each; here
+// the same threads are reused.
+// Sized to httplib's own request-thread count: a request thread drives at most one pump at
+// a time, so N request threads can have at most N pumps in flight and a submitted pump
+// never waits for a worker. Undersizing it would not deadlock -- each pump's consumer is
+// its own request thread, so the running ones always finish and free a worker -- but
+// uploads would serialize behind each other, which is a throughput cliff with no visible
+// cause. Sizing it to the request threads removes the question.
+class PumpPool {
+public:
+    class Job {
+    public:
+        void wait() {
+            std::unique_lock lk(m_);
+            cv_.wait(lk, [&] { return done_; });
+        }
+
+    private:
+        friend class PumpPool;
+        std::mutex m_;
+        std::condition_variable cv_;
+        bool done_ = false;
+        std::function<void()> fn_;
+    };
+
+    explicit PumpPool(size_t workers) {
+        threads_.reserve(workers);
+        for (size_t i = 0; i < workers; ++i) threads_.emplace_back([this] { loop(); });
+    }
+    PumpPool(const PumpPool&) = delete;
+    ~PumpPool() {
+        {
+            std::lock_guard lk(m_);
+            stopping_ = true;
+        }
+        cv_.notify_all();
+        for (auto& t : threads_) t.join();
+    }
+
+    // The job runs on a pool thread; the returned handle is what the caller waits on.
+    // Jobs already queued when the pool stops still run -- a waiter must never be left
+    // blocked on a job that was dropped
+    std::shared_ptr<Job> submit(std::function<void()> fn) {
+        auto job = std::make_shared<Job>();
+        job->fn_ = std::move(fn);
+        {
+            std::lock_guard lk(m_);
+            queue_.push_back(job);
+        }
+        cv_.notify_one();
+        return job;
+    }
+
+private:
+    void loop() {
+        for (;;) {
+            std::shared_ptr<Job> job;
+            {
+                std::unique_lock lk(m_);
+                cv_.wait(lk, [&] { return stopping_ || !queue_.empty(); });
+                // stopping and drained
+                if (queue_.empty()) return;
+                job = std::move(queue_.front());
+                queue_.pop_front();
+            }
+            try {
+                job->fn_();
+            } catch (const std::exception& e) {
+                // The pump body closes the queue itself; this is the firewall that keeps
+                // an escaped exception from taking the worker (and the process) down
+                LOG_ERROR("httplib body pump threw: {}", e.what());
+            } catch (...) {
+                LOG_ERROR("httplib body pump threw an unknown exception");
+            }
+            {
+                std::lock_guard lk(job->m_);
+                job->done_ = true;
+            }
+            job->cv_.notify_all();
+        }
+    }
+
+    std::mutex m_;
+    std::condition_variable cv_;
+    std::deque<std::shared_ptr<Job>> queue_;
+    std::vector<std::thread> threads_;
+    bool stopping_ = false;
+};
 
 // Connection-info pseudo-headers httplib injects into headers in process_request; not part of the HTTP message
 bool is_pseudo_header(const std::string& k) {
@@ -45,7 +144,8 @@ void apply_fallback(httplib::Response& rs, const HttpResponse& src) {
 
 class HttplibServer final : public IHttpServer {
 public:
-    explicit HttplibServer(const HttpConfig& cfg) : cfg_(cfg) {
+    explicit HttplibServer(const HttpConfig& cfg)
+        : cfg_(cfg), pumps_(static_cast<size_t>(std::max(cfg.io_threads, 8))) {
         // TLS: SSLServer is a subclass of Server and loads
         // the certificate at construction. Failure must throw right here
         // (when is_valid() is false, listen just fails silently)
@@ -336,11 +436,11 @@ private:
         // shared pool thread
         PumpExecutor req_exec;
         std::shared_ptr<BlockQueue> queue;
-        std::thread pump;
+        std::shared_ptr<PumpPool::Job> pump;
         if (content_reader && (chunked || (content_length && *content_length > 0))) {
             queue = std::make_shared<BlockQueue>(cfg_.body_queue_cap);
             req.body = std::make_unique<QueueBodyReader>(queue, content_length, &req_exec);
-            pump = std::thread([content_reader, queue] {
+            pump = pumps_.submit([content_reader, queue] {
                 bool ok = (*content_reader)([&](const char* data, size_t n) { return queue->push(data, n); });
                 queue->close(ok);
             });
@@ -357,7 +457,7 @@ private:
             resp = driver::internal_error_response(e.what());
         }
 
-        if (pump.joinable()) {
+        if (pump) {
             // The handler may not have read the whole body: drain a bounded amount to keep the connection, cancel if
             // too large (connection closes afterwards)
             try {
@@ -376,7 +476,7 @@ private:
                 // Client disconnected: the pump has already wrapped up
             }
             queue->cancel();
-            pump.join();
+            pump->wait();
         }
 
         write_response(std::move(resp), rs, rq.method == "HEAD");
@@ -474,6 +574,9 @@ private:
     HttpConfig cfg_;
     Handler handler_;
     driver::ConnCounters counters_;
+    // Declared before svr_ so it outlives the request threads (members destroy in
+    // reverse): a pump handle is only ever waited on from a request thread
+    PumpPool pumps_;
     // Declared before svr_: the SSL_CTX's certificate callback points at the
     // holder, so the holder must outlive the server (members destroy in reverse)
     std::shared_ptr<tls::Holder> tls_holder_;

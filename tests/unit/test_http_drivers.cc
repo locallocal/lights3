@@ -853,6 +853,54 @@ TEST(http_driver_concurrent_shutdown) {
     });
 }
 
+// More concurrent body-carrying requests than any driver has request threads, twice over,
+// half fixed-length and half chunked. A driver contract on its face -- every upload
+// completes and every response is correct -- and no existing case drives more than one
+// body at a time. It matters most for httplib, whose push-to-pull inversion needs a second
+// thread per body: those are a fixed pool now rather than a std::thread per request, and
+// this is what says the pool never wedges under more load than it has workers (it
+// serializes at worst -- each pump's consumer is its own request thread, so a running pump
+// always finishes and frees a worker)
+TEST(http_driver_many_concurrent_bodies) {
+    for_each_driver([](const std::string& d) {
+        TestServer ts(d);
+        constexpr int kClients = 24;
+        const uint64_t size = 200 * 1000;
+        std::atomic<int> ok{0};
+        std::vector<std::thread> ts_threads;
+        ts_threads.reserve(kClients);
+        for (int i = 0; i < kClients; ++i)
+            ts_threads.emplace_back([&, i] {
+                try {
+                    Client c(ts.port);
+                    // half fixed-length, half chunked: both shapes go through the pump
+                    if (i % 2 == 0) {
+                        c.send_str("PUT /sum HTTP/1.1\r\nHost: t\r\nContent-Length: " + std::to_string(size) +
+                                   "\r\n\r\n");
+                        c.send_str(make_pattern(size));
+                    } else {
+                        c.send_str("PUT /sum HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n");
+                        auto data = make_pattern(size);
+                        for (size_t off = 0; off < data.size(); off += 8192) {
+                            auto piece = data.substr(off, 8192);
+                            char hdr[32];
+                            snprintf(hdr, sizeof(hdr), "%zx\r\n", piece.size());
+                            c.send_str(hdr);
+                            c.send_str(piece);
+                            c.send_str("\r\n");
+                        }
+                        c.send_str("0\r\n\r\n");
+                    }
+                    auto r = c.read_response();
+                    if (r.ok && r.status == 200 && r.body == expected_sum(size)) ok.fetch_add(1);
+                } catch (...) {
+                }
+            });
+        for (auto& t : ts_threads) t.join();
+        CHECK_EQ(ok.load(), kClients);
+    });
+}
+
 // ---------- Message boundaries (framing): request smuggling protection ----------
 //
 // RFC 9112 §6.1: requests with ambiguous boundaries must get a 400 or a closed connection. Two things are asserted

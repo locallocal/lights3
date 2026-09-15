@@ -285,6 +285,27 @@ The change stays, but not for performance: it turns "the authorization decision 
 handler that runs agree" from a coincidence into a structural property, see
 [s3-protocol.md §2](../architecture/s3-protocol.md). **Nobody needs to measure this again.**
 
+### 4.5 R8: a `std::thread` per body-carrying request in httplib
+
+httplib's push-to-pull inversion needs a second thread to drive the
+`ContentReader` (the request thread is busy running the handler). That thread used to be
+created **per request**: one create plus one join, and a default 8MiB of stack address
+space each. It now comes from a fixed `PumpPool` inside the driver, sized to the
+request-thread count `max(io_threads, 8)` -- a request thread drives at most one pump at a
+time, so a pump never queues for a worker.
+
+Before and after binaries interleaved, `bench_matrix.sh --drivers httplib`, 16 KiB, 16
+concurrent, 10s, four rounds:
+
+| | PUT ops/s (four rounds) | Mean latency | p99 |
+| --- | --- | --- | --- |
+| Before | 38.8 / 37.0 / 38.7 / 38.6k | 0.412-0.431 ms | ~0.50 ms |
+| After | 47.0 / 45.2 / 46.6 / 46.4k | 0.340-0.353 ms | 0.26-0.34 ms |
+
+**PUT +20%** (median 38.6 → 46.5k), mean latency -17%, p99 -40%. GET carries no body, does
+not go through the pump, and is unchanged as the control. httplib is still positioned as
+the functional-verification driver rather than a performance path; this only removes waste.
+
 ## 5. Reproducing
 
 ```bash
@@ -306,4 +327,4 @@ mode, size, concurrency, duration_s, result}`, where `result` is the
 | --- | --- | --- |
 | 2026-09-05 | §4.3 data-plane work (prefetch, buffer pool, sendfile, pumping, ResumeOn fast path, per-bucket metrics without the lock, beast read-buffer reserve) | large-object GET +14 to +52%, beast PUT 3.5 to 10× |
 | 2026-09-13 | beast per-thread io_context, session watchdog, memory-BIO TlsStream; PipelinedMd5 request-body hashing (http-adapter.md §2.4 ⑩–⑬) | beast TLS GET 4 MiB +93% (level with the other drivers), 4 MiB PUT +12 to +55% on all drivers, p50 7.2 → 6.2 ms |
-| 2026-09-15 | Request-tail lock removal + `log.async` on by default (§4.0-4.2); direct-read aws-chunked de-framing (§4.3); route resolved once (§4.4, a negative result performance-wise) | 64 concurrent, 16 KiB: PUT +8.1%, GET +19.2%, GET p99 1.01 → 0.87 ms; 128 MiB chunked PUT +19%, at parity with a plain body |
+| 2026-09-15 | Request-tail lock removal + `log.async` on by default (§4.0-4.2); direct-read aws-chunked de-framing (§4.3); route resolved once (§4.4, a negative result performance-wise); httplib pump thread pool (§4.5) | 64 concurrent, 16 KiB: PUT +8.1%, GET +19.2%, GET p99 1.01 → 0.87 ms; 128 MiB chunked PUT +19%, at parity with a plain body |

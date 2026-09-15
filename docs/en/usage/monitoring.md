@@ -36,6 +36,24 @@ gate either scrape through a signing sidecar/proxy or keep the listener on a
 private network with the gate off. TLS deployments switch `scheme: https` and
 fill in `tls_config`.
 
+> **The default is anonymous, and this endpoint is not just numbers**: bucket names,
+> per-bucket request and byte counts, backend names and topology are all in it. The
+> recommended shape is to **put the `/-/` face on a private listener**:
+>
+> ```yaml
+> http:
+>   bind: 0.0.0.0          # data plane faces out
+>   admin_bind: 127.0.0.1  # /-/metrics and /-/admin stay on this host (or a private segment)
+>   admin_port: 9100
+> ```
+>
+> Scraping stays anonymous and Prometheus needs no changes, while the outward-facing port
+> answers 404 for everything under `/-/`. The other route is `metrics_access: root`, but it
+> requires a scraper that signs (Prometheus does not) and **has no effect at all while
+> authentication is disabled**. With neither in place, startup logs a WARN naming it -- the
+> test being "the listener that serves `/-/` is not a loopback address", so a
+> `bind: 127.0.0.1` experiment is never nagged.
+
 ## 3. Alert catalog
 
 Thresholds are single-gateway starting points; tune `for` and the ratios to

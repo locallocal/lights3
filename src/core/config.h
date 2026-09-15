@@ -160,6 +160,19 @@ struct HttpConfig {
     int shutdown_force_wait_sec = 5;
 };
 
+// Which address the /-/ face (metrics, admin API) can be reached at, taking the optional
+// admin-listener split into account
+inline const std::string& metrics_bind(const HttpConfig& h) {
+    if (h.admin_port < 0) return h.bind;
+    return h.admin_bind.empty() ? h.bind : h.admin_bind;
+}
+
+// True when a scrape from another host would be answered without any credential.
+// /-/metrics carries bucket names, per-bucket request and byte counts, and the backend
+// topology; "anonymous, on an address other hosts can reach" is a deployment posture
+// worth saying out loud at startup rather than leaving it to a config comment
+bool metrics_anonymously_exposed(const HttpConfig& h);
+
 struct RuntimeConfig {
     int io_threads = 16;
     int max_inflight_requests = 1024;

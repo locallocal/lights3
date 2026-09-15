@@ -8,9 +8,7 @@
 
 覆盖 L1 HTTP 适配层（`src/http/`）、L2 S3 协议层（`src/s3/`）、L4 运行时
 （`src/core/`），L3 存储层（`src/storage/`）只走了 localfs 写路径与公共约定。
-读码为主，其中 R11 与 §7 的 Range 行为用一个**无凭证**的 builtin 实例现场跑过
-（复现步骤见 §5）。标注 **实测** 的结论有现场证据，其余是读码推断，落地前请各自补一
-个用例。
+读码为主，逐条落地时都补了回归用例，多数还在活网关上实测过（见各条后面的用例名）。
 
 已修复并删除的条目，编号留空不再复用：R1（auth 关闭时 aws-chunked 不解帧，回归用例
 `sigv4_disabled_*` 三条）、R2（`x-amz-decoded-content-length` 解析过宽，回归用例
@@ -38,27 +36,21 @@ R11（builtin 关连接前补 `shutdown(SHUT_WR)`；**原判"客户端读不到 
 `http_driver_unconsumed_body_ends_the_connection_in_order`）、R12（presigned 采信签名
 覆盖之内的 payload 哈希承诺：`X-Amz-Content-Sha256` query 参数，或出现在 SignedHeaders
 里的同名头；没签的头不看。回归用例 `sigv4_presigned_honours_a_committed_payload_hash`
-与 `sigv4_presigned_payload_hash_cannot_be_forged`）。
+与 `sigv4_presigned_payload_hash_cannot_be_forged`）、R13（`/-/metrics` 匿名暴露在非回环
+监听上时启动 WARN，并把"`/-/` 面放私网监听"写成推荐形态；回归用例
+`config_metrics_exposure_predicate`）。
+
+**风险项（R 系列）已全部清零**，本文只剩 §3 的纯性能项 O1–O6 与 §6 的顺带发现。
 
 等级：高＝可能损坏数据或绕过约束；中＝可被外部输入放大，或明显偏离 AWS 语义；
 低＝加固/一致性问题。
 
 ## 2. 结论摘要
 
-| 编号 | 位置 | 等级 | 一句话 |
-| --- | --- | --- | --- |
-| R13 | `config/lights3.yaml` | 低 | `/-/metrics` 默认匿名，暴露桶名与后端拓扑 |
-| O1–O6 | 见 §4 | — | 纯性能项（SigV4 规范化、header 访问、id 生成、fsync、beast 每请求系统调用） |
+风险项 R1–R13 全部完成（每条的去向见 §1），本文余下的是 §3 的六条纯性能项与 §6
+的两条顺带发现。
 
-## 3. 风险项
-
-### R13（低）`/-/metrics` 默认匿名
-
-默认 `metrics_access: anonymous`，而指标里带桶名、每桶请求量/字节、后端名与拓扑。
-生产部署应当 `metrics_access: root` 或用 `http.admin_port` 把管理面分到单独监听。
-现有文档提到了这两个开关，但没有在部署清单里作为**推荐默认**出现。
-
-## 4. 纯性能项
+## 3. 纯性能项
 
 | 编号 | 位置 | 内容 |
 | --- | --- | --- |
@@ -67,19 +59,20 @@ R11（builtin 关连接前补 `shutdown(SHUT_WR)`；**原判"客户端读不到 
 | O3 | `s3/service.cc:35-52` | 每请求生成 16 字符 request-id + 48 字符 host-id（两次 `to_hex` + 两次分配）。`x-amz-id-2` 可以退化成"每进程前缀 + 每连接计数"，它只是给日志关联用的 |
 | O4 | `storage/localfs/fs_util.cc:87-94` | 对象提交走 `fsync_path`（按路径重新 `open` 再 `fdatasync` 再 `close`），而 upload_part 走的是 fd 版 `fsync_file`（`localfs_backend.cc:1134`）。PUT 路径每次多一对 open/close 系统调用，两条路径的写法也不一致 |
 | O5 | `http/drivers/beast/beast_server.cc:762-766` | 每请求一次 `remote_endpoint()` 系统调用 + `to_string()` 分配；keep-alive 连接上这是常量，缓存到 `Session` 即可 |
-| O6 | `http/drivers/common.h:213-233` | `parse_target` 对每个 query 参数做 `substr` + 两次 percent-decode，全部落成 `std::string`；配合 O1/R6 一起改成 string_view 视图 + 延迟解码收益更整齐 |
+| O6 | `http/drivers/common.h:213-233` | `parse_target` 对每个 query 参数做 `substr` + 两次 percent-decode，全部落成 `std::string`；配合 O1 一起改成 string_view 视图 + 延迟解码收益更整齐 |
 
-## 5. 复现方法
+## 4. 复现方法
 
-只剩 R13，它是配置默认值，读 `config/lights3.yaml` 即可判断。早先几条用过的"无凭证起服"模板（localfs + builtin + `auth:` 只留 region）
-见 git 历史里本文的旧版本，或直接照 `config/lights3.yaml` 删掉 credentials 一节。
+R 系列已清零；O1–O6 用 `scripts/bench_matrix.sh` / `scripts/bench_gate.sh` 量，方法见
+[performance-baseline.md](performance-baseline.md) §4.4。早先几条用过的"无凭证起服"模板
+（localfs + builtin + `auth:` 只留 region）见 git 历史里本文的旧版本。
 
-## 6. 建议的推进顺序
+## 5. 建议的推进顺序
 
 1. 只剩 R13。O1–O6 是纯性能项，先照 §4.4 的办法做交错 A/B，别预设它们一定
    测得出来。
 
-## 6.5 顺带发现（不在原清单里）
+## 6. 顺带发现（不在原清单里）
 
 - `http_driver_many_concurrent_bodies`（R8 时新加）对 httplib 是 flaky 的：24 个客户端
   同时 connect 会打爆 cpp-httplib 上游那个 5 的 listen backlog，SYN 被丢弃重传，表现为

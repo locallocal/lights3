@@ -127,6 +127,10 @@ private:
     // shutdown: stop waiting, close what is left
     std::atomic<bool> retire_stop_{false};
     std::shared_ptr<s3::CredentialStore> cred_store_;
+    // decided in open_storage(), reported by start_server() (which is where the listeners
+    // exist and where a deployment-posture warning belongs -- open_storage also runs for
+    // --check-config and the offline CLI commands)
+    bool auth_enabled_ = false;
     std::shared_ptr<s3::WebsiteStore> website_store_;
     std::shared_ptr<s3::CorsStore> cors_store_;
     std::shared_ptr<s3::TlsIdentityStore> tls_identity_store_;

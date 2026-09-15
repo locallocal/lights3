@@ -146,11 +146,26 @@ its own checksum).
 
 ### 3.4 Presigned URL
 
-`X-Amz-Signature` and friends appear in the query: same canonical algorithm, payload
-treated as `UNSIGNED-PAYLOAD`, with an additional `X-Amz-Expires` check. Expiry only
-constrains the past side; an `X-Amz-Date` more than 15min ahead of the server is
-likewise rejected (AccessDenied "Request is not valid yet"), preventing future
-timestamps from extending the validity window indefinitely.
+`X-Amz-Signature` and friends appear in the query: same canonical algorithm, with an
+additional `X-Amz-Expires` check. Expiry only constrains the past side; an `X-Amz-Date`
+more than 15min ahead of the server is likewise rejected (AccessDenied "Request is not
+valid yet"), preventing future timestamps from extending the validity window
+indefinitely.
+
+The **payload hash** defaults to `UNSIGNED-PAYLOAD`, but the signer may commit to a real
+one. There are exactly two places that commitment can come from, and both are inside what
+the signature covers:
+
+| Source | Why it can be trusted |
+| --- | --- |
+| the `X-Amz-Content-Sha256` **query parameter** | part of the canonical query (`X-Amz-Signature` is the only parameter excluded from it): change one character and the signature stops matching |
+| the `x-amz-content-sha256` **header**, when it appears in `X-Amz-SignedHeaders` | part of the canonical headers. **An unsigned header is never consulted** — otherwise a client sending one it did not sign would flip the hash this side computes with and break its own URL |
+
+Once honoured it is also enforced: a hex digest installs the `Sha256VerifyingReader`
+(mismatch → `XAmzContentSHA256Mismatch`) and a `STREAMING-*` value goes through the
+de-framing of §3.2. Previously the hash was forced to `UNSIGNED-PAYLOAD` no matter what, so
+a client presigning with a real digest only ever got SignatureDoesNotMatch -- while that
+query parameter sat on the common allowlist, accepted and ignored.
 
 ### 3.5 Credential Management and STS Sessions
 

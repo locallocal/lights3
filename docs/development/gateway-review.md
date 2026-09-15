@@ -35,7 +35,10 @@ obs-fold；**原来不只是"碰巧安全"** —— 带冒号的续行会让重�
 R11（builtin 关连接前补 `shutdown(SHUT_WR)`；**原判"客户端读不到 4xx"不成立** ——
 实测 Linux 会先交付对端缓冲里的数据再报 reset，真正的差别是客户端分不清正常结束与
 截断；半关一句就够，不需要 lingering 排空。回归用例
-`http_driver_unconsumed_body_ends_the_connection_in_order`）。
+`http_driver_unconsumed_body_ends_the_connection_in_order`）、R12（presigned 采信签名
+覆盖之内的 payload 哈希承诺：`X-Amz-Content-Sha256` query 参数，或出现在 SignedHeaders
+里的同名头；没签的头不看。回归用例 `sigv4_presigned_honours_a_committed_payload_hash`
+与 `sigv4_presigned_payload_hash_cannot_be_forged`）。
 
 等级：高＝可能损坏数据或绕过约束；中＝可被外部输入放大，或明显偏离 AWS 语义；
 低＝加固/一致性问题。
@@ -44,18 +47,10 @@ R11（builtin 关连接前补 `shutdown(SHUT_WR)`；**原判"客户端读不到 
 
 | 编号 | 位置 | 等级 | 一句话 |
 | --- | --- | --- | --- |
-| R12 | `s3/auth/sigv4.cc:792` | 低 | presigned 一律按 `UNSIGNED-PAYLOAD` 计签 |
 | R13 | `config/lights3.yaml` | 低 | `/-/metrics` 默认匿名，暴露桶名与后端拓扑 |
 | O1–O6 | 见 §4 | — | 纯性能项（SigV4 规范化、header 访问、id 生成、fsync、beast 每请求系统调用） |
 
 ## 3. 风险项
-
-### R12（低）presigned 一律按 UNSIGNED-PAYLOAD 计签
-
-`sigv4.cc:791-792`：只要是 presigned 就把 payload_hash 固定成 `UNSIGNED-PAYLOAD`。
-`X-Amz-Content-Sha256` 在通用查询白名单里（`service.cc:370`）却不参与这个选择，
-所以用真实 payload hash 预签的客户端会拿到 SignatureDoesNotMatch。与 AWS 主流行为
-一致，但既然放行了这个查询参数，就应该在它出现时采用它的值。
 
 ### R13（低）`/-/metrics` 默认匿名
 
@@ -76,13 +71,12 @@ R11（builtin 关连接前补 `shutdown(SHUT_WR)`；**原判"客户端读不到 
 
 ## 5. 复现方法
 
-剩下的 R12 / R13 都不需要跑服务：R12 读 `sigv4.cc` 的 presigned 分支即可判断，R13 是
-配置默认值。早先几条用过的"无凭证起服"模板（localfs + builtin + `auth:` 只留 region）
+只剩 R13，它是配置默认值，读 `config/lights3.yaml` 即可判断。早先几条用过的"无凭证起服"模板（localfs + builtin + `auth:` 只留 region）
 见 git 历史里本文的旧版本，或直接照 `config/lights3.yaml` 删掉 credentials 一节。
 
 ## 6. 建议的推进顺序
 
-1. 按等级顺延（R12 起）。O1–O6 是纯性能项，先照 §4.4 的办法做交错 A/B，别预设它们一定
+1. 只剩 R13。O1–O6 是纯性能项，先照 §4.4 的办法做交错 A/B，别预设它们一定
    测得出来。
 
 ## 6.5 顺带发现（不在原清单里）

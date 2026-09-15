@@ -128,10 +128,22 @@ trailer 声明 → InvalidRequest（无 body 的声明如 CreateMultipartUpload 
 
 ### 3.4 Presigned URL
 
-`X-Amz-Signature` 等参数出现在 query 中：同一套 canonical 算法，payload 按
-`UNSIGNED-PAYLOAD` 处理，额外校验 `X-Amz-Expires`。过期只约束过去一侧；
-`X-Amz-Date` 超前服务器 15min 以上同样拒绝（AccessDenied "Request is not
-valid yet"），防未来时间戳把有效期无限外推。
+`X-Amz-Signature` 等参数出现在 query 中：同一套 canonical 算法，额外校验
+`X-Amz-Expires`。过期只约束过去一侧；`X-Amz-Date` 超前服务器 15min 以上同样拒绝
+（AccessDenied "Request is not valid yet"），防未来时间戳把有效期无限外推。
+
+**payload 哈希**默认 `UNSIGNED-PAYLOAD`，但签发方可以承诺一个真实哈希，来源只有两处，
+且两处都在签名覆盖之内：
+
+| 来源 | 为什么可以采信 |
+| --- | --- |
+| `X-Amz-Content-Sha256` **query 参数** | 进 canonical query（只有 `X-Amz-Signature` 被排除），改一个字符签名就对不上 |
+| `x-amz-content-sha256` **头**，且出现在 `X-Amz-SignedHeaders` 里 | 进 canonical headers；**没签的头一律不看** —— 否则客户端发一个自己没签的头就能把服务端算签时用的哈希换掉，把自己的 URL 弄失效 |
+
+采信之后该做的校验照做：十六进制摘要装 `Sha256VerifyingReader`（不符
+`XAmzContentSHA256Mismatch`），`STREAMING-*` 走 §3.2 的解帧。此前无论如何都按
+`UNSIGNED-PAYLOAD` 计签，于是用真实摘要预签的客户端只会拿到 SignatureDoesNotMatch，
+而那个 query 参数又在通用白名单里被放行——收下却不看。
 
 ### 3.5 凭证管理与 STS 会话
 

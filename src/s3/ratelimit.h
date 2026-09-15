@@ -7,7 +7,9 @@
 // Retry-After: 1 — the throttling signal every S3 SDK already retries on.
 #pragma once
 
+#include <atomic>
 #include <chrono>
+#include <functional>
 #include <list>
 #include <mutex>
 #include <optional>
@@ -34,18 +36,40 @@ public:
 
     bool enabled() const { return limits_.any(); }
 
-    // Holds the in-flight slot of one admitted request; releasing it returns the slot
+private:
+    struct Entry {
+        double tokens = 0;
+        Clock::time_point last{};
+        // Decremented by Token without taking mu_. An entry is only ever evicted while
+        // this is zero (checked under mu_, and admit increments under mu_), so a live
+        // Token's pointer to it cannot dangle: unordered_map keeps element addresses
+        // stable across rehashing, and the only thing that invalidates one is the erase
+        // that this counter prevents
+        std::atomic<int> inflight{0};
+        std::list<std::string>::iterator lru;
+    };
+
+    // Transparent hashing so the hot path looks up by string_view: admit used to copy the
+    // key into a std::string before even knowing whether it was already tracked
+    struct KeyHash {
+        using is_transparent = void;
+        size_t operator()(std::string_view s) const noexcept { return std::hash<std::string_view>{}(s); }
+    };
+
+public:
+    // Holds the in-flight slot of one admitted request; releasing it returns the slot.
+    // Carries the entry itself rather than a copy of the key: releasing is then a single
+    // atomic decrement instead of "copy the key, take the process-wide lock, hash it again"
     class Token {
     public:
         Token() = default;
-        Token(RateLimiter* l, std::string key) : l_(l), key_(std::move(key)) {}
-        Token(Token&& o) noexcept : l_(o.l_), key_(std::move(o.key_)) { o.l_ = nullptr; }
+        explicit Token(Entry* e) : e_(e) {}
+        Token(Token&& o) noexcept : e_(o.e_) { o.e_ = nullptr; }
         Token& operator=(Token&& o) noexcept {
             if (this != &o) {
                 reset();
-                l_ = o.l_;
-                key_ = std::move(o.key_);
-                o.l_ = nullptr;
+                e_ = o.e_;
+                o.e_ = nullptr;
             }
             return *this;
         }
@@ -53,35 +77,27 @@ public:
         Token& operator=(const Token&) = delete;
         ~Token() { reset(); }
         void reset() {
-            if (l_) l_->release(key_);
-            l_ = nullptr;
+            if (e_) e_->inflight.fetch_sub(1, std::memory_order_acq_rel);
+            e_ = nullptr;
         }
 
     private:
-        RateLimiter* l_ = nullptr;
-        std::string key_;
+        Entry* e_ = nullptr;
     };
 
     // nullopt = over the limit (rate or concurrency). An empty key is always admitted
     // without accounting (unknown source / auth disabled)
     std::optional<Token> admit(std::string_view key, Clock::time_point now = Clock::now());
-    void release(const std::string& key);
 
     size_t tracked() const;
 
 private:
-    struct Entry {
-        double tokens = 0;
-        Clock::time_point last{};
-        int inflight = 0;
-        std::list<std::string>::iterator lru;
-    };
     void evict_locked();
 
     Limits limits_;
     size_t max_tracked_;
     mutable std::mutex mu_;
-    std::unordered_map<std::string, Entry> table_;
+    std::unordered_map<std::string, Entry, KeyHash, std::equal_to<>> table_;
     // front = most recently used
     std::list<std::string> lru_;
 };

@@ -351,7 +351,10 @@ log:
   # file: /var/log/lights3/lights3.log # empty = stderr; otherwise a size-rotated file
   # max_size: 64MiB                    # rotate above this size
   # max_files: 10                      # rotated files kept
-  # async: false                       # true = dedicated writer thread, request threads only enqueue
+  # async: true                        # default. false = format and write the line on the request thread,
+  #                                    # serialized by the sink's mutex: measured at 64 concurrent clients that
+  #                                    # costs 9% of PUT and 20% of GET throughput (development/performance-baseline.md §4).
+  #                                    # Turn it off only when every last line must survive a SIGKILL
   # async_queue: 8192                  # queue capacity (records), [64, 1048576]
   # async_overflow: block              # block = wait on a full queue | drop = overwrite the oldest record
   # slow_request_threshold: 0s         # >= this total time => WARN access line with per-stage timings; 0 = off (hot-reloadable)

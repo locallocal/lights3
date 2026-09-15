@@ -1,7 +1,10 @@
 // per-IP / per-access-key rate limiting (s3/ratelimit.h) — token
 // bucket + concurrency cap + bounded table, and the dispatch integration
 // (503 SlowDown + Retry-After, metrics), plus the timeout/ratelimit config surface
+#include <atomic>
 #include <chrono>
+#include <thread>
+#include <vector>
 
 #include "core/config.h"
 #include "core/util/crypto.h"
@@ -190,4 +193,78 @@ TEST(ratelimit_and_timeout_config_surface) {
     // burst without rps
     CHECK(rejects("ratelimit:\n  per_ip_burst: 10\n"));
     CHECK(rejects("ratelimit:\n  max_tracked: 0\n"));
+}
+
+// The Token carries a pointer to the table entry rather than a copy of the key, so
+// releasing is one atomic decrement instead of "copy the key, lock, hash it again". What
+// keeps that pointer valid is the eviction rule: an entry with requests in flight is never
+// erased, and unordered_map keeps element addresses stable across rehashing. This drives
+// the two things that could break it -- rehashing under a live token, and eviction
+// pressure while tokens are held -- and is worth running under ASan
+TEST(ratelimit_token_survives_rehash_and_eviction) {
+    RateLimiter rl({.max_inflight = 4}, 4096);
+    std::vector<RateLimiter::Token> held;
+    // Hold a slot on the first key, then grow the table far past its initial bucket count
+    auto first = rl.admit("key-0");
+    CHECK(first.has_value());
+    for (int i = 1; i < 2000; ++i) {
+        auto t = rl.admit("key-" + std::to_string(i));
+        CHECK(t.has_value());
+        if (i % 3 == 0) held.push_back(std::move(*t));
+    }
+    // The held tokens were handed out before hundreds of rehashes; releasing them now must
+    // still land on their own entries
+    first->reset();
+    held.clear();
+    CHECK(rl.admit("key-0").has_value());
+
+    // Eviction pressure with tokens outstanding: the table is one slot wide, and every
+    // newcomer forces an eviction sweep past entries that must not be touched
+    RateLimiter small({.max_inflight = 2}, 1);
+    std::vector<RateLimiter::Token> pinned;
+    for (int i = 0; i < 64; ++i) {
+        auto t = small.admit("pinned-" + std::to_string(i));
+        CHECK(t.has_value());
+        pinned.push_back(std::move(*t));
+    }
+    // releasing in reverse order, long after each entry stopped being the LRU head
+    while (!pinned.empty()) pinned.pop_back();
+    CHECK(small.tracked() >= size_t(1));
+}
+
+// Concurrent admit/release on one key: the counter is decremented without the lock, so
+// the invariant to hold is "never more than max_inflight admitted at once, and the slots
+// all come back"
+TEST(ratelimit_concurrent_admit_release) {
+    RateLimiter rl({.max_inflight = 8}, 64);
+    std::atomic<int> live{0}, peak{0}, admitted{0}, refused{0};
+    std::vector<std::thread> ts;
+    for (int t = 0; t < 8; ++t)
+        ts.emplace_back([&] {
+            for (int i = 0; i < 2000; ++i) {
+                auto tok = rl.admit("hot");
+                if (!tok) {
+                    refused.fetch_add(1, std::memory_order_relaxed);
+                    continue;
+                }
+                admitted.fetch_add(1, std::memory_order_relaxed);
+                int now = live.fetch_add(1, std::memory_order_acq_rel) + 1;
+                int seen = peak.load(std::memory_order_relaxed);
+                while (now > seen && !peak.compare_exchange_weak(seen, now)) {
+                }
+                std::this_thread::yield();
+                live.fetch_sub(1, std::memory_order_acq_rel);
+            }
+        });
+    for (auto& t : ts) t.join();
+    CHECK(admitted.load() + refused.load() == 8 * 2000);
+    CHECK(peak.load() <= 8);
+    // every slot came back: the limiter admits a full set again
+    std::vector<RateLimiter::Token> all;
+    for (int i = 0; i < 8; ++i) {
+        auto tok = rl.admit("hot");
+        CHECK(tok.has_value());
+        all.push_back(std::move(*tok));
+    }
+    CHECK(!rl.admit("hot"));
 }

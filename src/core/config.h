@@ -356,8 +356,15 @@ struct LogConfig {
     uint64_t max_size = 64 * 1024 * 1024;
     // rotated files kept
     int max_files = 10;
-    // true = a dedicated writer thread; request threads only enqueue
-    bool async = false;
+    // true = a dedicated writer thread; request threads only enqueue.
+    // Default since the access line costs a formatted write(2) on the request thread,
+    // serialized by the sink's own mutex: measured at 64 concurrent clients on the
+    // memory backend, synchronous logging cost 9% of PUT and 20% of GET throughput
+    // (docs/development/performance-baseline.md §4). The trade is the tail of the queue
+    // on a hard crash -- at most async_queue records, and the warn/error channel still
+    // flushes on every record (flush_on(warn)). Set false when every last line must
+    // survive a SIGKILL
+    bool async = true;
     // queue capacity (records)
     int async_queue = 8192;
     // block = the caller waits on a full queue; drop = overwrite the oldest

@@ -171,7 +171,42 @@
   曾慢 15%，合并小缓冲后消除，见 http-adapter.md §2.4 ⑫）。
 - 不需要再留后续项：todo 中"性能基线跑出的新问题"一节已随之删除。
 
-## 4. 复现
+## 4. 2026-09-15：请求尾部的固定开销（访问日志与进程级锁）
+
+走查条目 R4。四处"每请求都付"的开销：`Logger::access()` 的进程级互斥、默认**同步**
+的访问日志、限流器的键拷贝与第二次加锁、builtin 每请求两次全局锁 + 一次 `std::set`
+节点分配。前三项在 16 并发下都落在噪声里；**真正的大头是同步日志**。
+
+### 4.1 隔离测量（builtin + memory 后端 + 16 KiB，Release）
+
+用 `log.level` 与 `log.async` 三种组合跑同一负载，`warn` 一档不产生访问行，是"日志
+完全不要钱"的上限：
+
+| 并发 | 配置 | PUT ops/s | GET ops/s | PUT p99 | GET p99 |
+| --- | --- | --- | --- | --- | --- |
+| 16 | info + 同步（改前默认） | 154.3k | 201.9k | 0.255 ms | 0.239 ms |
+| 16 | info + 异步 | 158.5k | 211.4k | 0.252 ms | 0.238 ms |
+| 64 | info + 同步（改前默认） | 203.0k | 254.4k | 1.02 ms | 1.01 ms |
+| 64 | info + 异步 | 218.5k | 304.4k | 0.99 ms | 0.87 ms |
+| 64 | warn（无访问行，上限） | 224.1k | 318.1k | 0.98 ms | 0.80 ms |
+
+64 并发下同步日志吃掉 **PUT 9%、GET 20%** 的吞吐；换成异步后分别只差上限的 2.5% 与
+4.3%。p99 也跟着从 1.01ms 降到 0.87ms。于是 `log.async` 的默认值改为 `true`
+（代价：硬崩溃时最多丢 `async_queue` 条记录；warn/error 仍逐条 flush）。
+
+### 4.2 改前 / 改后（`scripts/bench_gate.sh`，16 并发 ×10s ×3 轮）
+
+| | PUT ops/s | GET ops/s | GET p99 |
+| --- | --- | --- | --- |
+| 改前 | 156.2 / 157.5 / 159.6k | 204.7 / 203.5 / 205.3k | 0.226 ms |
+| 改后 | 157.9 / 160.1 / 160.4k | 215.1 / 214.8 / 215.7k | 0.219 ms |
+
+16 并发 GET +5.2%，PUT +1.1%（在噪声边缘）；64 并发见上表，PUT +8.1%、GET +19.2%。
+去锁三项（`Logger::access` 无锁读、限流器异构查找 + 无锁 release、builtin 的
+per-connection 原子位）单独测不出来 —— 限流默认关闭时根本不进那段代码，另两处每请求
+各几百纳秒，对 ~6 µs 的请求是噪声。它们照样改了：代价为零，且争用随核数与并发增长。
+
+## 5. 复现
 
 ```bash
 ./build.sh -B build-rel -DCMAKE_BUILD_TYPE=Release -DLIGHTS3_DUOSTORE=OFF -DLIGHTS3_CLOUDPROXY=OFF -DLIGHTS3_BUILD_TESTS=OFF
@@ -185,9 +220,10 @@ scripts/bench_matrix.sh build-seastar/lights3 build-rel/lights3-ctl --drivers se
 `result` 就是 `lights3-ctl bench --output=json` 的对象。跑之前确认机器空闲、
 没有残留的 `lights3` 进程（`pgrep -x lights3`）。
 
-## 5. 历史
+## 6. 历史
 
 | 日期 | 变更 | 摘要 |
 | --- | --- | --- |
 | 2026-09-05 | §4.3 数据面优化（预取、缓冲池、sendfile、pumping、ResumeOn 快路径、per-bucket 指标去锁、beast 读缓冲预留） | 大对象 GET +14～52%，beast PUT 3.5～10× |
 | 2026-09-13 | beast 每线程 io_context、会话看门狗、内存 BIO TlsStream；PipelinedMd5 请求体 MD5 流水化（http-adapter.md §2.4 ⑩–⑬） | beast TLS GET 4 MiB +93%（与其他驱动持平），4 MiB PUT 四驱动 +12～55%，p50 7.2 → 6.2 ms |
+| 2026-09-15 | 请求尾部去锁 + `log.async` 默认开（§4） | 64 并发 16 KiB：PUT +8.1%、GET +19.2%，GET p99 1.01 → 0.87 ms |

@@ -32,12 +32,17 @@ bool contains(const std::string& s, const std::string& sub) { return s.find(sub)
 struct Capture {
     std::ostringstream out;
     std::shared_ptr<spdlog::sinks::ostream_sink_mt> sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(out);
-    explicit Capture(const std::string& format) {
+    // Synchronous on purpose: the assertions read the stream right after the request,
+    // and the async writer thread would make that a race. log.async defaults to true,
+    // and logger_async_rotating_file covers that path deliberately
+    static LogConfig sync_config(const std::string& format) {
         LogConfig cfg;
         cfg.format = format;
-        Logger::init(cfg, sink);
+        cfg.async = false;
+        return cfg;
     }
-    ~Capture() { Logger::init(LogConfig{}); }
+    explicit Capture(const std::string& format) { Logger::init(sync_config(format), sink); }
+    ~Capture() { Logger::init(sync_config("text")); }
     // Lines in emission order
     std::vector<std::string> lines() {
         std::vector<std::string> v;

@@ -16,7 +16,10 @@
 `sigv4_disabled_*` 三条）、R2（`x-amz-decoded-content-length` 解析过宽，回归用例
 `parse_content_length_is_strict` 与 `sigv4_decoded_content_length_parsed_strictly`）、
 R3（用户元数据无总量上限，现为 `http.max_user_metadata_size`，回归用例
-`service_user_metadata_size_capped` / `config_max_user_metadata_size_bounded`）。
+`service_user_metadata_size_capped` / `config_max_user_metadata_size_bounded`）、
+R4（请求尾部的进程级锁与默认同步日志，`log.async` 已默认开，实测见
+[performance-baseline.md](performance-baseline.md) §4；回归用例
+`http_driver_shutdown_cuts_idle_keepalive_at_once` 与 `ratelimit_*` 两条）。
 
 等级：高＝可能损坏数据或绕过约束；中＝可被外部输入放大，或明显偏离 AWS 语义；
 低＝加固/一致性问题。
@@ -25,44 +28,18 @@ R3（用户元数据无总量上限，现为 `http.max_user_metadata_size`，回
 
 | 编号 | 位置 | 等级 | 一句话 |
 | --- | --- | --- | --- |
-| R4 | `core/log.cc:232` 等 | 中 | 请求尾部有 4 处进程级锁 + 默认同步日志 |
 | R5 | `s3/auth/sigv4.cc:271` | 中 | 分块解帧固定 16KiB 中转缓冲，压低所有签名流式 PUT 的吞吐 |
 | R6 | `s3/service.cc:903` 等 | 中 | 每请求 4–6 次路由表全扫描 |
 | R7 | `s3/metrics.cc:27` | 中 | 桶维度指标表满了不淘汰，随机桶名可把真实桶挤进 `_other` |
 | R8 | `http/drivers/httplib/httplib_server.cc:343` | 低中 | 每个带 body 的请求 create+join 一个 `std::thread` |
 | R9 | `core/thread_pool.cc:52` | 低 | `backlog_` 无界，"有界队列 + 背压"的实际语义需要写清 |
-| R10 | `http/drivers/builtin/builtin_server.cc:482` | 低 | obs-fold 折行头未按 RFC 9112 §5.2 拒绝 |
-| R11 | `http/drivers/builtin/builtin_server.cc:754` | 低 | 关连接前未 `shutdown(SHUT_WR)`，极端情况客户端只看到 RST |
+| R10 | `http/drivers/builtin/builtin_server.cc:493` | 低 | obs-fold 折行头未按 RFC 9112 §5.2 拒绝 |
+| R11 | `http/drivers/builtin/builtin_server.cc:768` | 低 | 关连接前未 `shutdown(SHUT_WR)`，极端情况客户端只看到 RST |
 | R12 | `s3/auth/sigv4.cc:773` | 低 | presigned 一律按 `UNSIGNED-PAYLOAD` 计签 |
 | R13 | `config/lights3.yaml` | 低 | `/-/metrics` 默认匿名，暴露桶名与后端拓扑 |
 | O1–O6 | 见 §4 | — | 纯性能项（SigV4 规范化、header 访问、id 生成、fsync、beast 每请求系统调用） |
 
 ## 3. 风险项
-
-### R4（中）请求尾部的进程级锁与默认同步日志
-
-每个请求在收尾阶段至少踩到四把全局锁，其中两把是纯粹可以去掉的：
-
-| 位置 | 每请求代价 |
-| --- | --- |
-| `core/log.cc:232` `Logger::access()` | 进程级 `std::mutex g_mu`，只为取一个初始化后就不再变的 logger 指针 |
-| `s3/metrics.cc:57` `record_bucket_request` | 全局 `bucket_m_`，临界区是一次 map 查找 |
-| `s3/ratelimit.cc:15` `admit` ×1–2 | 全局 `mu_`；且 `std::string k(key)` 每请求一次拷贝，插入路径共三次 |
-| `builtin_server.cc:432,439` | `sh.m` 两次 + `std::set<int>` 的节点分配/释放各一次 |
-
-同时 `log.async` 默认 `false`（`core/config.h:354`），即每请求的 access 行在**请求
-线程上**同步格式化并写 sink，默认 sink 是 stderr —— 每请求一次 `write(2)`，且被
-sink 自身的互斥量串行化。
-
-建议，按收益排序：
-
-1. `g_access` 改成初始化后只读的 `std::atomic<spdlog::logger*>`（或
-   `shared_ptr` 的 atomic load），`Logger::access()` 无锁返回；
-2. 把 `log.async: true` 作为默认，或至少在 performance-baseline 里标出"默认同步
-   日志的代价"，避免基准数据把日志开销算进网关本身；
-3. RateLimiter 用异构查找（`std::less<>` + `string_view`）消除命中路径的拷贝，
-   并按 key 哈希分片降低竞争；
-4. builtin 的 idle 标记改成连接自身的原子位 + 一个计数，不再进全局 `set`。
 
 ### R5（中）分块解帧固定 16KiB 中转缓冲
 
@@ -133,7 +110,7 @@ NoSuchBucket 的 404）无条件 `record_bucket_request(bucket)`（`service.cc:1
 
 ### R10（低）obs-fold 折行头未按 RFC 拒绝
 
-builtin 的头解析（`builtin_server.cc:471-489`）对以 SP/HTAB 开头的续行没有特判：
+builtin 的头解析（`builtin_server.cc:482-500`）对以 SP/HTAB 开头的续行没有特判：
 不含冒号的续行会因 `colon == npos` 被判为 malformed（安全），含冒号的会变成一个
 名字带前导空格的普通头。前置代理若按 RFC 9112 §5.2 把续行折进上一个头的值，两边对
 同一请求的理解就不一致 —— 目前会因签名对不上而失败，但这属于"碰巧安全"。
@@ -142,7 +119,7 @@ builtin 的头解析（`builtin_server.cc:471-489`）对以 SP/HTAB 开头的续
 
 ### R11（低）关连接前未 `shutdown(SHUT_WR)`
 
-builtin 在连接线程结束后直接 `::close(fd)`（`builtin_server.cc:754`），beast 走
+builtin 在连接线程结束后直接 `::close(fd)`（`builtin_server.cc:768`），beast 走
 `shutdown(both)`（`beast_server.cc:707`）。接收缓冲里还有未读数据时，Linux 会发
 RST，客户端可能读不到已经写出去的 4xx。
 
@@ -214,7 +191,7 @@ R2 的 `stoull` 语义用一个三行程序即可确认（`-1` → 1844674407370
 ## 6. 建议的推进顺序
 
 1. **R5**（下面这条实测数据摆着，且 R1 的修复让更多部署走到这条路径上）；
-2. **R6 + R4**（请求尾部的固定开销，改完跑一次
+2. **R6**（请求尾部的固定开销，改完跑一次
    `scripts/bench_matrix.sh` 对照 [performance-baseline.md](performance-baseline.md)）；
 3. **R7**（可观测性自愈）；
 4. 其余按等级顺延；O1–O6 建议合并进第 1、2 步一起量。

@@ -293,11 +293,13 @@ TEST(config_log_section) {
     auto d = Config::from_string(backends).log;
     CHECK_EQ(d.level, "info");
     CHECK_EQ(d.format, "text");
-    CHECK(d.file.empty() && !d.async);
+    // stderr, and the writer thread on by default (the access line must not cost a
+    // write(2) on the request thread)
+    CHECK(d.file.empty() && d.async);
     CHECK_EQ(d.slow_request_threshold_ms, 0);
     auto cfg = Config::from_string(std::string("log:\n  level: warn\n  format: json\n"
                                                "  file: /var/log/lights3.log\n  max_size: 1MiB\n"
-                                               "  max_files: 3\n  async: true\n"
+                                               "  max_files: 3\n  async: false\n"
                                                "  async_queue: 1024\n  async_overflow: drop\n"
                                                "  slow_request_threshold: 500ms\n") +
                                    backends)
@@ -307,7 +309,8 @@ TEST(config_log_section) {
     CHECK_EQ(cfg.file, "/var/log/lights3.log");
     CHECK_EQ(cfg.max_size, uint64_t(1048576));
     CHECK_EQ(cfg.max_files, 3);
-    CHECK(cfg.async);
+    // explicitly turned off, the one setting that survives a SIGKILL intact
+    CHECK(!cfg.async);
     CHECK_EQ(cfg.async_queue, 1024);
     CHECK_EQ(cfg.async_overflow, "drop");
     CHECK_EQ(cfg.slow_request_threshold_ms, 500);

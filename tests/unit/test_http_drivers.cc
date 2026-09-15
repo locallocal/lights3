@@ -1792,6 +1792,38 @@ TEST(http_driver_shutdown_grace_bounds_return) {
     }
 }
 
+TEST(http_driver_shutdown_cuts_idle_keepalive_at_once) {
+    // An idle keep-alive connection is only waiting for its next request, so shutdown cuts
+    // it straight away instead of spending the grace period on it. builtin tracks that
+    // state as a per-connection atomic (no lock, no allocation per request), which makes
+    // this also the test of the publication order: the flag is stored before the
+    // connection consults `stopping`, and the sweep sets `stopping` before reading the
+    // flag, so one of the two always sees the other -- otherwise the connection settles
+    // into a 60s idle read that shutdown does not know about and the grace period is
+    // burned in full
+    for (auto& d : HttpServerFactory::drivers()) {
+        try {
+            TestServer ts(d, [](HttpConfig& c) {
+                c.shutdown_grace_sec = 5;
+                c.shutdown_force_wait_sec = 5;
+                c.idle_timeout_sec = 60;
+            });
+            Client c(ts.port);
+            c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+            auto r = c.read_response();
+            CHECK(r.ok);
+            // the connection is now parked waiting for the next request line
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            auto t0 = std::chrono::steady_clock::now();
+            ts.stop();
+            auto took = std::chrono::steady_clock::now() - t0;
+            CHECK(took < std::chrono::seconds(2));
+        } catch (const mini_test::Failure& f) {
+            throw mini_test::Failure("[driver=" + d + "] " + f.what());
+        }
+    }
+}
+
 TEST(http_driver_shutdown_force_deadline_builtin) {
     // The strictest shape: the handler sleeps through the whole grace+force window (4s > 1+1+margin), run() must still
     // return on time. builtin only -- it has an explicit design for "leftover threads hold shared state via shared_ptr

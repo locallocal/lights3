@@ -69,6 +69,7 @@ Every configuration key is documented with its default in the comments of
 | [testing.md](development/testing.md) | Testing: the ctest matrix and labels, the e2e sections, fuzz harnesses, fault injection, the performance gate and soak, mint, ubsan/coverage, the one-shot matrix script, the Makefile |
 | [performance-baseline.md](development/performance-baseline.md) | Performance baseline: the `scripts/bench_matrix.sh` matrix of 4 drivers × TLS × put/get, before/after the data-plane work, the 2026-09-13 re-run (beast TLS and pipelined request-body MD5), how to reproduce |
 | [todo.md](development/todo.md) | Open items and plans: pending verification, long-term items, the not-planned list; entries are deleted when done |
+| `development/gateway-review.md` (Chinese only) | Gateway-wide review (2026-09-15 snapshot): risks and optimizations across L1/L2/L4, repro steps, and the points confirmed sound; the file and this row go away once the list is empty |
 
 ### Archive (`docs/archive/`, Chinese only)
 

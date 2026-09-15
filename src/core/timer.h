@@ -27,10 +27,9 @@ public:
 
     static TimerQueue& instance();
 
-    // Callback execution time histogram buckets: <10ms <100ms <1s <10s >=10s
-    //. Callbacks run serially, so a slow callback directly delays
-    // subsequent timers — hence the bucket boundaries are coarser than the thread
-    // pool's wait buckets
+    // Callback execution time histogram buckets: <10ms <100ms <1s <10s >=10s. Callbacks run serially, so a slow
+    // callback directly delays subsequent timers — hence the bucket boundaries are coarser than the thread pool's wait
+    // buckets
     static constexpr size_t kExecBuckets = 5;
 
     struct Stats {

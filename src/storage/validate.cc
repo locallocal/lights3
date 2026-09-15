@@ -52,10 +52,9 @@ void validate_bucket_name(std::string_view b, bool allow_reserved) {
         if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.')) fail();
     if (b.front() == '-' || b.front() == '.' || b.back() == '-' || b.back() == '.') fail();
     if (b.find("..") != std::string_view::npos) fail();
-    // The following three rules were the previously missing parts of AWS naming rules
-    //. They are not pedantry: buckets admitted here could not be
-    // created on real S3, so the "get it working on lights3 first, migrate to S3 later"
-    // path would break at the very last moment
+    // The following three rules were the previously missing parts of AWS naming rules. They are not pedantry: buckets
+    // admitted here could not be created on real S3, so the "get it working on lights3 first, migrate to S3 later" path
+    // would break at the very last moment
     if (b.find(".-") != std::string_view::npos || b.find("-.") != std::string_view::npos) fail();
     if (looks_like_ipv4(b)) fail();
     // Reserved prefixes/suffixes: xn-- is IDNA punycode, sthree-* and amzn-s3-demo-* are
@@ -69,14 +68,11 @@ void validate_bucket_name(std::string_view b, bool allow_reserved) {
         if (b.size() >= s.size() && b.compare(b.size() - s.size(), s.size(), s) == 0) fail();
 }
 
-// The shared validation layer keeps only the AWS constraints that hold for every backend
-//: previously it also rejected the AWS-legal leading '/', empty
-// segments ("a//b", directory marker "folder/"), and the 255B single-segment cap -- three
-// rules born from localfs's path mapping that stripped memory/duostore/cloudproxy of
-// compatibility along with it (the S3 console's "create folder" and the directory
-// semantics of s3fs/goofys/rclone all depend on "folder/").
-// They have been pushed down into validate_fs_object_key, called only by backends that map
-// keys directly to paths.
+// The shared validation layer keeps only the AWS constraints that hold for every backend: previously it also rejected
+// the AWS-legal leading '/', empty segments ("a//b", directory marker "folder/"), and the 255B single-segment cap --
+// three rules born from localfs's path mapping that stripped memory/duostore/cloudproxy of compatibility along with it
+// (the S3 console's "create folder" and the directory semantics of s3fs/goofys/rclone all depend on "folder/"). They
+// have been pushed down into validate_fs_object_key, called only by backends that map keys directly to paths.
 // '.' and '..' segments are the exception and stay in the shared layer: they are not just
 // a local-path problem -- forwarding backends splice the key into a URL path, and RFC
 // 3986's remove_dot_segments lets any proxy/server along the way normalize "a/./b" into

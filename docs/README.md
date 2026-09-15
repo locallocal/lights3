@@ -57,6 +57,7 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 | [testing.md](development/testing.md) | 测试体系：ctest 矩阵与标签、e2e 各段、fuzz harness、故障注入、性能门禁与 soak、mint、ubsan/coverage、一键矩阵脚本、Makefile |
 | [performance-baseline.md](development/performance-baseline.md) | 性能基线：`scripts/bench_matrix.sh` 的 4 驱动 × TLS 开关 × put/get 矩阵、数据面优化前后对照、2026-09-13 复测（beast TLS 与请求体 MD5 流水化）、复现方法 |
 | [todo.md](development/todo.md) | 待办与规划：待验证项、长期项、明确不做清单；做完即删 |
+| [gateway-review.md](development/gateway-review.md) | 网关整体扫描（2026-09-15 快照）：L1/L2/L4 的风险与优化项、复现步骤、已确认无问题的点；条目清空后连同本行删除 |
 
 ### 归档（[archive/](archive/)）
 

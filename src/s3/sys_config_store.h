@@ -1,9 +1,8 @@
-// Generic per-bucket configuration store persisted under .sys/<prefix><bucket>
-//. Third instantiation of the write-through + tombstone-sync
-// pattern established by CredentialStore and WebsiteStore — extracted as a template
-// so CORS and Lifecycle do not become the third and fourth hand-copies. WebsiteStore
-// predates this template and additionally merges static YAML entries, so it stays
-// as-is; stores instantiated from here are dynamic-only (API-managed).
+// Generic per-bucket configuration store persisted under .sys/<prefix><bucket>. Third instantiation of the
+// write-through + tombstone-sync pattern established by CredentialStore and WebsiteStore — extracted as a template so
+// CORS and Lifecycle do not become the third and fourth hand-copies. WebsiteStore predates this template and
+// additionally merges static YAML entries, so it stays as-is; stores instantiated from here are dynamic-only
+// (API-managed).
 //
 // Traits contract:
 //   struct T {

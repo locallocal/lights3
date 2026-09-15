@@ -24,8 +24,8 @@ struct Line {
 
 // ${VAR} -> environment variable value. Undefined is an error: silently expanding
 // to an empty string turns "misspelled env var name" into "credential/path quietly
-// went empty", and the failure resurfaces in a different guise long after startup
-//. For genuinely optional values write ${VAR:-default}
+// went empty", and the failure resurfaces in a different guise long after startup. For genuinely optional values write
+// ${VAR:-default}
 std::string expand_env(const std::string& s) {
     std::string out;
     for (size_t i = 0; i < s.size();) {

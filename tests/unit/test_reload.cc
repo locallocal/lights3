@@ -160,7 +160,8 @@ TEST(reload_bucket_router_table_swap) {
 TEST(reload_application_applies_subset_and_reports_rest) {
     std::string path = temp_path("app.yaml");
     write_file(path, base_config("  request_timeout: 300s\n  transfer_stall_timeout: 300s\n"
-                                 "  min_part_size: 5MiB\nruntime:\n  max_inflight_requests: 100\n"));
+                                 "  min_part_size: 5MiB\n  max_user_metadata_size: 2KiB\n"
+                                 "runtime:\n  max_inflight_requests: 100\n"));
     Application app(path);
     app.open_storage();
     app.start_server();
@@ -169,7 +170,7 @@ TEST(reload_application_applies_subset_and_reports_rest) {
     CHECK(r0.ok && r0.applied.empty() && r0.requires_restart.empty());
     // Reloadable subset + a startup-only key + new routing rules
     write_file(path, base_config("  request_timeout: 120s\n  transfer_stall_timeout: 60s\n"
-                                 "  min_part_size: 0\n  max_connections: 99\n"
+                                 "  min_part_size: 0\n  max_user_metadata_size: 8KiB\n  max_connections: 99\n"
                                  "  metrics_access: root\nruntime:\n"
                                  "  max_inflight_requests: 200\nratelimit:\n  per_ip_rps: 50\n",
                                  "  rules:\n    - match: \"logs-*\"\n      backend: b\n"));
@@ -189,6 +190,7 @@ TEST(reload_application_applies_subset_and_reports_rest) {
     CHECK(has(r1.applied, "http.request_timeout: 300 -> 120"));
     CHECK(has(r1.applied, "http.transfer_stall_timeout: 300 -> 60"));
     CHECK(has(r1.applied, "http.min_part_size"));
+    CHECK(has(r1.applied, "http.max_user_metadata_size: 2048 -> 8192"));
     CHECK(has(r1.applied, "runtime.max_inflight_requests: 100 -> 200"));
     CHECK(has(r1.applied, "ratelimit: per-ip rps=50"));
     CHECK(has(r1.applied, "buckets.rules: 0 -> 1"));

@@ -5,7 +5,8 @@
 # Note: the built-in YAML parser is simplified (no tab indentation/flow style/anchors, src/core/config.cc).
 # Size units: B/KiB/MiB/GiB (KB/MB/GB/K/M/G are synonyms); duration units: s/m/h/d.
 # Hot reload (docs/usage/config-reload.md): `kill -HUP <pid>` or `lights3-ctl reload` re-reads this file;
-# log.level, request/stall timeouts, max_inflight_requests, min_part_size, ratelimit.*,
+# log.level, request/stall timeouts, max_inflight_requests, min_part_size,
+# max_user_metadata_size, ratelimit.*,
 # buckets.rules and TLS certificate contents take effect live, everything else needs a restart.
 http:
   driver: builtin          # builtin | beast | httplib (must be compiled in via the matching CMake option)
@@ -31,6 +32,10 @@ http:
   # relax it when fronted by toolchains that don't honor this rule, or when this
   # instance is merely a proxy for another lights3
   min_part_size: 5MiB
+  # Total user metadata (x-amz-meta-*) per write, summed as key + value length over every
+  # such header (AWS fixes it at 2KB; over the limit -> 400 MetadataTooLarge). 0 = no limit.
+  # max_header_size still bounds the header block, so raising this past it has no effect
+  max_user_metadata_size: 2KiB
   # ---------- TLS (docs/usage/tls.md) ----------
   # HTTPS is enabled only when both are given; every driver supports it (seastar
   # through seastar::tls, see docs/usage/tls.md §4). SigV4 UNSIGNED-PAYLOAD integrity

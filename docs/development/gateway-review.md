@@ -8,13 +8,15 @@
 
 覆盖 L1 HTTP 适配层（`src/http/`）、L2 S3 协议层（`src/s3/`）、L4 运行时
 （`src/core/`），L3 存储层（`src/storage/`）只走了 localfs 写路径与公共约定。
-读码为主，其中 R3 / R11 与 §7 的 Range 行为用一个**无凭证**的 builtin 实例现场跑过
+读码为主，其中 R11 与 §7 的 Range 行为用一个**无凭证**的 builtin 实例现场跑过
 （复现步骤见 §5）。标注 **实测** 的结论有现场证据，其余是读码推断，落地前请各自补一
 个用例。
 
 已修复并删除的条目，编号留空不再复用：R1（auth 关闭时 aws-chunked 不解帧，回归用例
 `sigv4_disabled_*` 三条）、R2（`x-amz-decoded-content-length` 解析过宽，回归用例
-`parse_content_length_is_strict` 与 `sigv4_decoded_content_length_parsed_strictly`）。
+`parse_content_length_is_strict` 与 `sigv4_decoded_content_length_parsed_strictly`）、
+R3（用户元数据无总量上限，现为 `http.max_user_metadata_size`，回归用例
+`service_user_metadata_size_capped` / `config_max_user_metadata_size_bounded`）。
 
 等级：高＝可能损坏数据或绕过约束；中＝可被外部输入放大，或明显偏离 AWS 语义；
 低＝加固/一致性问题。
@@ -23,7 +25,6 @@
 
 | 编号 | 位置 | 等级 | 一句话 |
 | --- | --- | --- | --- |
-| R3 | `s3/handlers/common.h:86` | 中 | 用户元数据无总量上限（AWS 限 2KB），8KB 可写入（**实测**） |
 | R4 | `core/log.cc:232` 等 | 中 | 请求尾部有 4 处进程级锁 + 默认同步日志 |
 | R5 | `s3/auth/sigv4.cc:271` | 中 | 分块解帧固定 16KiB 中转缓冲，压低所有签名流式 PUT 的吞吐 |
 | R6 | `s3/service.cc:903` 等 | 中 | 每请求 4–6 次路由表全扫描 |
@@ -37,22 +38,6 @@
 | O1–O6 | 见 §4 | — | 纯性能项（SigV4 规范化、header 访问、id 生成、fsync、beast 每请求系统调用） |
 
 ## 3. 风险项
-
-### R3（中）用户元数据无总量上限
-
-`meta_from_headers`（`s3/handlers/common.h:86-92`）把所有 `x-amz-meta-*` 收进
-`user_meta`，只逐值查 CR/LF，不限条数也不限总字节；唯一的间接上限是
-`http.max_header_size`（默认 16KiB）。AWS 的限制是**用户元数据总计 2KB**。
-
-实测：两个各 4000 字节的 `x-amz-meta-*` 被接受，落盘 sidecar 8101 字节。
-
-影响随后端不同：localfs 走 xattr 提交，而 ext4 的单个 xattr 值不能跨 block
-（约 4KB），超限就退回 sidecar 双写路径（`lights3_localfs_xattr_write_failures_total`
-会涨）；duostore 的 meta KV value 同步变大；List 时每个 key 的 getxattr/读 sidecar
-都变慢。
-
-建议：在 `meta_from_headers` 里加总量闸门（默认 2KiB，可配），超限返回
-`MetadataTooLarge`(400)。
 
 ### R4（中）请求尾部的进程级锁与默认同步日志
 
@@ -191,7 +176,7 @@ RST，客户端可能读不到已经写出去的 4xx。
 
 ## 5. 复现方法
 
-R3 / R11 的现场验证（不需要凭证，端口任选）：
+R11 的现场验证（不需要凭证，端口任选）：
 
 ```bash
 # 内置 YAML 子集不支持 flow 风格，按缩进块写（见 config/lights3.yaml）
@@ -217,10 +202,6 @@ EOF
 
 curl -X PUT http://127.0.0.1:19123/bkt1                       # 建桶
 
-BIG=$(python3 -c "print('x'*4000)")
-curl -X PUT -d hi -H "x-amz-meta-a: $BIG" -H "x-amz-meta-b: $BIG" \
-  http://127.0.0.1:19123/bkt1/meta1                 # R3：200，sidecar 8101 字节
-
 head -c 10000000 /dev/urandom > /tmp/big.bin        # R11：两种写法都应拿到 400
 curl -sS -o /dev/null -w '%{http_code}\n' -X PUT --data-binary @/tmp/big.bin \
   http://127.0.0.1:19123/BADNAME/obj
@@ -233,11 +214,10 @@ R2 的 `stoull` 语义用一个三行程序即可确认（`-1` → 1844674407370
 ## 6. 建议的推进顺序
 
 1. **R5**（下面这条实测数据摆着，且 R1 的修复让更多部署走到这条路径上）；
-2. **R3**（输入校验，一个小闸门 + 一条用例）；
-3. **R6 + R4**（请求尾部的固定开销，改完跑一次
+2. **R6 + R4**（请求尾部的固定开销，改完跑一次
    `scripts/bench_matrix.sh` 对照 [performance-baseline.md](performance-baseline.md)）；
-4. **R7**（可观测性自愈）；
-5. 其余按等级顺延；O1–O6 建议合并进第 1、3 步一起量。
+3. **R7**（可观测性自愈）；
+4. 其余按等级顺延；O1–O6 建议合并进第 1、2 步一起量。
 
 ## 7. 走查中确认无问题的点
 

@@ -148,6 +148,12 @@ public:
     // "proxy to another lights3" deployment is not judged once per layer
     void set_min_part_size(uint64_t n) { min_part_size_.store(n, std::memory_order_relaxed); }
 
+    // Total user metadata accepted on a write (http.max_user_metadata_size): AWS's 2KB by
+    // default, 0 = unlimited. Read per request so a hot reload takes effect without
+    // rebuilding the handler chain
+    void set_max_user_metadata(uint64_t n) { max_user_metadata_.store(n, std::memory_order_relaxed); }
+    uint64_t max_user_metadata() const { return max_user_metadata_.load(std::memory_order_relaxed); }
+
     // /-/metrics exposure (http.metrics_access): true = a root
     // credential's signature is required (bucket names and backend topology are
     // business information); false = anonymous, the classic scrape setup.
@@ -424,6 +430,7 @@ private:
     std::atomic<std::shared_ptr<RateLimiter>> ip_limiter_, ak_limiter_;
     std::atomic<int64_t> request_timeout_ms_{0};
     std::atomic<uint64_t> min_part_size_{storage::kMinPartSize};
+    std::atomic<uint64_t> max_user_metadata_{storage::kMaxUserMetadataBytes};
     std::atomic<int64_t> slow_request_ms_{0};
     std::atomic<bool> metrics_root_{false};
     std::atomic<bool> admin_split_{false};

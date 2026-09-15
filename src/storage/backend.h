@@ -99,6 +99,15 @@ inline void finalize_checksum(ObjectMeta& m) {
 std::string join_part_sizes(const std::vector<uint64_t>& sizes);
 std::vector<uint64_t> parse_part_sizes(std::string_view s);
 
+// Total user metadata a write may carry, measured as AWS measures it: the sum, over every
+// x-amz-meta-* header, of the prefix-stripped key length plus the value length. AWS fixes
+// it at 2KB. Without a cap the only bound is http.max_header_size, and the whole blob
+// lands in every backend's metadata record -- an ext4 xattr value cannot cross one block
+// (~4KB) and falls back to the sidecar's two-rename path, a duostore meta KV value grows
+// by the same amount on every write, and listings pay it per key. Overridable via
+// http.max_user_metadata_size (0 = no limit)
+inline constexpr uint64_t kMaxUserMetadataBytes = 2 * 1024;
+
 // Single source of truth for the five first-class fields: request/response header name +
 // persistence key name + member pointer. Extraction, echoing, and each backend's
 // serialization all iterate this table -- adding a field only touches this spot, avoiding

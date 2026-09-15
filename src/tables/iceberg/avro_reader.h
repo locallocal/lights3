@@ -32,6 +32,9 @@ public:
     // Parses the header; throws RestError(409) on a malformed file. `bytes` must outlive
     // the reader
     explicit Reader(std::string_view bytes);
+    // The view is retained, so a temporary would dangle: rejected at compile time
+    // (ASan caught exactly this shape in the unit tests)
+    explicit Reader(std::string&&) = delete;
     ~Reader();
     Reader(const Reader&) = delete;
     Reader& operator=(const Reader&) = delete;

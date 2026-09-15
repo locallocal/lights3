@@ -119,7 +119,8 @@ TEST(tables_avro_every_type) {
     CHECK_EQ(j["u"].get<std::string>(), "opt");
     CHECK_EQ(j["inner"]["x"].get<int>(), 5);
     CHECK_EQ(j["again"]["x"].get<int>(), 6);
-    avro::Reader r(ocf(schema, "null", {rec}));
+    std::string bytes_r = ocf(schema, "null", {rec});
+    avro::Reader r(bytes_r);
     CHECK_EQ(std::string(r.codec()), "null");
     CHECK_EQ(r.meta().count("avro.schema"), size_t(1));
     CHECK_EQ(r.schema_json()["name"].get<std::string>(), "all");
@@ -158,7 +159,8 @@ TEST(tables_avro_failure_modes) {
     put_long(shallow, 0);
     CHECK_EQ(read_all(ocf(deep_schema, "null", {shallow})).size(), size_t(1));
     // unsupported codec: the header parses, for_each refuses
-    avro::Reader snappy(ocf(schema, "snappy", {rec}));
+    std::string bytes_snappy = ocf(schema, "snappy", {rec});
+    avro::Reader snappy(bytes_snappy);
     CHECK_EQ(std::string(snappy.codec()), "snappy");
     bool unsupported = false;
     try {
@@ -252,7 +254,8 @@ TEST(tables_manifest_model_rejects_missing_fields) {
         schema = R"({"type":"record","name":"manifest_file","fields":[{"name":"manifest_path","type":"string"}]})";
     std::string rec;
     put_bytes(rec, "s3://b/m.avro");
-    avro::Reader r(ocf(schema, "null", {rec}));
+    std::string bytes_r = ocf(schema, "null", {rec});
+    avro::Reader r(bytes_r);
     CHECK_EQ(status_of([&] { parse_manifest_list(r, 10); }), 409);
     // v1-style manifest list without content / sequence numbers reads as zeros
     std::string v1 = R"({"type":"record","name":"manifest_file","fields":[
@@ -264,7 +267,8 @@ TEST(tables_manifest_model_rejects_missing_fields) {
     put_long(rec1, 0);
     put_long(rec1, 1);
     put_long(rec1, 77);
-    avro::Reader r1(ocf(v1, "null", {rec1}));
+    std::string bytes_r1 = ocf(v1, "null", {rec1});
+    avro::Reader r1(bytes_r1);
     auto ms = parse_manifest_list(r1, 10);
     CHECK_EQ(ms.size(), size_t(1));
     CHECK_EQ(ms[0].length, 1234);
@@ -277,6 +281,7 @@ TEST(tables_manifest_model_rejects_missing_fields) {
     std::string rec2;
     put_bytes(rec2, "ADDED");
     put_bytes(rec2, "s3://b/f");
-    avro::Reader r2(ocf(bad, "null", {rec2}));
+    std::string bytes_r2 = ocf(bad, "null", {rec2});
+    avro::Reader r2(bytes_r2);
     CHECK_EQ(status_of([&] { parse_manifest(r2, 10); }), 409);
 }

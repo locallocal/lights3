@@ -208,7 +208,7 @@ public:
     ChunkedSigV4BodyReader(std::unique_ptr<http::BodyReader> inner, bool signed_chunks, util::Sha256Digest signing_key,
                            std::string seed_signature, std::string amz_date, std::string scope,
                            std::optional<uint64_t> decoded_length, bool trailer_expected, bool trailer_signed,
-                           std::vector<DeclaredTrailer> declared_trailers)
+                           bool unverifiable_signatures, std::vector<DeclaredTrailer> declared_trailers)
         : inner_(std::move(inner)),
           signed_(signed_chunks),
           key_(signing_key),
@@ -218,6 +218,7 @@ public:
           decoded_length_(decoded_length),
           trailer_expected_(trailer_expected),
           trailer_signed_(trailer_signed),
+          unverifiable_(unverifiable_signatures),
           declared_(std::move(declared_trailers)) {
         for (auto& d : declared_) trailer_digests_.emplace_back(d.algo);
     }
@@ -344,8 +345,13 @@ private:
             if (!constant_time_eq(util::to_hex(util::hmac_sha256(key_, sts)), it->second))
                 throw S3Error(S3ErrorCode::SignatureDoesNotMatch, "Trailer signature does not match.");
             trailers_.erase(it);
-        } else if (trailers_.count("x-amz-trailer-signature")) {
-            malformed_body("unexpected x-amz-trailer-signature");
+        } else if (auto it = trailers_.find("x-amz-trailer-signature"); it != trailers_.end()) {
+            // A signature on a payload type that does not carry one is a malformed body. The
+            // exception is the auth-disabled deployment: the client signed as usual, this side
+            // has no secret to check it against, so the line is dropped rather than rejected
+            // (it must not survive into the "undeclared trailer" check below either)
+            if (!unverifiable_) malformed_body("unexpected x-amz-trailer-signature");
+            trailers_.erase(it);
         }
         // Exact match against the x-amz-trailer declaration in both directions: an undeclared
         // trailer is outside every integrity promise; a missing declared one would silently skip
@@ -451,6 +457,9 @@ private:
 
     bool trailer_expected_;
     bool trailer_signed_;
+    // Signatures may be present in the framing but cannot be checked (no credential
+    // configured): parse past them instead of rejecting
+    bool unverifiable_;
     std::vector<DeclaredTrailer> declared_;
     // over the decoded payload, one per declared
     std::vector<StreamingDigest> trailer_digests_;
@@ -458,6 +467,88 @@ private:
     std::map<std::string, std::string> trailers_;
     size_t trailer_bytes_ = 0;
 };
+
+// What the x-amz-content-sha256 value says the body looks like on the wire
+// (docs/architecture/s3-protocol.md §3.2/§3.3). Deliberately separate from "can this
+// request's signature be checked": aws-chunked is a **transport framing**, and it has to
+// come off whether or not there is a credential to verify against — see
+// install_chunked_body
+struct StreamingPayload {
+    // the body arrives aws-chunked framed and must be de-framed
+    bool chunked = false;
+    // the framing carries a per-chunk signature chain
+    bool signed_chunks = false;
+    // a trailer section follows the zero-size final chunk
+    bool trailer = false;
+};
+
+StreamingPayload classify_payload(const std::string& payload_hash) {
+    StreamingPayload p;
+    if (payload_hash == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD" ||
+        payload_hash == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER")
+        p.chunked = p.signed_chunks = true;
+    else if (payload_hash == "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+        p.chunked = true;
+    else if (payload_hash.rfind("STREAMING-", 0) == 0)
+        throw S3Error(S3ErrorCode::NotImplemented, "This streaming payload type is not supported.");
+    p.trailer = payload_hash.size() >= 8 && payload_hash.compare(payload_hash.size() - 8, 8, "-TRAILER") == 0;
+    return p;
+}
+
+// x-amz-trailer declaration (docs/architecture/s3-protocol.md §3.3). Validated regardless of body
+// presence: a declaration the payload type cannot carry, or one naming a checksum this
+// implementation cannot verify, must fail loudly rather than upload with silently-skipped
+// integrity
+std::vector<DeclaredTrailer> declared_trailers_of(const http::HttpRequest& req, bool trailer_variant) {
+    std::vector<DeclaredTrailer> out;
+    for (auto& name : parse_declared_trailers(req)) {
+        if (!trailer_variant)
+            throw S3Error(S3ErrorCode::InvalidRequest, "x-amz-trailer requires a STREAMING-*-TRAILER payload type.");
+        const auto* spec = checksum_spec(name);
+        if (!spec) {
+            if (name.rfind("x-amz-checksum-", 0) == 0)
+                throw S3Error(S3ErrorCode::NotImplemented, "The trailing checksum '" + name + "' is not implemented.");
+            throw S3Error(S3ErrorCode::InvalidRequest, "The trailer '" + name + "' is not supported.");
+        }
+        for (auto& d : out)
+            if (d.name == name) throw S3Error(S3ErrorCode::InvalidRequest, "Duplicate trailer declared: " + name);
+        out.push_back({std::move(name), spec->algo, spec->bytes});
+    }
+    return out;
+}
+
+// Signature-chain inputs for the de-framer; nullptr = de-frame only, verify nothing
+struct ChunkSigning {
+    util::Sha256Digest key;
+    std::string seed_signature;
+    std::string amz_date;
+    std::string scope;
+};
+
+// Streaming payload de-framing (docs/architecture/s3-protocol.md §3.2/§3.3). The caller has already
+// decided whether the signature chain can be verified; the framing itself is stripped
+// either way, because it is the transport encoding of the body and not an authentication
+// artifact: left in place, "b\r\nhello world\r\n0\r\n\r\n" is what lands in the object,
+// with the ETag computed over the chunk headers and no error anywhere
+void install_chunked_body(http::HttpRequest& req, const StreamingPayload& p, std::vector<DeclaredTrailer> declared,
+                          const ChunkSigning* signing) {
+    // AWS mandates this header for streaming variants; without it the decoded length is unknown, the
+    // "verify when fully read" trigger cannot fire, and the length cannot be reported to the backend
+    const std::string* dl = req.headers.find("x-amz-decoded-content-length");
+    if (!dl) throw S3Error(S3ErrorCode::InvalidRequest, "Missing required header: x-amz-decoded-content-length");
+    uint64_t decoded_len = 0;
+    try {
+        decoded_len = std::stoull(*dl);
+    } catch (...) {
+        throw S3Error(S3ErrorCode::InvalidRequest, "Invalid x-amz-decoded-content-length.");
+    }
+    const bool verify = signing && p.signed_chunks;
+    req.body = std::make_unique<ChunkedSigV4BodyReader>(
+        std::move(req.body), verify, signing ? signing->key : util::Sha256Digest{},
+        signing ? signing->seed_signature : std::string{}, signing ? signing->amz_date : std::string{},
+        signing ? signing->scope : std::string{}, decoded_len, p.trailer,
+        /*trailer_signed=*/verify && p.trailer, /*unverifiable_signatures=*/signing == nullptr, std::move(declared));
+}
 
 }  // namespace
 
@@ -550,9 +641,29 @@ std::optional<std::string> SigV4Authenticator::peek_access_key(const http::HttpR
     }
 }
 
+void SigV4Authenticator::strip_transport_framing(http::HttpRequest& req) {
+    // No credential is configured, so nothing about this request can be verified — but the
+    // aws-chunked framing named by x-amz-content-sha256 still has to come off. It used to
+    // stay on: verify_impl returned on the line below before reaching the de-framing step,
+    // and the chunk headers were written into the object (an 11-byte body stored as 21
+    // bytes, the ETag computed over the framing), with a 200 and no error anywhere. Modern
+    // SDKs (aws-cli v2, SDK v3 with default checksums) send this payload type by default,
+    // so "start it without credentials and try it out" silently corrupted every upload.
+    // Declared checksum trailers are still verified inside the de-framer: like Content-MD5
+    // they are integrity declarations, independent of the signature
+    const std::string* h = req.headers.find("x-amz-content-sha256");
+    if (!h || !req.body) return;
+    StreamingPayload p = classify_payload(*h);
+    if (!p.chunked) return;
+    install_chunked_body(req, p, declared_trailers_of(req, p.trailer), /*signing=*/nullptr);
+}
+
 VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req, std::span<const std::string_view> services,
                                                  const std::string* explicit_payload_hash) const {
-    if (!enabled()) return {};
+    if (!enabled()) {
+        strip_transport_framing(req);
+        return {};
+    }
 
     AuthFields f;
     if (auto auth = req.headers.get("Authorization")) {
@@ -655,22 +766,15 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req, std::sp
 
     // payload hash (streaming variants participate in the canonical request by their literal value)
     std::string payload_hash;
-    bool chunked_signed = false, chunked_unsigned = false, trailer_variant = false;
+    StreamingPayload stream;
     if (explicit_payload_hash) {
         // STS form POST: caller hashed the body
         payload_hash = *explicit_payload_hash;
     } else if (f.presigned) {
         payload_hash = "UNSIGNED-PAYLOAD";
-    } else if (auto h = req.headers.get("x-amz-content-sha256")) {
+    } else if (const std::string* h = req.headers.find("x-amz-content-sha256")) {
         payload_hash = *h;
-        if (payload_hash == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD" ||
-            payload_hash == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER")
-            chunked_signed = true;
-        else if (payload_hash == "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
-            chunked_unsigned = true;
-        else if (payload_hash.rfind("STREAMING-", 0) == 0)
-            throw S3Error(S3ErrorCode::NotImplemented, "This streaming payload type is not supported.");
-        trailer_variant = payload_hash.size() >= 8 && payload_hash.compare(payload_hash.size() - 8, 8, "-TRAILER") == 0;
+        stream = classify_payload(payload_hash);
     } else {
         bool has_body = req.body && req.body->length().value_or(0) > 0;
         if (has_body) throw S3Error(S3ErrorCode::InvalidRequest, "Missing required header: x-amz-content-sha256");
@@ -684,40 +788,13 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req, std::sp
                       "The request signature we calculated does not match the signature you "
                       "provided.");
 
-    // x-amz-trailer declaration (docs/architecture/s3-protocol.md §3.3). Validated regardless of body presence:
-    // a declaration the payload type cannot carry, or one naming a checksum this implementation
-    // cannot verify, must fail loudly rather than upload with silently-skipped integrity
-    std::vector<DeclaredTrailer> declared_trailers;
-    for (auto& name : parse_declared_trailers(req)) {
-        if (!trailer_variant)
-            throw S3Error(S3ErrorCode::InvalidRequest, "x-amz-trailer requires a STREAMING-*-TRAILER payload type.");
-        auto* spec = checksum_spec(name);
-        if (!spec) {
-            if (name.rfind("x-amz-checksum-", 0) == 0)
-                throw S3Error(S3ErrorCode::NotImplemented, "The trailing checksum '" + name + "' is not implemented.");
-            throw S3Error(S3ErrorCode::InvalidRequest, "The trailer '" + name + "' is not supported.");
-        }
-        for (auto& d : declared_trailers)
-            if (d.name == name) throw S3Error(S3ErrorCode::InvalidRequest, "Duplicate trailer declared: " + name);
-        declared_trailers.push_back({std::move(name), spec->algo, spec->bytes});
-    }
+    std::vector<DeclaredTrailer> declared_trailers = declared_trailers_of(req, stream.trailer);
 
     // Streaming payload verification (docs/architecture/s3-protocol.md §3.2/§3.3)
-    if ((chunked_signed || chunked_unsigned) && req.body) {
-        // AWS mandates this header for streaming variants; without it the decoded length is unknown, the
-        // "verify when fully read" trigger cannot fire, and the length cannot be reported to the backend
-        auto dl = req.headers.get("x-amz-decoded-content-length");
-        if (!dl) throw S3Error(S3ErrorCode::InvalidRequest, "Missing required header: x-amz-decoded-content-length");
-        uint64_t decoded_len = 0;
-        try {
-            decoded_len = std::stoull(*dl);
-        } catch (...) {
-            throw S3Error(S3ErrorCode::InvalidRequest, "Invalid x-amz-decoded-content-length.");
-        }
-        req.body = std::make_unique<ChunkedSigV4BodyReader>(
-            std::move(req.body), chunked_signed, derive_signing_key(secret_key, f.date, f.region, f.service),
-            f.signature, f.amz_date, scope, decoded_len, trailer_variant,
-            /*trailer_signed=*/chunked_signed && trailer_variant, std::move(declared_trailers));
+    if (stream.chunked && req.body) {
+        ChunkSigning signing{derive_signing_key(secret_key, f.date, f.region, f.service), f.signature, f.amz_date,
+                             scope};
+        install_chunked_body(req, stream, std::move(declared_trailers), &signing);
     } else if (!explicit_payload_hash && is_hex_digest(payload_hash) && req.body) {
         // A declared empty digest (sha256("")) still gets wrapped for verification: without checking that the
         // actual body is empty, empty digest + non-empty body would slip the body out of signature protection

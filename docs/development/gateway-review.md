@@ -8,9 +8,12 @@
 
 覆盖 L1 HTTP 适配层（`src/http/`）、L2 S3 协议层（`src/s3/`）、L4 运行时
 （`src/core/`），L3 存储层（`src/storage/`）只走了 localfs 写路径与公共约定。
-读码为主，其中 R1 / R3 / R11 与 §7 的 Range 行为用一个**无凭证**的 builtin 实例
-现场跑过（复现步骤见 §5），R2 的 `stoull` 语义单独写程序确认过。标注 **实测** 的
-结论有现场证据，其余是读码推断，落地前请各自补一个用例。
+读码为主，其中 R3 / R11 与 §7 的 Range 行为用一个**无凭证**的 builtin 实例现场跑过
+（复现步骤见 §5），R2 的 `stoull` 语义单独写程序确认过。标注 **实测** 的结论有现场
+证据，其余是读码推断，落地前请各自补一个用例。
+
+R1（auth 关闭时 aws-chunked 不解帧）已修复并删除，编号留空不再复用；回归用例在
+`tests/unit/test_sigv4.cc` 的 `sigv4_disabled_*` 三条。
 
 等级：高＝可能损坏数据或绕过约束；中＝可被外部输入放大，或明显偏离 AWS 语义；
 低＝加固/一致性问题。
@@ -19,8 +22,7 @@
 
 | 编号 | 位置 | 等级 | 一句话 |
 | --- | --- | --- | --- |
-| R1 | `s3/auth/sigv4.cc:555` | 高 | auth 关闭时 aws-chunked 完全不解帧，分块框架原样落盘（**实测**） |
-| R2 | `s3/auth/sigv4.cc:713` | 中 | `x-amz-decoded-content-length` 用 `std::stoull`，`-1` 变 2^64-1 且不抛 |
+| R2 | `s3/auth/sigv4.cc:541` | 中 | `x-amz-decoded-content-length` 用 `std::stoull`，`-1` 变 2^64-1 且不抛 |
 | R3 | `s3/handlers/common.h:86` | 中 | 用户元数据无总量上限（AWS 限 2KB），8KB 可写入（**实测**） |
 | R4 | `core/log.cc:232` 等 | 中 | 请求尾部有 4 处进程级锁 + 默认同步日志 |
 | R5 | `s3/auth/sigv4.cc:271` | 中 | 分块解帧固定 16KiB 中转缓冲，压低所有签名流式 PUT 的吞吐 |
@@ -30,51 +32,15 @@
 | R9 | `core/thread_pool.cc:52` | 低 | `backlog_` 无界，"有界队列 + 背压"的实际语义需要写清 |
 | R10 | `http/drivers/builtin/builtin_server.cc:482` | 低 | obs-fold 折行头未按 RFC 9112 §5.2 拒绝 |
 | R11 | `http/drivers/builtin/builtin_server.cc:754` | 低 | 关连接前未 `shutdown(SHUT_WR)`，极端情况客户端只看到 RST |
-| R12 | `s3/auth/sigv4.cc:663` | 低 | presigned 一律按 `UNSIGNED-PAYLOAD` 计签 |
+| R12 | `s3/auth/sigv4.cc:774` | 低 | presigned 一律按 `UNSIGNED-PAYLOAD` 计签 |
 | R13 | `config/lights3.yaml` | 低 | `/-/metrics` 默认匿名，暴露桶名与后端拓扑 |
 | O1–O6 | 见 §4 | — | 纯性能项（SigV4 规范化、header 访问、id 生成、fsync、beast 每请求系统调用） |
 
 ## 3. 风险项
 
-### R1（高）auth 关闭时 aws-chunked 不解帧，静默写坏对象
-
-`SigV4Authenticator::verify_impl` 第一行就是 `if (!enabled()) return {};`
-（`src/s3/auth/sigv4.cc:555`）。**解帧（de-framing）和签名校验绑在同一个函数里**，
-所以未配置凭证时，`ChunkedSigV4BodyReader` 根本不会被安装：客户端按
-`Content-Encoding: aws-chunked` 发来的 `<hex>\r\n<data>\r\n…0\r\n\r\n`
-会被当成对象内容整体写下去，`x-amz-decoded-content-length` 也被忽略。
-
-实测（无凭证配置 + builtin + localfs）：
-
-```
-PUT /bkt1/obj1
-  x-amz-content-sha256: STREAMING-UNSIGNED-PAYLOAD-TRAILER
-  x-amz-decoded-content-length: 11
-  body: "b\r\nhello world\r\n0\r\n\r\n"   (21 字节)
-→ 200
-GET /bkt1/obj1 → 21 字节，内容是 "b\r\nhello world\r\n0\r\n\r\n"
-HEAD          → Content-Length: 21，ETag 是框架字节的 MD5
-```
-
-要害在于这不是边角路径：aws-cli v2 / SDK v3 默认开启 checksum，PUT 走的正是
-`STREAMING-UNSIGNED-PAYLOAD-TRAILER`。"先不配凭证跑起来看看"是新用户的第一步，
-而结果是 200 + 对象被悄悄改写，没有任何错误信号。
-
-建议（二选一，前者更好）：
-
-1. 把解帧从 verify 里拆出来。按 `x-amz-content-sha256` 的字面值在 dispatch 中
-   无条件安装解帧器，**签名链校验**（`signed_chunks`）才受 `enabled()` 控制。
-   `STREAMING-UNSIGNED-PAYLOAD-TRAILER` 本来就只解帧不验签，天然适配。
-2. 退而求其次：auth 关闭且收到 `STREAMING-*` 时直接 `NotImplemented`(501)。
-   宁可拒绝，也不要静默写坏。
-
-顺带：`enabled()` 为假时 `install_checksum_guard` 仍然会跑（`service.cc:884`），
-即 Content-MD5 / `x-amz-checksum-*` 会对着**未解帧**的字节算摘要，于是客户端声明
-的摘要必然不匹配 → BadDigest。修 R1 时这一条会一起消失。
-
 ### R2（中）`x-amz-decoded-content-length` 解析过宽
 
-`sigv4.cc:713` 用 `std::stoull`。已验证的 `stoull` 语义：
+`install_chunked_body`（`sigv4.cc:541`）用 `std::stoull`。已验证的 `stoull` 语义：
 
 ```
 "-1"   -> 18446744073709551615     " 5"   -> 5
@@ -90,7 +56,7 @@ L2 这里却没用它。后果：`BodyReader::length()` 报出天文数字，一
 建议：改用 `driver::parse_content_length`，失败即 InvalidRequest。仓里其它
 `std::sto*` 调用点都是守住的，可以直接抄：`sts.cc:85` 有范围检查、
 `admin_fsck.cc:38` 先查字符集、`tables/rest_api.cc:282` 检查 `pos` 与正负 ——
-`sigv4.cc:713` 是唯一的漏网点。
+`sigv4.cc:541` 是唯一的漏网点。
 
 ### R3（中）用户元数据无总量上限
 
@@ -135,14 +101,22 @@ sink 自身的互斥量串行化。
 
 ### R5（中）分块解帧固定 16KiB 中转缓冲
 
-`ChunkedSigV4BodyReader::fill()`（`sigv4.cc:270-276`）先把数据读进 16KiB 栈缓冲，
+`ChunkedSigV4BodyReader::fill()`（`sigv4.cc:271-277`）先把数据读进 16KiB 栈缓冲，
 再 append 到 `buf_`；`read()` 从 `buf_` memcpy 出去后 `buf_.erase(0, n)`。于是：
 
 - 无论调用方给多大的 span（数据面是 `io_chunk_size` = 64KiB），单次 `read()` 最多
   返回 16KiB → 每 MiB 多出 3 倍的协程往返；
 - 每个字节多一次 memcpy，外加 `erase(0,n)` 的 memmove。
 
-这条路径是**签名流式 PUT 的默认路径**，代价直接落在最常见的上传上。
+这条路径是**签名流式 PUT 的默认路径**，代价直接落在最常见的上传上。实测（64MiB PUT、
+memory 后端、builtin 驱动、Debug 构建、各 3 次）：
+
+| 请求体 | 耗时 | 吞吐 |
+| --- | --- | --- |
+| 普通 body | 0.095 / 0.103 / 0.103 s | ≈ 650 MB/s |
+| aws-chunked（走解帧） | 0.117 / 0.122 / 0.131 s | ≈ 545 MB/s |
+
+即解帧本身吃掉约 20%，而它做的只是"把 chunk 头摘掉"。
 
 建议：chunk 数据段直接读进调用方的 span，只有跨 chunk 头/尾、trailer 这些边界情形
 才回落到 `buf_`；`buf_` 改成"读游标 + 定期紧缩"，去掉 `erase(0,n)`。
@@ -213,7 +187,7 @@ RST，客户端可能读不到已经写出去的 4xx。
 
 ### R12（低）presigned 一律按 UNSIGNED-PAYLOAD 计签
 
-`sigv4.cc:662-663`：只要是 presigned 就把 payload_hash 固定成 `UNSIGNED-PAYLOAD`。
+`sigv4.cc:773-774`：只要是 presigned 就把 payload_hash 固定成 `UNSIGNED-PAYLOAD`。
 `X-Amz-Content-Sha256` 在通用查询白名单里（`service.cc:370`）却不参与这个选择，
 所以用真实 payload hash 预签的客户端会拿到 SignatureDoesNotMatch。与 AWS 主流行为
 一致，但既然放行了这个查询参数，就应该在它出现时采用它的值。
@@ -228,7 +202,7 @@ RST，客户端可能读不到已经写出去的 4xx。
 
 | 编号 | 位置 | 内容 |
 | --- | --- | --- |
-| O1 | `s3/auth/sigv4.cc:500-514` | canonical headers 是 O(signed × headers) 的 `ieq` 扫描，且 `split` 每次分配一串 `std::string`；`canonical_query`（66-85）对 raw query 做 decode→encode→sort，又是一轮分配。小对象高 QPS 下 SigV4 是 CPU 大头之一，值得先建一次小索引再扫 |
+| O1 | `s3/auth/sigv4.cc:591-605` | canonical headers 是 O(signed × headers) 的 `ieq` 扫描，且 `split` 每次分配一串 `std::string`；`canonical_query`（66-85）对 raw query 做 decode→encode→sort，又是一轮分配。小对象高 QPS 下 SigV4 是 CPU 大头之一，值得先建一次小索引再扫 |
 | O2 | 全仓 | `headers.get()` 用了 52 处，`headers.find()` 只有 1 处 —— 而 `http/model.h:43` 的注释明确写着"存在性判断/比较请用 find，get 每次拷贝值"。改造是机械的，每请求能省十几次小分配 |
 | O3 | `s3/service.cc:35-52` | 每请求生成 16 字符 request-id + 48 字符 host-id（两次 `to_hex` + 两次分配）。`x-amz-id-2` 可以退化成"每进程前缀 + 每连接计数"，它只是给日志关联用的 |
 | O4 | `storage/localfs/fs_util.cc:87-94` | 对象提交走 `fsync_path`（按路径重新 `open` 再 `fdatasync` 再 `close`），而 upload_part 走的是 fd 版 `fsync_file`（`localfs_backend.cc:1134`）。PUT 路径每次多一对 open/close 系统调用，两条路径的写法也不一致 |
@@ -237,7 +211,7 @@ RST，客户端可能读不到已经写出去的 4xx。
 
 ## 5. 复现方法
 
-R1 / R3 / R11 的现场验证（不需要凭证，端口任选）：
+R3 / R11 的现场验证（不需要凭证，端口任选）：
 
 ```bash
 # 内置 YAML 子集不支持 flow 风格，按缩进块写（见 config/lights3.yaml）
@@ -262,13 +236,6 @@ EOF
 ./build/lights3 --config /tmp/noauth.yaml &     # 启动时会 WARN: authentication is DISABLED
 
 curl -X PUT http://127.0.0.1:19123/bkt1                       # 建桶
-printf 'b\r\nhello world\r\n0\r\n\r\n' > /tmp/framed.bin
-curl -X PUT --data-binary @/tmp/framed.bin \
-  -H 'Content-Encoding: aws-chunked' \
-  -H 'x-amz-content-sha256: STREAMING-UNSIGNED-PAYLOAD-TRAILER' \
-  -H 'x-amz-decoded-content-length: 11' \
-  http://127.0.0.1:19123/bkt1/obj1
-curl -s http://127.0.0.1:19123/bkt1/obj1 | od -c    # R1：应为 11 字节，实为 21
 
 BIG=$(python3 -c "print('x'*4000)")
 curl -X PUT -d hi -H "x-amz-meta-a: $BIG" -H "x-amz-meta-b: $BIG" \
@@ -285,12 +252,12 @@ R2 的 `stoull` 语义用一个三行程序即可确认（`-1` → 1844674407370
 
 ## 6. 建议的推进顺序
 
-1. **R1**（数据正确性，改动集中在 `verify_impl` 与 dispatch 的一处装配）；
+1. **R5**（下面这条实测数据摆着，且 R1 的修复让更多部署走到这条路径上）；
 2. **R2 + R3**（输入校验，各自一个小闸门 + 一条用例）；
-3. **R5 + R6 + R4**（数据面与请求尾部的固定开销，改完跑一次
+3. **R6 + R4**（请求尾部的固定开销，改完跑一次
    `scripts/bench_matrix.sh` 对照 [performance-baseline.md](performance-baseline.md)）；
 4. **R7**（可观测性自愈）；
-5. 其余按等级顺延；O1–O6 建议合并进第 3 步一起量。
+5. 其余按等级顺延；O1–O6 建议合并进第 1、3 步一起量。
 
 ## 7. 走查中确认无问题的点
 
@@ -305,7 +272,7 @@ R2 的 `stoull` 语义用一个三行程序即可确认（`-1` → 1844674407370
 - 取消（超时/断连/关停）的竞态协议（claim + 单次 resume）在 `ThreadPool::
   ScheduleAwaiter`、`AsyncSemaphore::Waiter`、`CancelState` 三处写法一致；
 - SigV4 的 host 必签、scope/日期一致性、STS token 与 AK 的绑定关系、presigned 的
-  未来时间上限都做了（`sigv4.cc:585-654`）；
+  未来时间上限都做了（`sigv4.cc:696-765`）；
 - 桶名校验是唯一权威闸门且 copy-source 单独复用同一函数
   （`s3/handlers/common.h:172`）；
 - 指标标签基数有上限（api 与 bucket 两个维度都有），限流表有 LRU 上限；

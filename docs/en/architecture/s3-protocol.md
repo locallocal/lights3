@@ -86,6 +86,20 @@ Implemented in-house (the protocol is public and stable; avoids pulling in a who
 | `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` | aws-chunked encoding: L2 provides a `ChunkedSigV4BodyReader` decorator that strips the framing chunk by chunk and verifies the chunk signature chain, exposing a pure data stream downstream. Placed in L2 rather than the driver, so all drivers get support for free |
 | The two `STREAMING-*-TRAILER` variants | The default upload shape of post-2025 SDKs: `STREAMING-UNSIGNED-PAYLOAD-TRAILER` (unsigned chunks, integrity carried by the trailing checksum) and `STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER` (chunk signature chain + trailer signature). The trailer section is parsed strictly line by line and matched against the `x-amz-trailer` declaration in both directions (an undeclared trailer is rejected, and so is a declared one that never arrives); declared `x-amz-checksum-*` trailers are verified against the full decoded payload (malformed → InvalidDigest, mismatch → BadDigest); the signed variant additionally verifies `x-amz-trailer-signature` (the `AWS4-HMAC-SHA256-TRAILER` string-to-sign over the hash of the canonicalized trailers, chained onto the final chunk signature). The trailer section is capped at 16KiB |
 
+**De-framing and signature verification are two different things.** aws-chunked is a
+transport encoding of the body: stripping it and verifying the chunk signature chain are
+both done by `ChunkedSigV4BodyReader`, but the former does not depend on having a
+credential. With no credential configured (auth disabled) `verify_impl` returns on its
+first line, and it now calls `SigV4Authenticator::strip_transport_framing` there to
+install a de-frame-only decorator: chunk headers and the trailer signature line are parsed
+and discarded, `x-amz-decoded-content-length` stays mandatory, and declared
+`x-amz-checksum-*` trailers are still verified (like Content-MD5 they do not depend on the
+signature). Otherwise the framing is written into the object as content -- an 11-byte body
+stored as 21 bytes, the ETag computed over the framing, with a 200 and no error anywhere;
+post-2025 SDKs send this payload type by default. Any path that admits a request carrying
+a body without going through `verify()` (today only the mTLS binding's early return when
+auth is disabled) has to call it itself.
+
 ### 3.3 Interplay with the Streaming Model (incl. trailing checksums)
 
 Signature verification uses the decorator pattern: `Sha256VerifyingReader` wraps the

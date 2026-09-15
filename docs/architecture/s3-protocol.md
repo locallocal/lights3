@@ -51,6 +51,14 @@ PutObject/UploadPart 缺 Content-Length/Transfer-Encoding → 411
 ...
 ```
 
+分派表在 `dispatch` 里**只匹配一次**：拿到 (bucket, key) 后解析出 `Route*`，往下依次
+交给 api 标签、per-credential policy、表桶守卫、租户归属和 `route()` 本身。此前每道闸
+门各自调一次 `match_route`，一个请求扫五六遍表；更要紧的是，授权判定与真正执行的
+handler 于是"碰巧"取到同一条路由，而不是结构上保证。唯一会让路由失效的是匿名 website
+的 index 改写（key 变了、scope 随之变），那里显式重解析一次 —— 漏掉这一步，`GET /site/`
+会拿着 Bucket 作用域的 ListObjects 路由跑进 handler，即匿名列桶（`service_website_*`
+三条用例正是守这个）。
+
 ## 3. AWS Signature V4 认证
 
 自实现（协议公开且稳定，避免为验签引入整只 SDK），代码在 `src/s3/auth/`。

@@ -265,6 +265,26 @@ chunk header (≤16KiB), the next read usually drains it in one go, and `erase(0
 O(1) anyway. The table above shows what is left is already inside the noise, so a cursor
 would buy complexity and nothing else.
 
+### 4.4 R6: the repeated dispatch-table scans -- not measurable
+
+Review item R6 listed "five or six scans of a 35-entry dispatch table per request" as a
+performance item. With the route resolved once, before and after binaries were run
+**interleaved** (A/B/A/B within one sitting, so machine drift cancels), 64 concurrent,
+16 KiB, three rounds each:
+
+| | PUT ops/s (three rounds) | GET ops/s (three rounds) |
+| --- | --- | --- |
+| Before | 224.1 / 217.9 / 218.0k | 303.8 / 303.4 / 304.1k |
+| After | 221.0 / 221.0 / 221.8k | 300.5 / 304.2 / 284.6k |
+
+**No measurable difference** (median PUT +1.4%, median GET −1.1%, both inside this box's
+noise; same story at 16 concurrent). The scan short-circuits on the method comparison for
+almost every entry, and five of them together still do not outweigh the measurement noise.
+
+The change stays, but not for performance: it turns "the authorization decision and the
+handler that runs agree" from a coincidence into a structural property, see
+[s3-protocol.md §2](../architecture/s3-protocol.md). **Nobody needs to measure this again.**
+
 ## 5. Reproducing
 
 ```bash
@@ -286,4 +306,4 @@ mode, size, concurrency, duration_s, result}`, where `result` is the
 | --- | --- | --- |
 | 2026-09-05 | §4.3 data-plane work (prefetch, buffer pool, sendfile, pumping, ResumeOn fast path, per-bucket metrics without the lock, beast read-buffer reserve) | large-object GET +14 to +52%, beast PUT 3.5 to 10× |
 | 2026-09-13 | beast per-thread io_context, session watchdog, memory-BIO TlsStream; PipelinedMd5 request-body hashing (http-adapter.md §2.4 ⑩–⑬) | beast TLS GET 4 MiB +93% (level with the other drivers), 4 MiB PUT +12 to +55% on all drivers, p50 7.2 → 6.2 ms |
-| 2026-09-15 | Request-tail lock removal + `log.async` on by default (§4.0-4.2); direct-read aws-chunked de-framing (§4.3) | 64 concurrent, 16 KiB: PUT +8.1%, GET +19.2%, GET p99 1.01 → 0.87 ms; 128 MiB chunked PUT +19%, at parity with a plain body |
+| 2026-09-15 | Request-tail lock removal + `log.async` on by default (§4.0-4.2); direct-read aws-chunked de-framing (§4.3); route resolved once (§4.4, a negative result performance-wise) | 64 concurrent, 16 KiB: PUT +8.1%, GET +19.2%, GET p99 1.01 → 0.87 ms; 128 MiB chunked PUT +19%, at parity with a plain body |

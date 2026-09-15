@@ -230,6 +230,23 @@ chunk 数据直接读进调用方的 span，只有框架（chunk 头、trailer �
 fill 的尾巴（≤16KiB），下一次 read 通常一次取空，`erase(0, 全部)` 本就是 O(1)；上表
 显示剩余开销已在噪声内，再加一层游标是拿复杂度换不出东西。
 
+### 4.4 R6：每请求多次路由表全扫描 —— 量不出来
+
+走查条目 R6 把"一个请求扫五六遍 35 条的分派表"列为性能项。改成只解析一次之后，用改前 /
+改后两个二进制**交错**跑（同一轮内 A/B/A/B，规避机器漂移），并发 64、16 KiB、各 3 轮：
+
+| | PUT ops/s（三轮） | GET ops/s（三轮） |
+| --- | --- | --- |
+| 改前 | 224.1 / 217.9 / 218.0k | 303.8 / 303.4 / 304.1k |
+| 改后 | 221.0 / 221.0 / 221.8k | 300.5 / 304.2 / 284.6k |
+
+**没有可测差异**（PUT 中位 +1.4%、GET 中位 −1.1%，都在本机噪声内；16 并发同样如此）。
+表扫描在 method 比较上就短路掉绝大多数条目，五遍加起来也压不过测量噪声。
+
+改动仍然保留，但理由不是性能：它把"授权判定与真正执行的 handler 取到同一条路由"从
+巧合变成结构，见 [s3-protocol.md §2](../architecture/s3-protocol.md)。**后来者不必再
+测一遍。**
+
 ## 5. 复现
 
 ```bash
@@ -250,4 +267,4 @@ scripts/bench_matrix.sh build-seastar/lights3 build-rel/lights3-ctl --drivers se
 | --- | --- | --- |
 | 2026-09-05 | §4.3 数据面优化（预取、缓冲池、sendfile、pumping、ResumeOn 快路径、per-bucket 指标去锁、beast 读缓冲预留） | 大对象 GET +14～52%，beast PUT 3.5～10× |
 | 2026-09-13 | beast 每线程 io_context、会话看门狗、内存 BIO TlsStream；PipelinedMd5 请求体 MD5 流水化（http-adapter.md §2.4 ⑩–⑬） | beast TLS GET 4 MiB +93%（与其他驱动持平），4 MiB PUT 四驱动 +12～55%，p50 7.2 → 6.2 ms |
-| 2026-09-15 | 请求尾部去锁 + `log.async` 默认开（§4.0–4.2）；aws-chunked 解帧直读（§4.3） | 64 并发 16 KiB：PUT +8.1%、GET +19.2%，GET p99 1.01 → 0.87 ms；128 MiB 分块 PUT +19%，与普通 body 持平 |
+| 2026-09-15 | 请求尾部去锁 + `log.async` 默认开（§4.0–4.2）；aws-chunked 解帧直读（§4.3）；路由只解析一次（§4.4，性能上是阴性结果） | 64 并发 16 KiB：PUT +8.1%、GET +19.2%，GET p99 1.01 → 0.87 ms；128 MiB 分块 PUT +19%，与普通 body 持平 |

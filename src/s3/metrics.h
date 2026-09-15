@@ -17,7 +17,7 @@
 
 namespace lights3::s3 {
 
-// Admission snapshot of ingress throttling (the runtime.max_inflight_requests semaphore) (docs/archive/gaps.md §7):
+// Admission snapshot of ingress throttling (the runtime.max_inflight_requests semaphore):
 // under load testing, these two numbers distinguish "stuck at admission" from "stuck in the pool"
 struct AdmissionStats {
     // total permits
@@ -26,7 +26,7 @@ struct AdmissionStats {
     long available = 0;
     // requests queued on the semaphore
     size_t waiting = 0;
-    // Cumulative counters (roadmap §5.3, http/admission.h AdmissionCounters);
+    // Cumulative counters (http/admission.h AdmissionCounters);
     // rendered only when `counters` is set (test/static assemblies may not wire them)
     bool counters = false;
     // bounds = AdmissionCounters::kWaitBounds + Inf
@@ -43,7 +43,7 @@ struct AdmissionStats {
     uint64_t stalls_out = 0;
 };
 
-// Static-website plane events (roadmap §5.3, docs/usage/static-website.md)
+// Static-website plane events (docs/usage/static-website.md)
 enum class WebsiteEvent {
     // request admitted on the anonymous plane
     AnonRead = 0,
@@ -64,21 +64,21 @@ public:
     // Latency histogram bucket upper bounds (seconds); last bucket is +Inf
     // 30/60/300 cover the large-object band: request_timeout defaults to 300s, and
     // with a 10s top bucket everything from 10s to 300s piled into +Inf — P99 for
-    // big transfers was unreadable (roadmap §1.5)
+    // big transfers was unreadable
     static constexpr std::array<double, 9> kLatencyBuckets{0.005, 0.02, 0.1, 0.5, 2.0, 10.0, 30.0, 60.0, 300.0};
 
-    // API x backend dimension (roadmap §5.1): per (api, backend) latency histogram
+    // API x backend dimension: per (api, backend) latency histogram
     // and per-status-class counter, keyed by the Route name and the routed backend.
     // Cardinality = APIs x backends, bounded further by kMaxApiSeries
     void record_api(std::string_view api, std::string_view backend, int status, double seconds);
 
     void request_start() { inflight_.fetch_add(1, std::memory_order_relaxed); }
     void request_end(std::string_view method, int status, double seconds);
-    // Lock-free (docs/archive/gaps.md §4: previously every error response contended on one global mutex): the code set
+    // Lock-free (previously every error response contended on one global mutex): the code set
     // is bounded and shares its source with the enum; fixed-size atomic array indexed by enum value
     void s3_error(S3ErrorCode code) { errors_[size_t(code)].fetch_add(1, std::memory_order_relaxed); }
 
-    // Per-client rate limiting (roadmap §4.2): rejections by key space
+    // Per-client rate limiting: rejections by key space
     void ratelimit_rejected(bool by_access_key) {
         (by_access_key ? rl_ak_ : rl_ip_).fetch_add(1, std::memory_order_relaxed);
     }
@@ -88,12 +88,12 @@ public:
     void mpu_created() { mpu_created_.fetch_add(1, std::memory_order_relaxed); }
     void mpu_finished() { mpu_finished_.fetch_add(1, std::memory_order_relaxed); }
 
-    // Byte counts and per-bucket dimension (docs/archive/gaps.md §7). bucket may be empty (service-level
+    // Byte counts and per-bucket dimension. bucket may be empty (service-level
     // requests count only globally); tracked bucket count is capped, overflow folds into "_other" to prevent label
     // cardinality explosion
     void add_bytes_in(std::string_view bucket, uint64_t n);
     void add_bytes_out(std::string_view bucket, uint64_t n);
-    // Split form for streaming decorators (roadmap §4.3 ⑦): the global totals are
+    // Split form for streaming decorators: the global totals are
     // lock-free atomics and can take every chunk; the per-bucket slot sits behind
     // a mutex and takes one batched delta per stream (or per 16MiB), instead of a
     // global lock per 64KiB
@@ -103,7 +103,7 @@ public:
     void record_bucket_request(std::string_view bucket);
 
     // pool_stats / admission / timer_stats may each be empty (corresponding metrics omitted when not wired up)
-    // conn = L1 connection counters (roadmap §4.2), omitted when not wired
+    // conn = L1 connection counters, omitted when not wired
     std::string render(const std::function<ThreadPool::Stats()>& pool_stats,
                        const std::function<AdmissionStats()>& admission = {},
                        const std::function<TimerQueue::Stats()>& timer_stats = {},
@@ -139,7 +139,7 @@ private:
     std::atomic<uint64_t> by_method_[kMethodCount]{};
     // 1xx..5xx (index = hundreds digit)
     std::atomic<uint64_t> by_status_class_[6]{};
-    // exact code (roadmap §5.3); only nonzero rendered
+    // exact code; only nonzero rendered
     std::atomic<uint64_t> by_status_[600]{};
     std::atomic<uint64_t> website_[size_t(WebsiteEvent::Count_)]{};
     std::atomic<uint64_t> latency_hist_[kLatencyBuckets.size() + 1]{};
@@ -148,7 +148,7 @@ private:
     std::atomic<uint64_t> mpu_created_{0};
     // complete + abort
     std::atomic<uint64_t> mpu_finished_{0};
-    // rate-limit rejections (roadmap §4.2)
+    // rate-limit rejections
     std::atomic<uint64_t> rl_ip_{0}, rl_ak_{0};
     std::atomic<uint64_t> bytes_in_{0};
     std::atomic<uint64_t> bytes_out_{0};

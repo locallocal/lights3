@@ -24,7 +24,7 @@ struct InlineExecutor final : IExecutor {
 };
 
 // Request-thread executor for the synchronous drivers (thread-per-request/
-// connection) (docs/archive/gaps.md §2.10): instead of idling in sync_wait, the request
+// connection): instead of idling in sync_wait, the request
 // thread runs this queue via sync_wait_pumping (task.h); the body reader switches
 // blocking reads back onto the request thread via resume_on, so a slow client
 // clogs only its own connection thread, not shared pool threads. One instance per
@@ -70,7 +70,7 @@ public:
     }
 
     // True while called from inside run() on the pumping thread: resume_on() can
-    // then continue inline instead of a queue round trip (roadmap §4.3 ⑤, the
+    // then continue inline instead of a queue round trip (the
     // same fast path the beast strand / seastar shard awaiters have)
     bool running_in_this_thread() const { return runner_ == std::this_thread::get_id(); }
 

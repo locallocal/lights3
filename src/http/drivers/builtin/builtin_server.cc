@@ -33,14 +33,13 @@ namespace lights3::http {
 
 namespace {
 
-// Connection I/O: plaintext socket or an OpenSSL session on top of it (roadmap
-// §4.1). Blocking either way — the socket's SO_RCVTIMEO/SO_SNDTIMEO stay the
-// timeout mechanism, and OpenSSL reports a timed-out read/write as an error
+// Connection I/O: plaintext socket or an OpenSSL session on top of it. Blocking either way — the socket's
+// SO_RCVTIMEO/SO_SNDTIMEO stay the timeout mechanism, and OpenSSL reports a timed-out read/write as an error
 struct Io {
     int fd = -1;
     SSL* ssl = nullptr;
 
-    // Phase timeouts (roadmap §4.2): the blocking model expresses them as socket
+    // Phase timeouts: the blocking model expresses them as socket
     // timeouts re-armed at each phase boundary; a read/write that times out fails
     // with EAGAIN, which the callers attribute to the phase they were in
     void set_recv_timeout(int sec) {
@@ -78,7 +77,7 @@ struct Io {
 };
 
 // Buffered connection reader; shared by request-header parsing and body reads.
-// buf is not zero-initialized (docs/archive/gaps.md §4): pos/end delimit the valid
+// buf is not zero-initialized: pos/end delimit the valid
 // region, and memset-ing 16KiB per connection is pure waste
 struct ConnReader {
     Io* io = nullptr;
@@ -136,7 +135,7 @@ struct BodyState {
     bool after_chunk_data = false;
     bool chunk_eof = false;
     bool error = false;
-    // Overridden by http.trailer_max_size (docs/archive/gaps.md §7)
+    // Overridden by http.trailer_max_size
     size_t trailer_max = 16 * 1024;
 
     [[noreturn]] void fail(const char* what) {
@@ -234,7 +233,7 @@ public:
         : st_(st), len_(len), conn_exec_(conn_exec) {}
     Task<size_t> read(std::span<std::byte> buf) override {
         // The blocking recv switches back to the connection's own thread
-        // (docs/archive/gaps.md §2.10): the handler coroutine chain runs on the
+        //: the handler coroutine chain runs on the
         // shared ThreadPool, and recv-ing in place would pin pool threads on
         // slow clients — 16 slow uploads could occupy every pool thread; the
         // connection thread is idling in sync_wait_pumping at this moment
@@ -256,9 +255,9 @@ private:
 struct ConnShared {
     HttpConfig cfg;
     Handler handler;
-    // IHttpServer::stats() (roadmap §4.2)
+    // IHttpServer::stats()
     driver::ConnCounters counters;
-    // TLS (roadmap §4.1): the holder supplies certificates/SNI/client CA per
+    // TLS: the holder supplies certificates/SNI/client CA per
     // handshake and hot-reloads them; the SSL_CTX carries the static knobs. Both
     // live here because connection threads outlive the server object
     std::shared_ptr<tls::Holder> tls;
@@ -270,20 +269,17 @@ struct ConnShared {
     std::mutex m;
     std::condition_variable cv;
     std::set<int> conns;
-    // Connections in keep-alive waiting for the next request (docs/archive/gaps.md
-    // §4): these can be cut immediately on shutdown, with the grace period
-    // reserved for in-flight requests — previously there was no distinction
-    // and idle connections made shutdown wait a pointless 10 seconds
+    // Connections in keep-alive waiting for the next request: these can be cut immediately on shutdown, with the grace
+    // period reserved for in-flight requests — previously there was no distinction and idle connections made shutdown
+    // wait a pointless 10 seconds
     std::set<int> idle;
     int active = 0;
 };
 
-// Connection threads are created explicitly with a 512KiB stack (docs/archive/gaps.md
-// §4): std::thread uses the default 8MiB, x max_connections(4096) = 32GiB of
-// reserved virtual address space, while the measured stack peak is ~100KiB
-// (coroutine frames live on the heap; the stack only carries parsing and the
-// blocking IO call chain). Detached: lifetime is managed by the shared_ptr in
-// the closure, same as the old std::thread(...).detach()
+// Connection threads are created explicitly with a 512KiB stack: std::thread uses the default 8MiB, x
+// max_connections(4096) = 32GiB of reserved virtual address space, while the measured stack peak is ~100KiB (coroutine
+// frames live on the heap; the stack only carries parsing and the blocking IO call chain). Detached: lifetime is
+// managed by the shared_ptr in the closure, same as the old std::thread(...).detach()
 bool spawn_conn_thread(std::function<void()> fn) {
     constexpr size_t kConnThreadStack = 512 * 1024;
     struct Ctx {
@@ -311,7 +307,7 @@ bool spawn_conn_thread(std::function<void()> fn) {
     return true;
 }
 
-// sendfile(2) fast path (roadmap §4.3 ④): a fixed-length plaintext response
+// sendfile(2) fast path: a fixed-length plaintext response
 // whose body is exactly one file range goes kernel-side, no user-space copy
 // and no per-chunk pool hop. Returns nullopt when the path does not apply or
 // the very first call is refused (EINVAL/ENOSYS: unsupported fd or filesystem)
@@ -343,7 +339,7 @@ std::optional<bool> sendfile_body(Io& io, HttpResponse& resp, bool chunked, bool
     return true;
 }
 
-// Streaming body as one coroutine driven by sync_wait_pumping (roadmap §4.3 ⑤):
+// Streaming body as one coroutine driven by sync_wait_pumping:
 // the previous shape did a bare sync_wait per chunk (condvar + two thread
 // hops each; a 1GiB object = 16384 of them). Now the backend read of the next
 // chunk is in flight while the current one is sent (StreamPrefetch), and the
@@ -397,7 +393,7 @@ Task<bool> stream_body(Io& io, HttpResponse& resp, bool chunked, size_t io_chunk
 bool write_response(Io& io, HttpResponse& resp, bool head_request, bool keep_alive,
                     size_t io_chunk = driver::kIoChunkBytes, driver::ConnCounters* counters = nullptr,
                     bool sendfile_enabled = true) {
-    // A send that fails with EAGAIN hit write_timeout (roadmap §4.2)
+    // A send that fails with EAGAIN hit write_timeout
     auto send = [&](const char* p, size_t n) {
         if (io.send_all(p, n)) return true;
         if (Io::timed_out() && counters) driver::count_timeout(*counters, driver::Phase::Write);
@@ -424,7 +420,7 @@ bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& pe
                const std::optional<TlsIdentity>& tls_identity, bool& keep_alive, int served) {
     const size_t max_line = sh.cfg.max_header_size;
     const int fd = io.fd;
-    // Phase timeouts (roadmap §4.2): waiting for the request line is the keep-alive
+    // Phase timeouts: waiting for the request line is the keep-alive
     // idle wait on a reused connection, the header bound on a fresh one; headers
     // and body then get their own bounds, the response write its own
     io.set_recv_timeout(served == 0 ? sh.cfg.header_timeout_sec : sh.cfg.idle_timeout_sec);
@@ -454,7 +450,7 @@ bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& pe
     HttpRequest req;
     req.remote_addr = peer;
     req.tls_identity = tls_identity;
-    // Malformed request line / header block / framing (roadmap §5.3): counted once,
+    // Malformed request line / header block / framing: counted once,
     // whether the connection is closed silently or answered 400
     auto malformed = [&] {
         sh.counters.parse_error();
@@ -596,7 +592,7 @@ void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
             return;
         }
         sh.counters.tls_handshake(true);
-        // Verified client certificate (backlog-sequence ⑥): read once per
+        // Verified client certificate: read once per
         // connection, stamped on every request it carries
         tls_identity = tls::peer_identity(io.ssl);
     }
@@ -622,7 +618,7 @@ void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
 class BuiltinServer final : public IHttpServer {
 public:
     explicit BuiltinServer(const HttpConfig& cfg) : shared_(std::make_shared<ConnShared>()) {
-        // TLS (roadmap §4.1): OpenSSL on the connection's blocking socket; the
+        // TLS: OpenSSL on the connection's blocking socket; the
         // shared holder supplies certificates (SNI + hot reload) and the knobs.
         // Loading failures throw right here — never "configured but silently
         // plaintext", which would void the UNSIGNED-PAYLOAD integrity argument
@@ -642,7 +638,7 @@ public:
         }
         // The thread-per-connection model has no notion of an IO thread
         // count; configuring it explicitly means the user expects an effect
-        // that will not happen (docs/archive/gaps.md §7)
+        // that will not happen
         if (cfg.io_threads_set)
             LOG_WARN(
                 "builtin driver ignores http.io_threads={} (thread-per-connection model; "
@@ -773,7 +769,7 @@ public:
             }
         }
         // Graceful exit: idle keep-alive connections are cut immediately
-        // (they are only waiting for the next request, docs/archive/gaps.md §4), with
+        // (they are only waiting for the next request), with
         // the grace period reserved for in-flight requests; on timeout, force
         // all of them closed. Leftover threads hold the shared state via
         // shared_ptr and finish up on their own after run() returns or even

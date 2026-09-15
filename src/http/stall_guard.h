@@ -1,4 +1,4 @@
-// L1/L2 boundary: transfer stall guard (docs/archive/gaps.md §3.3)
+// L1/L2 boundary: transfer stall guard
 //
 // All four drivers reset their timeouts **per chunk**: as long as the client
 // sends one byte per cycle the read timeout never fires, and a connection can
@@ -34,7 +34,7 @@ public:
     // default, and every window would misjudge a healthy slow connection as stalled
     static constexpr uint64_t kMinProgressBytes = 64 * 1024;
 
-    // stalls: optional counter bumped on every cut (roadmap §5.3)
+    // stalls: optional counter bumped on every cut
     StallGuardReader(std::unique_ptr<BodyReader> inner, std::chrono::seconds window,
                      uint64_t min_progress = kMinProgressBytes, std::atomic<uint64_t>* stalls = nullptr)
         : inner_(std::move(inner)),

@@ -22,8 +22,7 @@
 
 非目标（首期）：
 
-- ~~不做 IAM Role / IMDS / STS 临时凭证自动获取~~ **已实现（roadmap §3.3，
-  2026-08-28）**：AK/SK 未配置时走凭证链（环境变量 → 容器端点 → EC2
+- ~~不做 IAM Role / IMDS / STS 临时凭证自动获取~~ **已实现（2026-08-28）**：AK/SK 未配置时走凭证链（环境变量 → 容器端点 → EC2
   IMDSv2，见 §7），静态 AK/SK（`${ENV}` 展开）仍是显式配置时的形态；
 - 不做多 endpoint 负载均衡/故障转移，一个 backend 实例对应一个远端端点；
 - 不缓存远端数据——缓存是 TieredBackend 的职责（docs/architecture/storage/tiered-design.md §6），职责分离；
@@ -95,7 +94,7 @@ HttpRequest 只为签名，再搬运 headers"——另一种做法（直接对 h
 - Authenticator 实例：每 backend 一个，
   `SigV4Authenticator::build(AuthConfig{云凭证, 远端 region, "s3"})`，
   region 独立于本地 L2 验签用的 region；
-- **trace 透传**（roadmap §5.4）：每个 op 入口 `co_await trace_extra(extra)`——
+- **trace 透传**：每个 op 入口 `co_await trace_extra(extra)`——
   从等待链的取消令牌取请求载荷（`storage/request_stats.h` 的
   `RequestBackendStats::trace`），追加 `traceparent`（网关自身 span，远端记为 parent）与
   `tracestate`；不参与签名（非 x-amz-*）。无请求上下文（后台任务）时不加。
@@ -148,7 +147,7 @@ get_object(bucket, key, range)：
          错误状态 → 继续收完错误体做 §5 映射，经 promise 交还异常
      - ContentReceiver：循环 queue->push(data, n)；push 返回 false 则
        返回 false 中止传输。httplib 每次回调只给自己缓冲的一片（16 KiB），
-       队列把连续的片拼进同一个尾块（上限 256 KiB，backlog-sequence ⑩），
+       队列把连续的片拼进同一个尾块（上限 256 KiB），
        消费方一次 pop 拿到整块而不是一片
      - 结束：queue->close(ok)
 ③ ① 拿到 meta 后 co_return ObjectStream{meta,
@@ -176,8 +175,7 @@ put_object(bucket, key, meta, body)：
      Provider 从 queue pop 写入 DataSink；pop 到 EOF 后结束
 ② 调用方协程（留在共享池）循环：
      co_await body.read(每轮新分配的 64KiB string) → HashStream(Md5) 增量更新
-       → queue->push(std::move(chunk))（整块移交，锁内不再拷贝，
-         backlog-sequence ⑩）；EOF 后 queue->close(ok=true)
+       → queue->push(std::move(chunk))（整块移交，锁内不再拷贝）；EOF 后 queue->close(ok=true)
      body.read() 抛异常（客户端断连）→ queue->close(ok=false) →
        Provider 返回 false 中止上传
 ③ join pump，取远端响应：2xx → 校验 ETag（§6）→ co_return PutResult
@@ -202,7 +200,7 @@ put_object(bucket, key, meta, body)：
 - nullopt（真 chunked 且无长度）：AWS S3 不接受裸 `Transfer-Encoding:
   chunked`（要求定长或 aws-chunked）。不实现
   `STREAMING-UNSIGNED-PAYLOAD-TRAILER` 出方向组帧（罕见路径，收益不抵复杂度）；
-  已实现的替代（gaps §6.2）：先把 body 落到本地 spool 临时文件
+  已实现的替代：先把 body 落到本地 spool 临时文件
   （`spool_dir`，默认系统临时目录）得到长度再定长上传，超过 `spool_max_bytes`
   （默认 5GiB）抛 `EntityTooLarge`；`spool_max_bytes: 0` 关闭 spool，此时退回
   `NotImplemented`（`cloudproxy_backend.cc` `spool_and_upload`）。
@@ -297,8 +295,8 @@ continuation-token 可能的服务端优化）。
 - 可重试条件：网络层错误、5xx、SlowDown。指数退避 `base × 2^n + 抖动`
   （默认 base 100ms、3 次，`retry_max` / `retry_base_ms` 可配，加载期做
   范围校验；单次退避钳制在 60s 内）；**429/503 带 `Retry-After` 头（整秒或
-  HTTP-date）时以远端提示为准（钳制 [0,60s]，roadmap §3.3）**；
-- **退避不占池线程**（roadmap §3.3 重构）：控制面重试环在协程层驱动
+  HTTP-date）时以远端提示为准（钳制 [0,60s]）**；
+- **退避不占池线程**：控制面重试环在协程层驱动
   （`retry_io`），轮间经 TimerQueue 可等待睡眠；连接租约也改异步
   （`ClientPool::acquire_async`，池满时 waiter 挂起等交接而非阻塞 cv）。
   数据面 pump 是每传输私有线程，阻塞退避无害；
@@ -358,7 +356,7 @@ backends:
     verify_etag: true                # §6；远端 SSE-KMS 时关
     spool_max_bytes: 5GiB            # 无长度 body 先落盘 spool 的上限（§3.2）；0 = 关（退回 NotImplemented）
     spool_dir: ""                    # spool 目录，空 = 系统临时目录
-    # access_key/secret_key 均留空 = 走 AWS 凭证链（roadmap §3.3）：
+    # access_key/secret_key 均留空 = 走 AWS 凭证链：
     # 环境变量 → 容器端点（ECS/EKS）→ EC2 IMDSv2，会话凭证到期前自动续期；
     # imds_endpoint: http://169.254.169.254   # 测试/代理可覆盖
 ```
@@ -389,7 +387,7 @@ S3 兼容网关的常见形态；lights3 作远端配 `http.base_domain` 即可�
 client：pump 在私有线程、控制面在任意池线程，thread_local 会让连接数
 不可控。
 
-连接卫生（roadmap §3.3）：空闲项带时间戳，逾 `pool_idle_timeout` 绝不复用
+连接卫生：空闲项带时间戳，逾 `pool_idle_timeout` 绝不复用
 并由轻量 reaper 回收（远端/NAT 静默断连不再表现为周期性首请求重试尖峰）；
 `pool_max_lifetime` 归还时按龄退休；`total_` 随回收收缩。
 

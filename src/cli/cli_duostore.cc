@@ -84,7 +84,7 @@ void run_load(const Cmd& c) {
     app.shutdown();
 }
 
-// ---- Backup chains / PITR (backlog-sequence ⑧, docs/architecture/storage/duostore-core.md §11.1) ----
+// ---- Backup chains / PITR (docs/architecture/storage/duostore-core.md §11.1) ----
 
 // `<backend>` positional or --backend=; the directory comes from --to= / --from=
 std::string backend_dir_args(const Cmd& c, const char* dir_flag, std::string& dir) {
@@ -206,7 +206,7 @@ void run_restore(const Cmd& c) {
     app.shutdown();
 }
 
-// Background tasks on demand (roadmap §3.2): the run_*_once hooks were only
+// Background tasks on demand: the run_*_once hooks were only
 // reachable through timers (GC every 5min, orphan scan daily by default) —
 // an operator wanting space back *now* had nothing to call. Offline like
 // dump/load: with a local meta engine (rocksdb/sqlite) the file lock demands
@@ -248,7 +248,7 @@ void run_duo_scan(const Cmd& c) {
     app.shutdown();
 }
 
-// Corrupt-pack quarantine (roadmap §3.7): packs whose compaction cannot converge
+// Corrupt-pack quarantine: packs whose compaction cannot converge
 // because of corrupt records are parked by GC; these are the operator exits.
 // Pack ids accept the 16-digit hex the logs print, 0x-prefixed hex, or decimal
 uint64_t parse_pack_id(const std::string& s) {

@@ -248,7 +248,7 @@ struct SeaConn {
     // read). The expiry callback shuts down both directions, pending
     // operations wake to EOF/exception, and the session winds down naturally
     ss::timer<>* idle = nullptr;
-    // Phase timeouts (roadmap §4.2): the session sets phase + phase_timeout before
+    // Phase timeouts: the session sets phase + phase_timeout before
     // each socket phase; ArmGuard arms the timer with the current bound and the
     // expiry callback attributes the timeout to the phase
     std::chrono::seconds phase_timeout{0};
@@ -328,7 +328,7 @@ struct BodyState {
     bool after_chunk_data = false;
     bool chunk_eof = false;
     bool error = false;
-    // Overridden by http.trailer_max_size (docs/archive/gaps.md §7)
+    // Overridden by http.trailer_max_size
     size_t trailer_max = 16 * 1024;
 
     [[noreturn]] void fail(const char* what) {
@@ -443,7 +443,7 @@ struct Session {
 // One per shard; touched only on its owning shard except during construction
 struct ShardState {
     std::optional<ss::server_socket> listener;
-    // TLS (roadmap §4.1): per-shard credentials (seastar's shared_ptr is not
+    // TLS: per-shard credentials (seastar's shared_ptr is not
     // thread-safe, so every shard builds its own); reloadable variants watch the
     // certificate files themselves
     ss::shared_ptr<ss::tls::server_credentials> tls_creds;
@@ -502,7 +502,7 @@ Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, 
     }
 
     // Streaming response: pulled in http.io_chunk_size chunks (docs/architecture/overview.md
-    // request lifecycle), one read ahead of the socket (roadmap §4.3 ①/②)
+    // request lifecycle), one read ahead of the socket
     driver::StreamPrefetch pf(*resp.stream_body, io_chunk);
     uint64_t written = 0;
     for (;;) {
@@ -574,7 +574,7 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
     bool keep = true;
     // keep-alive budget (http.max_requests_per_connection)
     int served = 0;
-    // Verified client certificate (backlog-sequence ⑥): seastar::tls answers DN /
+    // Verified client certificate: seastar::tls answers DN /
     // SAN queries per socket (forcing the handshake first), read once per
     // connection. Only asked for when client auth is on -- the query on a
     // connection without a certificate is a cheap nullopt, on a plaintext socket
@@ -866,7 +866,7 @@ ss::future<> stop_watcher(std::shared_ptr<ServerCore> core, ss::readable_eventfd
 // the caller's lambda object staying alive (a coroutine lambda's captures
 // dangle once the lambda object is destroyed, and the alien/smp posting
 // closures do not outlive the first suspension)
-// TLS credentials for one shard (roadmap §4.1, docs/usage/tls.md §4): the shared
+// TLS credentials for one shard (docs/usage/tls.md §4): the shared
 // config surface mapped onto seastar::tls. Versions/client auth map onto both
 // backends (a GnuTLS priority string plus the OpenSSL-only setters, each a no-op
 // on the other backend); cipher strings only reach the OpenSSL backend. With a
@@ -911,7 +911,7 @@ ss::future<> setup_shard(std::shared_ptr<ServerCore> core, std::string addr, uin
     lo.reuse_address = true;
     // inet_address accepts both v4/v6 literals: with ipv4_addr
     // hard-coded, bind: "::" in the config threw outright while
-    // beast/httplib started fine (docs/archive/gaps.md §3.9)
+    // beast/httplib started fine
     auto sock = ss::engine().listen(ss::socket_address(ss::net::inet_address(addr), p), lo);
     if (!core->cfg.tls_cert.empty()) {
         st->tls_creds = co_await build_tls_credentials(core->cfg);
@@ -975,7 +975,7 @@ uint16_t probe_free_port(const std::string& addr) {
 class SeastarServer final : public IHttpServer {
 public:
     explicit SeastarServer(const HttpConfig& cfg) : cfg_(cfg) {
-        // TLS (roadmap §4.1) goes through seastar::tls (docs/usage/tls.md §4). The
+        // TLS goes through seastar::tls (docs/usage/tls.md §4). The
         // credentials are built inside the reactor at listen(); what can be
         // checked without it is checked here so misconfiguration fails at startup
         if (!cfg.tls_cert.empty()) {

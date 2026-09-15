@@ -29,7 +29,7 @@ Non-goals (first phase):
 - In-progress multipart parts do not participate in demotion (after completion
   they become ordinary objects and then enter the lifecycle).
 
-The first-phase "no prefix-granularity policy" was lifted in P6 (roadmap §3.6):
+The first-phase "no prefix-granularity policy" was lifted in P6:
 `rules[]` gives a per-prefix `cold_after` by `bucket/key` glob (`never` pins),
 see §5.1/§8.
 
@@ -155,7 +155,7 @@ localfs adapter keeps a private map + `atime.tsv` snapshot) plus the `Touch`
 write-behind buffer and the scan coroutine inside `TieredBackend`; there is no
 standalone class.)
 
-- **Access records** (P6, roadmap §3.6 ⑤): one `AccessRec{atime, hits, enrolled}`
+- **Access records** (P6): one `AccessRec{atime, hits, enrolled}`
   per object, **persisted with the object** rather than held resident — the
   localfs side writes it into a second xattr on the data file
   (`user.lights3.access`; no fsync, travels with the inode, vanishes naturally
@@ -169,7 +169,7 @@ standalone class.)
   reads the buffer first, then the stored record, then the mtime fallback, so
   touches inside the flush window are never misjudged. A crash loses at most one
   flush period, affecting only precision; filesystem atime (relatime) is not used.
-- **Time wheel** (roadmap §3.6 ①): append-only files `<state>/wheel/<slot>`
+- **Time wheel**: append-only files `<state>/wheel/<slot>`
   bucketed by hour, one `bucket\tkey` line per enrollment; a key is enrolled in
   the slot its `atime + cold_after` falls into (`enrolled` remembers the slot, a
   later touch appends only when the slot changes). Due slots are consumed by the
@@ -188,7 +188,7 @@ standalone class.)
 
 Background **TierScanner**: triggered periodically by `TimerQueue` (default 1h)
 → posted to the thread pool to run the scan coroutine. A round first flushes the
-access buffer, then produces candidates by mode (P6, roadmap §3.6 ①):
+access buffer, then produces candidates by mode (P6):
 
 - **Incremental round (the norm)**: reads only the time-wheel slots that are due
   (`slot ≤ now/1h`) and re-checks each key's current access record — still-hot
@@ -213,7 +213,7 @@ Two trigger conditions:
    is `(rank, score)` — `cached` objects and range-cache residue of remote
    objects rank 0 (zero upload), `local` rank 1;
    `score = age × (1 + size_weight × log2(1 + size/1MiB)) / (1 + frequency_weight × hits)`,
-   both weights 0 by default = pure LRU (roadmap §3.6 ③).
+   both weights 0 by default = pure LRU.
 
 Concurrency is throttled by `core/semaphore.h` (`max_concurrent_transfers`,
 default 4) to avoid saturating uplink bandwidth and the thread pool.
@@ -299,7 +299,7 @@ docs/architecture/object-read-write-flow.md §3.1 as a normal 206. Configurable
 whole-object promotion task to the background (independent cloud GET → cache
 fill → commit as cached); likewise give up outright if space is insufficient.
 
-**Block-level partial cache** (P6, roadmap §3.6 ⑦, `range_cache: true`, localfs
+**Block-level partial cache** (P6, `range_cache: true`, localfs
 side only): a Range hit on a remote object first consults the block cache under
 `<state>/rcache/` — a sparse data file of the object's length plus a bitmap file
 of present blocks, bound to one replica by `remote.etag`. If every block is
@@ -394,7 +394,7 @@ backends:
     gc_retry_cap: 1h                  # backoff cap
     reconcile_interval: 1d            # bidirectional reconciliation period (§9); 0 = off (everything stops when scan_interval=0)
     reconcile_orphans: rebuild        # cloud-orphan handling: rebuild (default, rebuild the stub) | delete
-    # ---- P6 (roadmap §3.6) ----
+    # ---- P6 ----
     full_scan_interval: 1d            # full-enumeration safety net; 0 = every round full (old behavior)
     evict_size_weight: 0              # size weighting in the eviction score; 0 = ignore size
     evict_frequency_weight: 0         # access-frequency weighting; 0 = pure LRU
@@ -454,7 +454,7 @@ enumerate the cloud and local object sets and take a bidirectional diff —
   intervention; an invalidated cached reference only degrades to an alert (the
   data is still local and is re-uploaded at the next cold detection).
 
-**Quarantine ledger** (P6, roadmap §3.6 ④): two kinds of findings —
+**Quarantine ledger** (P6): two kinds of findings —
 `refs_missing` (a stub whose referenced cloud copy is gone) and `foreign` (a
 cloud orphan without lights3 redundant headers) — enter the ledger under
 `<state>/quarantine/` (one TSV each: kind/bucket/key/etag/first and last
@@ -481,7 +481,7 @@ capacity has its own five callback gauges,
 | P3 | Tee cache backfill + space-fallback degradation + single-flight | Disconnect/ENOSPC injection tests | ✅ |
 | P4 | GC queue + reconciliation tool | Reconciliation converges after crash injection | ✅ Fully landed (reconciliation tool + GC exponential backoff wrapped up 2026-07-31; stub-loss rebuild / delete mode / anti-resurrection / reverse alert / backoff-recovery specials all green) |
 | P5 | Integrate the real CloudProxyBackend (itself an independent feature, see docs/architecture/storage/cloudproxy-design.md) | End-to-end against public cloud | ✅ (`e2e_tiered_cloudproxy` two-instance composition) |
-| P6 | roadmap §3.6: `ITierLocal` abstraction + duostore hot tier, xattr access records + time-wheel incremental scanning, prefix rules, multi-dimensional eviction score, reconcile quarantine, Range block cache | Dedicated unit tests for incremental rounds / rules / score / block cache / quarantine / duostore hot tier | ✅ (2026-09-02) |
+| P6 | `ITierLocal` abstraction + duostore hot tier, xattr access records + time-wheel incremental scanning, prefix rules, multi-dimensional eviction score, reconcile quarantine, Range block cache | Dedicated unit tests for incremental rounds / rules / score / block cache / quarantine / duostore hot tier | ✅ (2026-09-02) |
 
 P1–P4 depend on no cloud SDK at all; the `tiered` + `memory` combination gives
 full coverage in CI — a direct dividend of the decision to couple the local

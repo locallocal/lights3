@@ -1,4 +1,4 @@
-// L3: the local ("hot") side of TieredBackend behind an interface (roadmap §3.6 ⑥).
+// L3: the local ("hot") side of TieredBackend behind an interface.
 // TieredBackend used to be hard-bound to LocalFsBackend (object paths, sidecars, fs_util
 // commit primitives). Everything tiered needs from its local side is collected here:
 // the tier state of an object, per-object access records, an upload snapshot, the two
@@ -59,7 +59,7 @@ struct LocalObject {
 };
 
 // Per-object access record (docs/architecture/storage/tiered-design.md §4.3): last access, a saturating
-// access count (frequency-aware eviction, roadmap §3.6 ③) and the time-wheel slot the
+// access count (frequency-aware eviction) and the time-wheel slot the
 // key was last enrolled in (incremental scanning, ①). Persisted by the local side
 // (xattr on the data file for localfs; a resident table for duostore); the backend
 // keeps only a write-behind buffer
@@ -101,7 +101,7 @@ public:
     virtual Task<void> commit(const ObjectMeta& meta, const TierInfo& tier) = 0;
 };
 
-// Block-level partial cache of a remote object (roadmap §3.6 ⑦): a sparse file plus a
+// Block-level partial cache of a remote object: a sparse file plus a
 // presence bitmap, keyed to one cloud replica (remote_etag). Lives in the tier state
 // directory, never in the object tree
 class IRangeCache {
@@ -164,7 +164,7 @@ public:
     virtual bool cache_space_ok(uint64_t size, uint64_t min_free_bytes) const = 0;
     // Capacity of the filesystem holding the local data (statvfs), nullopt when
     // unavailable. Exported as the lights3_tiered_local_*_bytes gauges
-    // (backlog-sequence ①) and consumed by the space watermark
+    // and consumed by the space watermark
     virtual std::optional<SpaceUsage> space_usage() const = 0;
     // Used fraction and total bytes, the watermark's view of space_usage()
     std::optional<std::pair<double, uint64_t>> disk_usage() const {

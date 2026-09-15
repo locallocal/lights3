@@ -377,7 +377,7 @@ int run_bench(Mode mode, const BenchOpts& o) {
 
     uint64_t ops = st.ops.load(), errs = st.errs.load(), bytes = st.bytes.load();
     if (o.json) {
-        // Machine-readable summary (roadmap §6.2): the baseline-comparison input of
+        // Machine-readable summary: the baseline-comparison input of
         // scripts/bench_gate.sh; the same numbers the text summary prints
         nlohmann::json j;
         j["mode"] = mode_name(mode);

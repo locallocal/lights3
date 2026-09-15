@@ -1,6 +1,6 @@
 # Performance baseline: the driver × TLS × put/get matrix
 
-The last item of roadmap §4.3 ("no performance baseline"): the first benchmark
+Filling in the previously missing performance baseline: the first benchmark
 data kept in the repository, doubling as the before/after comparison for the
 §4.3 data-plane work ([http-adapter.md §2.4](../architecture/http-adapter.md)). The numbers
 are meaningful only on this machine -- **relative comparison and regression
@@ -83,8 +83,8 @@ edges: "round" p50 values such as 6.15 or 12.29 are bucket widths). A single
   bytes** per socket read: a 4 MiB body was 8192 `recvmsg` + 8198
   `timerfd_settime` + 77k futex calls (`strace -c`), 40 ms per 4 MiB PUT
   against 6 ms on builtin. The fix is one line, `buffer.reserve(io_chunk_size)`
-  ([http-adapter.md §2.4](../architecture/http-adapter.md) ⑨). It confirms the roadmap's point
-  that "beast is the performance path" had only ever been asserted.
+  ([http-adapter.md §2.4](../architecture/http-adapter.md) ⑨). It confirms the earlier
+  point that "beast is the performance path" had only ever been asserted.
 - **Small objects**: ops/s is dominated by per-request overhead; the §4.3
   changes are neutral there (±5%), beast GET +14% comes from the `ResumeOn`
   fast path skipping `asio::post`; beast PUT's 3.5× is the read-granularity fix.

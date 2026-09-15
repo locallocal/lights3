@@ -1,10 +1,9 @@
 # TODO: open items and plans
 
 Successor of `docs/archive/backlog.md` (the open-items ledger since 2026-09-05;
-its ten deferred items of §1 were all completed by 2026-09-06 in the order of
-`docs/archive/backlog-sequence.md`, and both files were archived -- Chinese only,
-like the other archived ledgers; `backlog §N` / `backlog-sequence ①…⑩` in source
-comments refer to their sections). This document lists **only what is not
+its ten deferred items of §1 were all completed by 2026-09-06 and the file was
+archived -- Chinese only; `backlog §N` in source comments refers to its
+sections). This document lists **only what is not
 done**: follow-ups that wait on an external party, code that is in place but
 could not be verified on the development box, long-term items, and the explicit
 not-planned list.
@@ -16,17 +15,17 @@ design document -- no struck-through history here. Each entry carries
 
 | Item | Source | State and remaining steps | Value | Difficulty |
 | --- | --- | --- | --- | --- |
-| Structured error codes merged upstream in client-c | backlog-sequence ⑨, [duostore-meta-tikv-design.md](../architecture/storage/duostore-meta-tikv-design.md) | Done on our side (2026-09-06): patch in `third_party/patches/client-c` (README has the PR text and the post-merge steps); the sidecar picks by-code / by-message at compile time from the linked library. Remaining: open the upstream PR → after the merge bump the submodule pointer, delete the message branch and the patch directory | low | low |
+| Structured error codes merged upstream in client-c | [duostore-meta-tikv-design.md](../architecture/storage/duostore-meta-tikv-design.md) | Done on our side (2026-09-06): patch in `third_party/patches/client-c` (README has the PR text and the post-merge steps); the sidecar picks by-code / by-message at compile time from the linked library. Remaining: open the upstream PR → after the merge bump the submodule pointer, delete the message branch and the patch directory | low | low |
 
 ## 2. Pending verification (implemented, not verifiable on the development box)
 
 | Item | Source | Needs |
 | --- | --- | --- |
-| Docker image build and the compose profiles (default / redis / tikv / rados / e2e; `multi` is the row below) | roadmap §6.3, [deployment.md §4](../usage/deployment.md) | A machine with a docker daemon: `docker compose build`, then `docker compose --profile e2e run --rm e2e` (runs the redis / tikv / rados e2e paths that SKIP locally) |
-| CPack RPM | roadmap §6.3, [deployment.md §3.2](../usage/deployment.md) | A machine with `rpmbuild`: `cpack -G RPM`, check the scriptlets with `rpm -qp --scripts`, walk through install / upgrade / remove |
+| Docker image build and the compose profiles (default / redis / tikv / rados / e2e; `multi` is the row below) | [deployment.md §4](../usage/deployment.md) | A machine with a docker daemon: `docker compose build`, then `docker compose --profile e2e run --rm e2e` (runs the redis / tikv / rados e2e paths that SKIP locally) |
+| CPack RPM | [deployment.md §3.2](../usage/deployment.md) | A machine with `rpmbuild`: `cpack -G RPM`, check the scriptlets with `rpm -qp --scripts`, walk through install / upgrade / remove |
 | `unit_tests` intermittently dies with `terminate called without an active exception` | 2 of 5 full runs on 2026-09-05 on this box, always right after `timer_stats_track_fired_and_pending` passed, during the 1.1 s slow callback of `timer_slow_callback_counted` (the "callback took 1.100s" line prints first); not reproducible under gdb; unrelated to feature work. A second spot, seen on 2026-09-12 during `duostore_orphan_scan_defers_to_peer_write_lease`, was diagnosed and fixed the same day: the phase-2 wait loop `chunk_files_on_disk < 1` was satisfied at once by the tail chunk left over from phase 1, so the scan finished before A's new chunk reached disk, the CHECK on `skipped_leased` being 0 threw, and the destructor of a joinable `std::thread` turned the failure into a terminate; the loop now waits relative to the file count before the start, and the writer thread is released and joined by an RAII guard. An aborted process flushes no gcov counters, so `make coverage` then reports a low figure and WARNs at the end | Only the timer spot remains: the destruction order during a slow TimerQueue callback under load; capture a stack with `catch throw` / `ulimit -c` first |
-| Multi-gateway multipart container e2e | [../archive/multi-gateway-multipart-design.md](../../archive/multi-gateway-multipart-design.md) §4 ② | The compose `multi` profile (two lights3 + redis + rados + nginx round robin) and `docker/e2e-multi.sh` are in place (2026-09-09, `docker compose --profile multi config` passes); a machine with docker: `cd docker && docker compose --profile multi run --rm e2e-multi`. The unit suite and the local e2e (the duostore-redis segment of `run_e2e.sh`) pass |
-| mint compatibility baseline | roadmap §6.1, [testing.md §6](testing.md) | A machine with docker: `ctest -R mint -V`, record the per-suite PASS/FAIL/NA counts in testing.md §6 |
+| Multi-gateway multipart container e2e | [deployment.md §4](../usage/deployment.md) | The compose `multi` profile (two lights3 + redis + rados + nginx round robin) and `docker/e2e-multi.sh` are in place (2026-09-09, `docker compose --profile multi config` passes); a machine with docker: `cd docker && docker compose --profile multi run --rm e2e-multi`. The unit suite and the local e2e (the duostore-redis segment of `run_e2e.sh`) pass |
+| mint compatibility baseline | [testing.md §6](testing.md) | A machine with docker: `ctest -R mint -V`, record the per-suite PASS/FAIL/NA counts in testing.md §6 |
 | S3 Tables manual verification with Spark / Trino | [s3-tables-design.md §13](../architecture/s3-tables-design.md) | Only the PyIceberg / DuckDB smoke passed here (testing.md §6); no Spark / Trino on this box: configure `rest.sigv4-enabled` from the §13 templates, walk through create / append / `rewrite_data_files` (Spark) and SIGV4 read-write (Trino), record the result in testing.md §6; also add a Spark-written manifest (negative block counts) to `tests/fixtures/tables/` (every fixture there is PyIceberg-generated) |
 
 ## 3. Long-term / architectural (settle the target scenario first)
@@ -57,7 +56,6 @@ design document -- no struck-through history here. Each entry carries
 
 - A new entry states its **source / entry point / value / difficulty**; delete
   it when done and write the implementation into the design document.
-- Source comments keep citing the archived reasoning as `roadmap §N`,
-  `backlog §N` and `backlog-sequence ①…⑩`; entries here are cited as `todo §N`.
-- Historical ledgers, read-only (Chinese): `docs/archive/gaps.md`, `issues.md`,
-  `roadmap.md`, `backlog.md`, `backlog-sequence.md`.
+- Source comments keep citing the archived reasoning as `backlog §N`; entries
+  here are cited as `todo §N`.
+- Historical ledger, read-only (Chinese): `docs/archive/backlog.md`.

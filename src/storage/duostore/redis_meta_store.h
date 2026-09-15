@@ -86,16 +86,15 @@ public:
     void ack_reclaim(uint64_t seq) override;
     void ack_reclaims(std::span<const uint64_t> seqs) override;
     bool try_gc_lease(std::string_view owner, int64_t ttl_ms) override;
-    // Multi-gateway read lease (roadmap §3.7): per-owner key with PX expiry
+    // Multi-gateway read lease: per-owner key with PX expiry
     // (crashed publishers yield automatically); min via SCAN + MGET. Note redis
-    // Restore marker (backlog-sequence ⑧): the primary's replication offset
+    // Restore marker: the primary's replication offset
     // (INFO replication master_repl_offset) at backup time -- the point to which
     // an AOF archive must be replayed before loading the logical dump
     std::string restore_marker() override;
     // does NOT implement IMetaStore::snapshot() — no MVCC to pin, so the online
     // meta dump falls back to the writes-stopped contract on this engine
-    // Multi-gateway read / write leases (roadmap §3.7, multi-gateway-multipart
-    // §4 ①): STRING "<prefix>readlease:<owner>" = "<oldest_read_ms> <oldest_write_ms>"
+    // Multi-gateway read / write leases: STRING "<prefix>readlease:<owner>" = "<oldest_read_ms> <oldest_write_ms>"
     // with PX expiry; a value without the second field was written by an older
     // build (write floor unknown). min_lease SCANs the keys and folds field-wise
     bool publish_lease(std::string_view owner, const LeaseInfo& info, int64_t ttl_ms) override;
@@ -107,7 +106,7 @@ public:
                       const DataRef& to) override;
     bool chunk_referenced(uint64_t file_id) override;
     void scan_refs(const std::function<void(uint64_t file_id)>& cb) override;
-    // Invalidation feed (backlog-sequence ⑤, docs/architecture/storage/duostore-meta-redis-design.md §3.6): every
+    // Invalidation feed (docs/architecture/storage/duostore-meta-redis-design.md §3.6): every
     // commit that changes an object record PUBLISHes "<bucket>\0<key>" on <prefix>inv
     // from inside the commit script (atomic with the write, no extra round trip);
     // this starts a dedicated subscriber connection + thread that feeds on_key, calls
@@ -170,7 +169,7 @@ private:
     std::string zindex_key(std::string_view b) const;
     // up:<b>  HASH
     std::string uploads_key(std::string_view b) const;
-    // uz:<b>  ZSET (lex index over up:<b> fields, roadmap §3.5)
+    // uz:<b>  ZSET (lex index over up:<b> fields)
     std::string uploads_zkey(std::string_view b) const;
     // Full HSCAN of up:<b> plus reconciliation of uz:<b> against it (legacy tables written
     // before the index existed, or by an older gateway sharing the meta). Returns everything
@@ -194,7 +193,7 @@ private:
     // from batch_refs: complete's refs transfer (owner rewrite) must be a no-op for packs —
     // merging them would double-count.
     // rec_overhead: per-record header overhead (codec::pack_rec_overhead*); live_bytes uses the
-    // same accounting basis as file_size (docs/archive/gaps.md §2.3a)
+    // same accounting basis as file_size
     void batch_pack_delta(RedisBatch& bt, const DataRef& ref, int sign, int64_t rec_overhead);
     // Read the parts HASH: raw values (for the sha1 fingerprint) + decoded records, ascending by part_no
     std::vector<std::pair<std::string, PartRec>> scan_parts(std::string_view b, std::string_view k,
@@ -223,7 +222,7 @@ private:
     // gcq seq
     IdRange seqs_;
 
-    // Invalidation subscriber (backlog-sequence ⑤)
+    // Invalidation subscriber
     void subscriber_loop();
     // random per-store id stamped into published invalidations
     std::string origin_;

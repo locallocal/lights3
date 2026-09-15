@@ -98,7 +98,7 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         os << "lights3_responses_total{class=\"" << cls << "xx\"} "
            << by_status_class_[cls].load(std::memory_order_relaxed) << "\n";
 
-    // Exact status codes (roadmap §5.3): 200/204/206/304 tell a website/CDN story the
+    // Exact status codes: 200/204/206/304 tell a website/CDN story the
     // class counter cannot; rendered sparsely, a code appears once it occurred
     os << "# TYPE lights3_responses_by_status_total counter\n";
     for (int st = 100; st < 600; ++st)
@@ -131,7 +131,7 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
     uint64_t finished = mpu_finished_.load(std::memory_order_relaxed);
     os << "lights3_multipart_active " << (created > finished ? created - finished : 0) << "\n";
 
-    // API x backend dimension (roadmap §5.1)
+    // API x backend dimension
     {
         std::lock_guard lk(api_m_);
         if (!by_api_.empty()) {
@@ -162,7 +162,7 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         }
     }
 
-    // Static-website plane (roadmap §5.3)
+    // Static-website plane
     {
         static constexpr const char* kWebsiteEvents[] = {"anon_read", "index_rewrite", "error_document", "redirect",
                                                          "throttled"};
@@ -173,12 +173,12 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
                << website_[i].load(std::memory_order_relaxed) << "\n";
     }
 
-    // Per-client rate limiting (roadmap §4.2)
+    // Per-client rate limiting
     os << "# TYPE lights3_ratelimit_rejections_total counter\n";
     os << "lights3_ratelimit_rejections_total{scope=\"ip\"} " << rl_ip_.load(std::memory_order_relaxed) << "\n";
     os << "lights3_ratelimit_rejections_total{scope=\"ak\"} " << rl_ak_.load(std::memory_order_relaxed) << "\n";
 
-    // Byte counts and per-bucket dimension (docs/archive/gaps.md §7)
+    // Byte counts and per-bucket dimension
     os << "# TYPE lights3_bytes_total counter\n";
     os << "lights3_bytes_total{direction=\"in\"} " << bytes_in_.load(std::memory_order_relaxed) << "\n";
     os << "lights3_bytes_total{direction=\"out\"} " << bytes_out_.load(std::memory_order_relaxed) << "\n";
@@ -205,7 +205,7 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         os << "lights3_pool_backlogged " << st.backlogged << "\n";
         os << "# TYPE lights3_pool_completed_total counter\n";
         os << "lights3_pool_completed_total " << st.completed << "\n";
-        // Wait-duration histogram (docs/archive/gaps.md §7): docs/architecture/concurrency.md §3.1 defines "this
+        // Wait-duration histogram: docs/architecture/concurrency.md §3.1 defines "this
         // histogram shifting right" as the sole criterion for enabling dedicated per-backend pools; it used to be
         // collected but never emitted
         os << "# TYPE lights3_pool_wait_seconds histogram\n";
@@ -221,7 +221,7 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         os << "lights3_pool_wait_seconds_count " << wcum << "\n";
     }
 
-    // L1 connection counters (roadmap §4.2): accept/reject, keep-alive budget closes,
+    // L1 connection counters: accept/reject, keep-alive budget closes,
     // and timeouts attributed to the phase (idle wait / headers / body / write)
     if (conn) {
         auto st = conn();
@@ -237,7 +237,7 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         os << "lights3_http_timeouts_total{phase=\"header\"} " << st.timeouts_header << "\n";
         os << "lights3_http_timeouts_total{phase=\"body\"} " << st.timeouts_body << "\n";
         os << "lights3_http_timeouts_total{phase=\"write\"} " << st.timeouts_write << "\n";
-        // roadmap §5.3: requests parsed at L1 (÷ accepted = keep-alive reuse factor),
+        // requests parsed at L1 (÷ accepted = keep-alive reuse factor)
         // TLS handshake outcomes, malformed requests
         os << "# TYPE lights3_http_requests_total counter\n";
         os << "lights3_http_requests_total " << st.requests << "\n";
@@ -248,7 +248,7 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         os << "lights3_http_parse_errors_total " << st.parse_errors << "\n";
     }
 
-    // Ingress throttling queue depth (docs/archive/gaps.md §7): the inflight semaphore is the process-wide sole
+    // Ingress throttling queue depth: the inflight semaphore is the process-wide sole
     // admission gate
     if (admission) {
         auto st = admission();
@@ -258,7 +258,7 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         os << "lights3_admission_available " << st.available << "\n";
         os << "# TYPE lights3_admission_waiting gauge\n";
         os << "lights3_admission_waiting " << st.waiting << "\n";
-        // roadmap §5.3: how long requests wait for a permit, how many had to, how
+        // how long requests wait for a permit, how many had to, how
         // many gave up in the queue, and stall-guard cuts per direction
         if (st.counters) {
             static constexpr double kWaitBounds[] = {0.001, 0.01, 0.1, 1.0, 10.0};
@@ -282,7 +282,7 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         }
     }
 
-    // Timer thread health (docs/archive/gaps.md §7): slow callbacks cascade into delaying tiered scans /
+    // Timer thread health: slow callbacks cascade into delaying tiered scans /
     // duostore GC / credential sync; head-of-queue lag and the duration histogram are the only way to detect it
     if (timer_stats) {
         auto st = timer_stats();

@@ -1,9 +1,8 @@
 # 待办与规划（TODO）
 
 接替 [archive/backlog.md](../archive/backlog.md)（2026-09-05 起的待办底账，其 §1 十个
-分期保留项已按 [archive/backlog-sequence.md](../archive/backlog-sequence.md) 于
-2026-09-06 全部完成，两份文件随之归档，源码注释里的 `backlog §N` /
-`backlog-sequence ①…⑩` 指归档文件的对应章节）。本文**只列尚未做的事**：
+分期保留项已于 2026-09-06 全部完成，该文件随之归档，源码注释里的 `backlog §N` 指它的
+对应章节）。本文**只列尚未做的事**：
 外部依赖的收尾、代码已落地但本机无法验证的项、长期项与明确不做清单。做完一项就从本文删除，实现细节写进对应设计文档，不保留划线
 历史。每条标 **价值**（高/中/低）与 **难度**（低/中/高）。
 
@@ -11,17 +10,17 @@
 
 | 条目 | 出处 | 现状与剩余步骤 | 价值 | 难度 |
 | --- | --- | --- | --- | --- |
-| client-c 结构化错误码上游合入 | backlog-sequence ⑨，[duostore-meta-tikv-design.md](../architecture/storage/duostore-meta-tikv-design.md) | 本仓侧已完成（2026-09-06）：补丁在 `third_party/patches/client-c`（README 含 PR 描述与合入后步骤），sidecar 编译期按链接到的库选择按码 / 按消息串。剩余：开上游 PR → 合入后升子模块指针、删消息串分支与补丁目录 | 低 | 低 |
+| client-c 结构化错误码上游合入 | [duostore-meta-tikv-design.md](../architecture/storage/duostore-meta-tikv-design.md) | 本仓侧已完成（2026-09-06）：补丁在 `third_party/patches/client-c`（README 含 PR 描述与合入后步骤），sidecar 编译期按链接到的库选择按码 / 按消息串。剩余：开上游 PR → 合入后升子模块指针、删消息串分支与补丁目录 | 低 | 低 |
 
 ## 2. 待验证（代码已落地，本机环境验证不了）
 
 | 条目 | 出处 | 需要 |
 | --- | --- | --- |
-| Docker 镜像构建与 compose 各 profile（默认 / redis / tikv / rados / e2e；`multi` 见下一行） | roadmap §6.3，[deployment.md §4](../usage/deployment.md) | 有 docker daemon 的机器：`docker compose build`，`docker compose --profile e2e run --rm e2e`（把 redis / tikv / rados 三条 SKIP 的 e2e 路径真正跑一次） |
-| CPack RPM | roadmap §6.3，[deployment.md §3.2](../usage/deployment.md) | 有 `rpmbuild` 的机器：`cpack -G RPM`，`rpm -qp --scripts` 核对 scriptlet，安装/升级/卸载各走一遍 |
+| Docker 镜像构建与 compose 各 profile（默认 / redis / tikv / rados / e2e；`multi` 见下一行） | [deployment.md §4](../usage/deployment.md) | 有 docker daemon 的机器：`docker compose build`，`docker compose --profile e2e run --rm e2e`（把 redis / tikv / rados 三条 SKIP 的 e2e 路径真正跑一次） |
+| CPack RPM | [deployment.md §3.2](../usage/deployment.md) | 有 `rpmbuild` 的机器：`cpack -G RPM`，`rpm -qp --scripts` 核对 scriptlet，安装/升级/卸载各走一遍 |
 | `unit_tests` 偶发 `terminate called without an active exception` | 2026-09-05 本机 5 次全量运行中 2 次，均发生在 `timer_stats_track_fired_and_pending` 通过之后、`timer_slow_callback_counted` 的 1.1s 慢回调期间（日志先打 "callback took 1.100s"），gdb 下未复现；与业务改动无关。2026-09-12 在 `duostore_orphan_scan_defers_to_peer_write_lease` 期间的另一处已定位并修复（同日）：phase 2 的等待循环 `chunk_files_on_disk < 1` 被 phase 1 遗留的尾 chunk 立即满足，扫描抢在 A 的新 chunk 落盘之前跑完，`skipped_leased` 为 0 的 CHECK 抛出后 joinable `std::thread` 析构把失败变成 terminate；现在等待相对启动前的文件数，写线程由 RAII 守卫放闸并 join。进程 abort 后 gcov 计数不落盘，`make coverage` 会给出偏低的数字并在末尾 WARN | 仅剩 timer 一处待排查：负载下 TimerQueue 慢回调期间的析构次序；先用 `catch throw`/`ulimit -c` 抓栈 |
-| 多网关 multipart 容器 e2e | [archive/multi-gateway-multipart-design.md](../archive/multi-gateway-multipart-design.md) §4 ② | compose `multi` profile（两 lights3 + redis + rados + nginx 轮询）与 `docker/e2e-multi.sh` 已落地（2026-09-09，`docker compose --profile multi config` 通过）；有 docker 的机器：`cd docker && docker compose --profile multi run --rm e2e-multi`。单测与本机 e2e（`run_e2e.sh` duostore-redis 段）已通过 |
-| mint 兼容基线 | roadmap §6.1，[testing.md §6](testing.md) | 有 docker 的机器跑 `ctest -R mint -V`，把每套件 PASS/FAIL/NA 计数记入 testing.md §6 |
+| 多网关 multipart 容器 e2e | [deployment.md §4](../usage/deployment.md) | compose `multi` profile（两 lights3 + redis + rados + nginx 轮询）与 `docker/e2e-multi.sh` 已落地（2026-09-09，`docker compose --profile multi config` 通过）；有 docker 的机器：`cd docker && docker compose --profile multi run --rm e2e-multi`。单测与本机 e2e（`run_e2e.sh` duostore-redis 段）已通过 |
+| mint 兼容基线 | [testing.md §6](testing.md) | 有 docker 的机器跑 `ctest -R mint -V`，把每套件 PASS/FAIL/NA 计数记入 testing.md §6 |
 | S3 Tables 的 Spark / Trino 人工验证 | [s3-tables-design.md §13](../architecture/s3-tables-design.md) | 本机只有 PyIceberg / DuckDB 冒烟通过（testing.md §6），无 Spark / Trino：按 §13 模板配 `rest.sigv4-enabled` 走一遍建表 / append / `rewrite_data_files`（Spark）与 SIGV4 读写（Trino），结果记 testing.md §6；顺带把 Spark 写出的 manifest（负块计数）作为固件入 `tests/fixtures/tables/`（现有固件全部由 PyIceberg 生成） |
 
 ## 3. 长期 / 架构级（先想清目标场景再动）
@@ -51,8 +50,5 @@
 ## 5. 维护约定
 
 - 新条目须给出**出处 / 入口 / 价值 / 难度**；做完即删，实现写进对应设计文档。
-- 源码注释继续用 `roadmap §N`、`backlog §N`、`backlog-sequence ①…⑩` 引用归档文件的
-  论证；本文的条目以 `todo §N` 引用。
-- 历史底账：[archive/gaps.md](../archive/gaps.md)、[archive/issues.md](../archive/issues.md)、
-  [archive/roadmap.md](../archive/roadmap.md)、[archive/backlog.md](../archive/backlog.md)、
-  [archive/backlog-sequence.md](../archive/backlog-sequence.md)，只读。
+- 源码注释继续用 `backlog §N` 引用归档文件的论证；本文的条目以 `todo §N` 引用。
+- 历史底账：[archive/backlog.md](../archive/backlog.md)，只读。

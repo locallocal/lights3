@@ -1,4 +1,4 @@
-# Build context for docker/Dockerfile (roadmap §6.3; the context is the repository
+# Build context for docker/Dockerfile (the context is the repository
 # root, `docker build -f docker/Dockerfile .`): sources + submodule checkouts,
 # no build trees, no git history (the commit is passed as LIGHTS3_GIT_COMMIT).
 # Submodules must be checked out on the host first: ./build.sh does that, or

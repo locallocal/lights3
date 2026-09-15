@@ -1,4 +1,4 @@
-// roadmap §5.4: W3C Trace Context primitive — strict parse, fresh start, child spans
+// W3C Trace Context primitive — strict parse, fresh start, child spans
 #include "core/trace.h"
 #include "unit/mini_test.h"
 

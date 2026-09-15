@@ -1,6 +1,6 @@
 // lights3-ctl `mpu list|abort` — zombie multipart upload cleanup over the standard S3
 // API (ListMultipartUploads / AbortMultipartUpload), no admin endpoint involved,
-// so any credential allowed on the bucket works (roadmap §6.2, docs/usage/cli.md §3.11).
+// so any credential allowed on the bucket works (docs/usage/cli.md §3.11).
 // `list` walks every page (key-marker / upload-id-marker cursor) and prints one
 // line per upload with its age; `--older-than` filters by initiation time and
 // `abort --all` removes everything the same filter selects.
@@ -233,7 +233,7 @@ std::shared_ptr<ccmd::command> make_mpu() {
         "mpu", "lights3-ctl mpu list photos --older-than=1d", "lights3-ctl mpu <command> [options]",
         "Multipart upload housekeeping over the standard S3 API (ListMultipartUploads / "
         "AbortMultipartUpload): list in-progress uploads with their age, abort one or every "
-        "stale one (roadmap §6.2). Works with any credential allowed on the bucket. Options "
+        "stale one. Works with any credential allowed on the bucket. Options "
         "must follow the leaf subcommand as --name=value.",
         "list / abort multipart uploads.", [](const std::shared_ptr<ccmd::command>& c) {
             c->print_help();

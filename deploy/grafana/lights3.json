@@ -504,7 +504,7 @@
       "type": "timeseries",
       "id": 9,
       "title": "Exact status codes",
-      "description": "206/304 share is the website / CDN signal (roadmap \u00a75.3)",
+      "description": "206/304 share is the website / CDN signal",
       "gridPos": {
         "x": 12,
         "y": 13,
@@ -653,7 +653,7 @@
     {
       "type": "row",
       "id": 12,
-      "title": "APIs (api \u00d7 backend, roadmap \u00a75.1)",
+      "title": "APIs (api \u00d7 backend)",
       "collapsed": false,
       "gridPos": {
         "x": 0,
@@ -866,7 +866,7 @@
     {
       "type": "row",
       "id": 17,
-      "title": "HTTP layer (L1, roadmap \u00a74.2 / \u00a75.3)",
+      "title": "HTTP layer (L1)",
       "collapsed": false,
       "gridPos": {
         "x": 0,
@@ -1559,7 +1559,7 @@
     {
       "type": "row",
       "id": 30,
-      "title": "Storage backends (metering decorator, roadmap \u00a75.1)",
+      "title": "Storage backends (metering decorator)",
       "collapsed": false,
       "gridPos": {
         "x": 0,

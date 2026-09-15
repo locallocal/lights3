@@ -103,7 +103,7 @@ bool PinTable::pinned_key(bool is_pack, uint64_t id) {
     return (is_pack ? s.pack_refs : s.chunk_refs).count(id) != 0;
 }
 
-// ---------- in-flight operation registry (read / write leases, roadmap §3.7) ----------
+// ---------- in-flight operation registry (read / write leases) ----------
 
 uint64_t InFlightClock::begin() {
     const int64_t now = codec::to_unix_ms(std::chrono::system_clock::now());
@@ -137,7 +137,7 @@ Task<uint64_t> migrate_pack_records(IMetaStore& meta, IDataStore& data, PinTable
     // naturally after complete/abort, the latter is shelved permanently
     // (rewriting old records on disk is a non-goal)
 
-    // 1) Aggregate by owner (gaps §2.13): multiple records of one object in the
+    // 1) Aggregate by owner: multiple records of one object in the
     // same pack do a single get_object + a single ref swap, replacing the O(n²)
     // of rewriting the whole manifest per record
     struct Group {
@@ -149,7 +149,7 @@ Task<uint64_t> migrate_pack_records(IMetaStore& meta, IDataStore& data, PinTable
     // "b\0k" -> groups index
     std::map<std::string, size_t> by_owner;
     for (size_t i = 0; i < batch.size(); ++i) {
-        // Canonical parser (docs/archive/gaps.md §6.1: the three owner forms converge in
+        // Canonical parser (the three owner forms converge in
         // codec, offline forensics tools reuse the same entry point);
         // kLegacyPart/kUnknown have no b/k to look up, conservatively not migrated
         auto po = codec::parse_pack_owner(batch[i].owner);
@@ -315,7 +315,7 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name, const std::m
     else
         c.meta_path = c.root / "meta";
     if (auto* v = get("chunk_size")) c.chunk_size = parse_size(*v);
-    // io_uring fs data plane (roadmap §3.4 ⑤); range checks inline because the fields are
+    // io_uring fs data plane; range checks inline because the fields are
     // unsigned (a negative would wrap before the validation section below)
     if (auto* v = get("fs_uring")) c.fs_uring = parse_bool_param(name, "fs_uring", *v);
     if (auto* v = get("fs_uring_queue_depth")) {
@@ -343,7 +343,7 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name, const std::m
     if (auto* v = get("gc_interval")) c.gc_interval_sec = parse_duration_sec(*v);
     if (auto* v = get("gc_grace")) c.gc_grace_sec = parse_duration_sec(*v);
     if (auto* v = get("read_lease")) c.read_lease_sec = parse_duration_sec(*v);
-    // Object metadata cache (roadmap §3.8); the budget default depends on the engine
+    // Object metadata cache; the budget default depends on the engine
     // kind resolved below, so remember whether it was configured
     std::optional<size_t> meta_cache_entries;
     if (auto* v = get("meta_cache_entries")) meta_cache_entries = parse_size(*v);
@@ -606,7 +606,7 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name, const std::m
         throw std::runtime_error("duostore backend '" + name + "': rocksdb_max_write_buffers must be >= 1");
     if (c.rocksdb_max_background_jobs < 1)
         throw std::runtime_error("duostore backend '" + name + "': rocksdb_max_background_jobs must be >= 1");
-    // Object metadata cache (roadmap §3.8): a shared meta engine has writers this
+    // Object metadata cache: a shared meta engine has writers this
     // process never sees, so the cache is off there unless configured, and then only
     // with a TTL bounding the staleness window (kept below gc_grace: a stale manifest
     // must expire before the extents it names can be reclaimed by a peer's GC)
@@ -707,7 +707,7 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
         // op latency/error metrics (C4, docs/architecture/storage/duostore-data-rados-design.md §10)
         ro.metrics = metrics;
         // Write-side pins injected from the same source as the fs path
-        // (docs/archive/gaps.md §1.2): the rados branch used to miss this entirely, and
+        //: the rados branch used to miss this entirely, and
         // the orphan scan would delete the already-landed parts of an in-flight
         // large object
         auto rpins = pins_;
@@ -725,7 +725,7 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
         auto pins = pins_;
         FsDataOptions fopt{cfg_.root,          cfg_.chunk_size,   cfg_.verify_chunk_crc, cfg_.pack_threshold,
                            cfg_.pack_max_size, cfg_.pack_writers, cfg_.pack_max_age_sec, on_corruption};
-        // io_uring fs data plane (roadmap §3.4 ⑤): opt-in; unavailability (old kernel,
+        // io_uring fs data plane: opt-in; unavailability (old kernel,
         // seccomp, memlock quota) degrades to the synchronous path -- same layout, only
         // async IO is lost. Warn plus resident gauge, mirroring the xlocalfs fallback
         if (cfg_.fs_uring) {
@@ -779,7 +779,7 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
     warn_deployment();
 }
 
-// Misconfiguration guard (multi-gateway-multipart §4 ④): a WARN at startup, never
+// Misconfiguration guard: a WARN at startup, never
 // a refusal — the same combination is legitimate on a single gateway
 void DuoStoreBackend::warn_deployment() {
     if (auto w = cfg_.deployment_warning()) LOG_WARN("duostore backend '{}': {}", cfg_.name, *w);
@@ -822,7 +822,7 @@ void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
         "lights3_duostore_orphan_packstats_missing",
         "Pack accounts whose file is missing as of the last orphan scan (data loss signal)");
 
-    // Usage and space amplification (docs/archive/gaps.md §6.1): the ratio
+    // Usage and space amplification: the ratio
     // pack_bytes/pack_live_bytes is the amplification factor — left for the query
     // side to compute, the two gauges each stay independently readable (gauges are
     // integral; a precomputed ratio would lose precision)
@@ -876,10 +876,10 @@ void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
     m_cache_peer_invalidations_ = metrics.counter(
         "lights3_duostore_meta_cache_feed_invalidations_total",
         "Object records dropped from the meta cache on a peer gateway's commit message "
-        "(shared meta engine with an invalidation feed, backlog-sequence ⑤)");
+        "(shared meta engine with an invalidation feed)");
     m_cache_feed_resets_ = metrics.counter("lights3_duostore_meta_cache_feed_resets_total",
                                            "Meta cache cleared because the invalidation feed (re)connected");
-    // Object metadata cache (roadmap §3.8). The from_params contract is re-checked here
+    // Object metadata cache. The from_params contract is re-checked here
     // for directly constructed configs (tests, embedding): a TTL-less cache over a
     // shared engine would serve peers' overwrites indefinitely, so it is refused
     const bool shared_meta = cfg_.meta_kind == DuoMetaKind::kRedis || cfg_.meta_kind == DuoMetaKind::kTikv;
@@ -892,7 +892,7 @@ void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
         MetaCacheOptions{cfg_.meta_cache_entries, std::chrono::seconds(std::max(0, cfg_.meta_cache_ttl_sec))}, metrics);
 }
 
-// Shared meta engines (backlog-sequence ⑤): when the engine can push peers' commits,
+// Shared meta engines: when the engine can push peers' commits,
 // subscribe the cache to it -- a peer's overwrite/delete then drops the local record
 // within a message's latency instead of at meta_cache_ttl. The TTL stays as the
 // bound for lost messages (pub/sub is fire-and-forget); a feed (re)connect clears the
@@ -930,7 +930,7 @@ void DuoStoreBackend::wire_cache_invalidation() {
 // file_size is backfilled as 0 (unknown; the compaction scan can stat again), and
 // the seal_pack contract guarantees 0 never overwrites a known value
 void DuoStoreBackend::abandon_stale_packs() {
-    // Only catch-up seal packs that "truly nobody is writing" (docs/archive/gaps.md §1.4):
+    // Only catch-up seal packs that "truly nobody is writing":
     // with multiple gateways sharing the same meta + the same data root (a
     // redis/tikv meta misconfiguration, or old/new processes overlapping during a
     // rolling restart), unconditional sealing would mark an active pack **another
@@ -970,7 +970,7 @@ void DuoStoreBackend::abandon_stale_packs() {
     }
 }
 
-// ---------- corrupt-pack quarantine (roadmap §3.7) ----------
+// ---------- corrupt-pack quarantine ----------
 
 std::filesystem::path DuoStoreBackend::quarantine_dir() const { return cfg_.root / "quarantine"; }
 
@@ -1182,7 +1182,7 @@ public:
           ticket_(ticket) {}
     ~PinnedReader() override {
         pins_->unpin(ids_);
-        // the read-lease registration ends with the read (roadmap §3.7)
+        // the read-lease registration ends with the read
         clock_->end(ticket_);
     }
 
@@ -1197,7 +1197,7 @@ private:
     uint64_t ticket_;
 };
 
-// Write-lease registration (multi-gateway-multipart §4 ①): held across the
+// Write-lease registration: held across the
 // whole "pump → commit / discard" span of a PUT / upload_part / tier cache fill,
 // so the published "oldest in-flight write" precedes the mtime of every chunk
 // this write has landed but not yet referenced. Peers' orphan scans skip chunks
@@ -1290,13 +1290,13 @@ Task<PutResult> DuoStoreBackend::put_object(std::string_view bucket, std::string
     // check completes inside the meta transaction's atomic region; a throw on
     // failure takes the discard path to reclaim already-landed data extents.
     // The cached record is dropped on the way out whatever the outcome (an
-    // UndeterminedCommit may have taken effect, roadmap §3.8)
+    // UndeterminedCommit may have taken effect)
     auto inv = meta_cache_->invalidate_on_exit(bucket, key);
     co_await commit_or_discard(*data_, pumped.ref, [&] { meta_->put_object(bucket, key, std::move(rec), cond); });
     co_return PutResult{pumped.md5};
 }
 
-// ---------- tiered local-side hooks (roadmap §3.6 ⑥) ----------
+// ---------- tiered local-side hooks ----------
 
 std::optional<ObjectRec> DuoStoreBackend::tier_read(std::string_view bucket, std::string_view key) {
     try {
@@ -1362,11 +1362,11 @@ Task<ObjectStream> DuoStoreBackend::get_object(std::string_view bucket, std::str
                                                std::optional<ByteRange> range) {
     validate_object_key(key);
     co_await pool_->schedule();
-    // Register with the read clock BEFORE fetching the manifest (roadmap §3.7):
+    // Register with the read clock BEFORE fetching the manifest:
     // the published "oldest in-flight read" must cover the meta read itself, or
     // a peer's GC could reclaim between our meta fetch and the registration
     TicketGuard ticket{read_clock_, read_clock_->begin()};
-    // Cache first (roadmap §3.8): a full entry skips the meta engine; a meta-only
+    // Cache first: a full entry skips the meta engine; a meta-only
     // entry (left by a HEAD) or a miss goes to the engine and fills/upgrades it. The
     // token predates the meta read so a racing write cannot leave a stale record
     ObjectRec rec;
@@ -1382,7 +1382,7 @@ Task<ObjectStream> DuoStoreBackend::get_object(std::string_view bucket, std::str
             meta_cache_->insert(tok, bucket, key, std::move(e));
         }
     }
-    // A tiered stub (roadmap §3.6 ⑥): the data lives in the cloud and TieredBackend
+    // A tiered stub: the data lives in the cloud and TieredBackend
     // routes there before asking us; reachable only by direct routing to the local
     // backend or a demotion race — same signal localfs raises for its 0-length stub
     if (rec.tier.tier == TierState::kRemote) throw fsutil::StubRace(std::string(key));
@@ -1468,10 +1468,10 @@ Task<std::optional<ObjectLayout>> DuoStoreBackend::inspect_object(std::string_vi
 Task<ObjectMeta> DuoStoreBackend::head_object(std::string_view bucket, std::string_view key) {
     validate_object_key(key);
     co_await pool_->schedule();
-    // Cache first (roadmap §3.8): either entry kind answers a HEAD
+    // Cache first: either entry kind answers a HEAD
     ObjectRecCache::Token tok;
     if (auto c = meta_cache_->lookup(bucket, key, &tok)) co_return c->rec.meta;
-    // meta-only read (docs/archive/gaps.md §3.9): HEAD does not pay for the whole manifest
+    // meta-only read: HEAD does not pay for the whole manifest
     auto meta = meta_->head_object(bucket, key);
     if (!meta) {
         // distinguish NoSuchBucket / NoSuchKey
@@ -1559,7 +1559,7 @@ Task<PutResult> DuoStoreBackend::complete_multipart(std::string_view bucket, std
     // Pure metadata transaction, zero data movement: O(#parts) vs localfs concatenation's O(total bytes) (§8)
     auto inv = meta_cache_->invalidate_on_exit(bucket, key);
     PutResult r{meta_->complete_upload(bucket, key, upload_id, parts)};
-    // Composite checksum echo (roadmap §2.2): assemble persisted it with the object;
+    // Composite checksum echo: assemble persisted it with the object;
     // one meta read fetches it back for the response
     if (auto m = meta_->head_object(bucket, key); m && !m->checksum_value.empty()) {
         r.checksum_algorithm = m->checksum_algorithm;
@@ -1607,7 +1607,7 @@ namespace {
 // per-round peek batch; advance after ack between batches, preventing one batch of a
 // large backlog from blowing memory
 constexpr size_t kGcBatch = 256;
-// Cumulative per-batch extent cap (gaps §2.11): count-based batching under a
+// Cumulative per-batch extent cap: count-based batching under a
 // "deleted TB-scale objects" ledger can reach GB-scale residency per batch — the
 // enqueue side already splits by kReclaimMaxExtents; this covers legacy entries
 // from before the split
@@ -1635,7 +1635,7 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
         LOG_INFO("duostore '{}': GC lease held by another instance, skipping round", cfg_.name);
         co_return st;
     }
-    // Multi-gateway read-lease floor (roadmap §3.7): only reclaim what no peer's
+    // Multi-gateway read-lease floor: only reclaim what no peer's
     // in-flight read can reference — a reader holding a ref to reclaimed extents
     // must have fetched the manifest before the deref enqueued them, so an entry
     // enqueued before every in-flight read started is provably unreachable.
@@ -1700,7 +1700,7 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
     // idempotent. Resume by next_seq: queue-head entries skipped for grace/pin are
     // not rescanned (no stuck rounds, no double counting, no second decode);
     // reaching the queue tail ends the round.
-    // Cross-round watermark (gaps §2.13): in rounds where none of the previous
+    // Cross-round watermark: in rounds where none of the previous
     // round's skips have reached their retry time, scan from the previous high
     // watermark — queue-head grace backlog no longer gets re-peeked+decoded every round
     const int64_t grace_ms = int64_t(cfg_.gc_grace_sec) * 1000;
@@ -1739,7 +1739,7 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
                 continue;
             }
             // A peer gateway's in-flight read started before this entry was
-            // enqueued could still hold the old ref (roadmap §3.7)
+            // enqueued could still hold the old ref
             if (lease_floor && rc.enqueue_ms >= *lease_floor) {
                 ++st.skipped_leased;
                 // when the peer read finishes is unknowable
@@ -1828,7 +1828,7 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
     const int64_t compact_now = codec::to_unix_ms(std::chrono::system_clock::now());
     for (auto ps : meta_->pack_stats()) {
         if (!ps.sealed || ps.live_recs <= 0) continue;
-        // Backfill the denominator of crash-leftover seal(0) first (gaps §2.3b):
+        // Backfill the denominator of crash-leftover seal(0) first:
         // one stat suffices, so every ungraceful exit does not unconditionally
         // push all active packs into full sequential-scan rewrites
         if (ps.file_size == 0) {
@@ -1839,8 +1839,8 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
         }
         int64_t reclaimable = 0;
         if (ps.file_size > 0) {
-            // live includes record headers, same basis as file_size (gaps §2.3a —
-            // counting only payload, a pack of small objects stays below the
+            // live includes record headers, same basis as file_size (counting only payload, a pack of small objects
+            // stays below the
             // threshold even at 100% liveness and compaction never converges).
             // Skip when there are no reclaimable bytes (live ≥ file_size,
             // including the slight-undercount tolerance direction) or liveness is
@@ -1848,7 +1848,7 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
             reclaimable = int64_t(ps.file_size) - ps.live_bytes;
             if (reclaimable <= 0 || double(ps.live_bytes) > cfg_.pack_gc_ratio * double(ps.file_size)) continue;
         }
-        // Quarantined packs are parked (roadmap §3.7): no cooldown rescans until
+        // Quarantined packs are parked: no cooldown rescans until
         // the operator releases them or the live account moves (real progress —
         // deletes/mpu resolution killed records; purged entries stay parked, the
         // file is gone). live==0 needs no exception here: step 4's whole
@@ -1883,7 +1883,7 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
     });
 
     std::vector<uint64_t> rewritten;
-    // Per-pack scan outcome for the quarantine strike accounting below (roadmap §3.7)
+    // Per-pack scan outcome for the quarantine strike accounting below
     // migrated, corrupt
     std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> rw_by_pack;
     uint64_t scanned_bytes = 0;
@@ -1922,7 +1922,7 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
     // stay readable until the emptied pack is unlinked in a later round (beyond
     // gc_grace), but must not outlive it. Compaction is rare and batched, so dropping
     // the whole cache is cheaper than plumbing per-object callbacks through the
-    // migration hook (roadmap §3.8)
+    // migration hook
     if (st.records_migrated > 0) meta_cache_->clear();
 
     // 4) Whole empty-pack deletion (§9.1/§9.2 step 4): sealed with live_recs==0,
@@ -1942,7 +1942,7 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
             }
             auto [it, first_seen] = pack_empty_since_.try_emplace(ps.pack_id, pack_now);
             (void)first_seen;
-            // Lease gate (roadmap §3.7): a peer's read that started before the
+            // Lease gate: a peer's read that started before the
             // pack was first seen empty may hold a pre-swap manifest still
             // pointing into it; one that started after cannot (it read the
             // post-swap manifests)
@@ -1975,7 +1975,7 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
                     break;
                 }
             if (live > 0) {
-                // Quarantine strikes (roadmap §3.7): corrupt records with zero
+                // Quarantine strikes: corrupt records with zero
                 // migration progress and an unmoved account, kQuarantineStrikes
                 // scans in a row, prove the cooldown loop cannot converge —
                 // park the pack instead of rescanning it forever
@@ -2080,7 +2080,7 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
     // this scan treats the current data engine's enumeration as the on-disk
     // truth — a deployment that switches data engines under the same meta is
     // outside the orphan scan's supported scope.
-    // Memory footprint (docs/archive/gaps.md §3.9): previously the refs/on_disk hash
+    // Memory footprint: previously the refs/on_disk hash
     // sets plus a full disk vector were resident simultaneously (100M chunks
     // ≈ 4–5GB); replaced by a sorted refs vector (8B/entry) + streaming on-disk
     // classification + a hit bitmap (1 bit/entry), cutting the peak by an order
@@ -2092,14 +2092,11 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
     // reverse reconciliation: on-disk hit marks
     std::vector<bool> ref_seen(refs.size(), false);
 
-    // Chunks with a pending gcq entry are left to the gcq consumer (roadmap
-    // §3.7): every once-referenced chunk enters the gcq atomically with its
-    // deref, and the gcq path is the one gated by the peer read lease —
-    // unlinking such a chunk here would bypass that gate for a remote in-flight
-    // reader. What stays eligible below was never referenced (crash leftovers),
-    // which no reader can hold. Stable under gc_sem_ (no concurrent local
-    // consumption; new business enqueues only add entries for chunks whose refs
-    // still existed at the snapshot above)
+    // Chunks with a pending gcq entry are left to the gcq consumer: every once-referenced chunk enters the gcq
+    // atomically with its deref, and the gcq path is the one gated by the peer read lease — unlinking such a chunk here
+    // would bypass that gate for a remote in-flight reader. What stays eligible below was never referenced (crash
+    // leftovers), which no reader can hold. Stable under gc_sem_ (no concurrent local consumption; new business
+    // enqueues only add entries for chunks whose refs still existed at the snapshot above)
     std::unordered_set<uint64_t> gcq_pending;
     for (uint64_t seq = 0;;) {
         auto batch = meta_->peek_reclaims(kGcBatch, seq, kGcBatchExtents);
@@ -2120,7 +2117,7 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
     // snapshot is necessarily stale)
     const int64_t grace_ms = int64_t(cfg_.gc_grace_sec) * 1000;
     const int64_t now = codec::to_unix_ms(std::chrono::system_clock::now());
-    // Peer write lease (multi-gateway-multipart §4 ①): the in-process write pin
+    // Peer write lease: the in-process write pin
     // above is invisible to other gateways, so on a shared data plane a peer's
     // in-flight PUT / part older than gc_grace would look like crash residue.
     // Every gateway publishes its oldest in-flight write start; a chunk whose
@@ -2200,7 +2197,7 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
             cfg_.name, refs[i]);
     }
 
-    // packs/ two-way reconciliation (docs/archive/gaps.md §6.1): the chunk-side orphan
+    // packs/ two-way reconciliation: the chunk-side orphan
     // scan previously did not cover pack entities, yet a pack file is "create
     // the file first, write the packstat row only when the first record
     // commits" — a hard crash exactly in that window leaves the file on disk
@@ -2486,7 +2483,7 @@ Task<duostore::MetaDumpStats> DuoStoreBackend::run_meta_dump(std::ostream& out) 
     if (!scope.ok()) throw S3Error(S3ErrorCode::InternalError, "duostore meta dump: backend closing");
     // no GC unlinks while the dump references extents
     auto permit = co_await gc_sem_.acquire();
-    // Online dump (roadmap §3.7): engines with MVCC/read transactions hand out a
+    // Online dump: engines with MVCC/read transactions hand out a
     // consistent point-in-time view and business writes may continue; redis
     // cannot and keeps the historical writes-stopped contract
     auto view = meta_->snapshot();
@@ -2521,7 +2518,7 @@ std::optional<std::string> DuoStoreConfig::deployment_warning() const {
            " with data=fs: shared meta over local fs data is single-gateway only — chunks "
            "and packs live on this gateway's disk, objects written by other gateways are "
            "unreadable here and GC cannot account for theirs; for multiple gateways use "
-           "data=rados (docs/archive/multi-gateway-multipart-design.md §2)";
+           "data=rados";
 }
 
 Task<duostore::MetaBackupEntry> DuoStoreBackend::run_meta_backup(const std::filesystem::path& dir, bool incremental) {
@@ -2594,7 +2591,7 @@ Task<duostore::MetaDumpStats> DuoStoreBackend::run_meta_load(std::istream& in) {
         if (!scope.ok()) throw S3Error(S3ErrorCode::InternalError, "duostore meta load: backend closing");
         auto permit = co_await gc_sem_.acquire();
         st = duostore::load_meta(*meta_, in);
-        // the restored records replace whatever was cached (roadmap §3.8)
+        // the restored records replace whatever was cached
         meta_cache_->clear();
     }  // semaphore released at block exit — the orphan scan below must re-acquire the same one
     // Tail end of the restore-and-solidify flow (operational contract in
@@ -2675,12 +2672,12 @@ Task<bool> DuoStoreBackend::publish_lease_once() {
     // A cached manifest may be up to meta_cache_ttl old when a read starts, so
     // the read floor is backdated by that much: a peer's GC then only reclaims
     // extents whose deref predates every manifest this gateway can still be
-    // holding (roadmap §3.8; the TTL is bounded below gc_grace by config validation)
+    // holding (the TTL is bounded below gc_grace by config validation)
     info.oldest_read_ms = read_clock_->oldest_or(now);
     if (meta_cache_->enabled() && cfg_.meta_cache_ttl_sec > 0)
         info.oldest_read_ms -= int64_t(cfg_.meta_cache_ttl_sec) * 1000;
     // Write floor: no backdating — the ticket is taken before the first chunk
-    // can land (multi-gateway-multipart §4 ①)
+    // can land
     info.oldest_write_ms = write_clock_->oldest_or(now);
     co_return meta_->publish_lease(gc_owner_, info, ttl_ms);
 }

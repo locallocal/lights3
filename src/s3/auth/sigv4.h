@@ -23,21 +23,21 @@ namespace lights3::s3 {
 // Credential lookup interface (docs/architecture/s3-protocol.md §3.5, docs/architecture/credential-management.md §5.2):
 // called synchronously on the verification hot path; implementations must be thread-safe. build() wraps a static-table
 // implementation by default; CredentialStore implements this interface and is injected via set_provider. A single
-// lookup returns both the SK and a policy snapshot (docs/archive/gaps.md §3.7): querying the store again for the policy
+// lookup returns both the SK and a policy snapshot: querying the store again for the policy
 // after verify risks the credential having been deleted by sync/remove -- a miss then is not "unrestricted" but a race
 // window
 struct CredentialLookup {
-    // wiped on destruction (docs/archive/gaps.md §4)
+    // wiped on destruction
     util::SecretString secret_key;
     // snapshot at lookup time; nullopt = unrestricted
     std::optional<CredentialPolicy> policy;
-    // STS session credentials (roadmap §2.6): set for session AKs. verify() then
+    // STS session credentials: set for session AKs. verify() then
     // requires a matching X-Amz-Security-Token (mismatch -> InvalidToken) and refuses
     // past-expiry requests (ExpiredToken). Returned by the same single lookup so the
     // §3.7 snapshot invariant holds for sessions too
     std::optional<std::string> session_token{};
     std::optional<std::chrono::system_clock::time_point> session_expires{};
-    // Multi-tenancy (roadmap §3.9 ③): the tenant the credential belongs to (empty =
+    // Multi-tenancy: the tenant the credential belongs to (empty =
     // legacy/root credential, sees every bucket) and whether it administers that
     // tenant. Snapshotted with the policy for the same §3.7 reason
     std::string tenant{};
@@ -60,7 +60,7 @@ struct ICredentialProvider {
 // Result of verify: the requester's identity + the policy snapshot from the moment of verification. Authorization
 // decisions must use this snapshot rather than a second store lookup -- under an in-flight revocation race, a
 // missed second lookup would make the policy vanish entirely
-// (a readonly credential becomes unrestricted within the window, docs/archive/gaps.md §3.7)
+// (a readonly credential becomes unrestricted within the window)
 struct VerifiedIdentity {
     // empty when auth is disabled (for access logs)
     std::string access_key;
@@ -76,7 +76,7 @@ public:
     // The access key a request claims (Authorization header or presigned query),
     // without verifying anything; nullopt when neither carries a parsable Credential.
     // Lets dispatch load a session minted on another instance before verify's
-    // synchronous lookup (backlog-sequence ④)
+    // synchronous lookup
     static std::optional<std::string> peek_access_key(const http::HttpRequest& req);
 
     static SigV4Authenticator build(const AuthConfig& cfg);
@@ -129,7 +129,7 @@ public:
     VerifiedIdentity verify_any(http::HttpRequest& req, std::span<const std::string_view> services) const {
         return verify_impl(req, services, nullptr);
     }
-    // STS AssumeRole endpoint (roadmap §2.6): scope service "sts", payload hash computed
+    // STS AssumeRole endpoint: scope service "sts", payload hash computed
     // by the caller from the already-read form body (generic SigV4 carries the hash only
     // inside the canonical request, not as an x-amz-content-sha256 header)
     VerifiedIdentity verify_sts(http::HttpRequest& req, const std::string& payload_hash) const {

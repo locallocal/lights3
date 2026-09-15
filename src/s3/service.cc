@@ -71,7 +71,7 @@ S3Error public_error(const S3Error& e, const std::string& request_id, const http
     if (e.code == S3ErrorCode::SlowDown) {
         LOG_WARN("req {} {} {} slow down: {}", request_id, req.method, req.path, e.message);
         // Fixed wording, but the throttling headers (Retry-After from the rate
-        // limiter, roadmap §4.2) must survive the scrub
+        // limiter) must survive the scrub
         S3Error scrubbed(e.code, "Please reduce your request rate.");
         scrubbed.headers = e.headers;
         return scrubbed;
@@ -99,7 +99,7 @@ struct MetricsEndGuard {
     }
 };
 
-// Access log record (roadmap §5.2, docs/architecture/s3-protocol.md §7). Filled at dispatch end;
+// Access log record (docs/architecture/s3-protocol.md §7). Filled at dispatch end;
 // emitted right away for buffered responses, and at end of body for streaming ones
 // (the driver pulls the body after dispatch returns, so total time and the bytes
 // actually sent are only known then). Self-contained: emission may run on a driver
@@ -107,7 +107,6 @@ struct MetricsEndGuard {
 struct AccessRecord {
     std::chrono::steady_clock::time_point start;
     std::string request_id, remote, access_key, method, path, query, bucket, key, user_agent, api, backend;
-    // roadmap §5.4
     std::string trace_id, span_id, parent_span_id;
     int status = 0;
     double auth_ms = 0, handler_ms = 0, backend_ms = 0, ttfb_ms = 0;
@@ -200,10 +199,10 @@ void emit_access(const AccessRecord& r, uint64_t bytes, bool truncated) {
     log.log(level, "{}", line);
 }
 
-// Byte-counting decorators (docs/archive/gaps.md §7): inbound wraps outside the checksum/de-framing decorators
+// Byte-counting decorators: inbound wraps outside the checksum/de-framing decorators
 // (counting the payload bytes the handler actually consumes); outbound wraps outside stream_body (counting the
 // bytes the driver actually pulls -- streaming responses are written after dispatch returns, and only a decorator can
-// see them). The outbound side also carries the access record (roadmap §5.2): emitted at EOF, or from the destructor
+// see them). The outbound side also carries the access record: emitted at EOF, or from the destructor
 // when the driver stopped pulling early (client gone, backend read failure, HEAD) -- then flagged truncated
 // whenever fewer bytes than announced went out
 class CountingBodyReader final : public http::BodyReader {
@@ -229,7 +228,7 @@ public:
         co_return n;
     }
     std::optional<uint64_t> length() const override { return inner_->length(); }
-    // sendfile pass-through (roadmap §4.3 ④): the bytes still flow through the
+    // sendfile pass-through: the bytes still flow through the
     // accounting, reported by the driver instead of observed in read()
     std::optional<http::FileSpan> try_as_file() override { return inner_->try_as_file(); }
     void file_bytes_sent(uint64_t n) override {
@@ -240,7 +239,7 @@ public:
 
 private:
     // Global totals per chunk (atomics); the per-bucket slot in batches
-    // (roadmap §4.3 ⑦: one mutex round per stream or per 16MiB, not per 64KiB)
+    // (one mutex round per stream or per 16MiB, not per 64KiB)
     void account(uint64_t n) {
         if (n == 0) return;
         if (inbound_)
@@ -316,7 +315,7 @@ void reject_unsupported_subresource(const http::HttpRequest& req) {
                           "The requested sub-resource '" + std::string(sub) + "' is not implemented.");
 }
 
-// Explicitly unsupported **request headers** (docs/archive/gaps.md §3.4): SSE/SSE-C, tagging, object-lock, and
+// Explicitly unsupported **request headers**: SSE/SSE-C, tagging, object-lock, and
 // ACL-grant classes used to be silently swallowed -- 200 with the semantics unfulfilled; in compliance scenarios
 // clients would conclude the object is encrypted/locked. A hit is 501; x-amz-acl alone admits private (this
 // implementation's actual semantics)
@@ -331,8 +330,8 @@ void reject_unsupported_headers(const http::HttpRequest& req) {
         // the five ACL grant headers, same class as x-amz-acl
         "x-amz-grant-",
     };
-    // x-amz-website-redirect-location left this list with docs/usage/static-website.md §5.1,
-    // x-amz-tagging with roadmap §2.5: both are first-class metadata fields now
+    // x-amz-website-redirect-location left this list with docs/usage/static-website.md §5.1;
+    // both it and x-amz-tagging are first-class metadata fields now
     for (auto& [k, v] : req.headers.items()) {
         std::string lk;
         lk.reserve(k.size());
@@ -347,7 +346,7 @@ void reject_unsupported_headers(const http::HttpRequest& req) {
             continue;
         }
         if (lk == "x-amz-storage-class") {
-            // Likewise (docs/archive/gaps.md §5.2): STANDARD is the only storage class; accepting GLACIER and echoing
+            // Likewise: STANDARD is the only storage class; accepting GLACIER and echoing
             // it back would lie on behalf of the storage layer -- the object never entered any archive tier
             if (!http::HeaderMap::ieq(v, "STANDARD")) refuse();
             continue;
@@ -357,9 +356,9 @@ void reject_unsupported_headers(const http::HttpRequest& req) {
     }
 }
 
-// Query allowlist (docs/archive/gaps.md §3.5): keys permitted on all routes -- the presigned signature parameter
+// Query allowlist: keys permitted on all routes -- the presigned signature parameter
 // family + SDK tracing parameters. Keys are case-sensitive (consistent with the SigV4 canonical query).
-// X-Amz-Security-Token joined the list with real STS support (roadmap §2.6): presigned
+// X-Amz-Security-Token joined the list with real STS support: presigned
 // URLs minted from session credentials carry it, and verify validates it
 constexpr std::string_view kCommonQueryKeys[] = {
     "X-Amz-Algorithm",
@@ -472,7 +471,7 @@ std::string html_escape(const std::string& s) {
 }
 }  // namespace
 
-// ---- Website redirects (roadmap §2.3: RedirectAllRequestsTo / RoutingRules / slash) ----
+// ---- Website redirects (RedirectAllRequestsTo / RoutingRules / slash) ----
 
 namespace {
 
@@ -629,7 +628,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     auto start = std::chrono::steady_clock::now();
     metrics_.request_start();
     MetricsEndGuard mguard{metrics_, req.method, start};
-    // Stage marks for the access/slow-request line (roadmap §5.2): auth = up to the
+    // Stage marks for the access/slow-request line: auth = up to the
     // verified identity, handler = the route() call (backend time is a subset of it,
     // accumulated separately). Requests short-circuited before either stage keep 0
     std::chrono::steady_clock::time_point auth_done = start;
@@ -652,7 +651,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     bool vhost = false;
     // actor's tenant for the audit record (empty = none)
     std::string tenant_for_log;
-    // API x backend dimension (roadmap §5.1): the route name becomes the api label,
+    // API x backend dimension: the route name becomes the api label,
     // the routed backend the backend label; the accumulator travels on the
     // request's cancellation token and collects the backend share of the latency
     std::string_view api_name;
@@ -660,9 +659,9 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     std::string tables_api;
     std::string backend_name;
     auto backend_stats = std::make_shared<storage::RequestBackendStats>();
-    // outbound hops forward it as traceparent (roadmap §5.4)
+    // outbound hops forward it as traceparent
     backend_stats->trace = ctx.trace;
-    // Rate-limit slots (roadmap §4.2) held for the whole dispatch; released on return
+    // Rate-limit slots held for the whole dispatch; released on return
     // The limiter instances are pinned here so a hot-reload swap cannot destroy
     // one while this request still holds a slot in it (declared before the slots:
     // the slots release first at scope exit)
@@ -675,14 +674,14 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             .with_header("Retry-After", "1");
     };
     try {
-        // Resolve addressing before steering to internal endpoints (docs/archive/gaps.md §3.8): under vhost, req.path
+        // Resolve addressing before steering to internal endpoints: under vhost, req.path
         // is the key, and "/-/metrics" may be a legitimate object in mybucket -- exact path comparison would turn a GET
         // into anonymous metrics and a PUT into "200 but the object was never written" silent data loss. Only the /-/
         // prefix under path addressing (non-vhost) enters the internal branch
         auto addr = resolve_address(req);
         vhost = addr.vhost;
         bool internal = !addr.vhost && req.path.rfind("/-/", 0) == 0;
-        // Listener split (http.admin_port, backlog-sequence ②): the liveness/readiness
+        // Listener split (http.admin_port): the liveness/readiness
         // probes are the only /-/ paths both listeners serve; everything else under
         // /-/ belongs to the admin listener and the data plane belongs to the other.
         // A plain 404 (no hint beyond the message) on the wrong listener: the split
@@ -716,7 +715,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             resp.headers.set("Content-Type", "text/plain");
         } else if (internal && internal_get("/-/metrics")) {
             api_name = "metrics";
-            // Root gate (roadmap §5.3): the same credential class as the admin plane
+            // Root gate: the same credential class as the admin plane
             if (metrics_root_.load(std::memory_order_relaxed) && auth_.enabled()) {
                 auto ident = verify_identity(req);
                 access_key = ident.access_key;
@@ -739,7 +738,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             api_name = "AdminCredentials";
             resp = co_await admin_credentials(req, access_key);
         } else if (internal && req.path == "/-/admin/config/reload") {
-            // Config hot reload (roadmap §4.4, docs/usage/config-reload.md)
+            // Config hot reload (docs/usage/config-reload.md)
             api_name = "AdminConfigReload";
             resp = co_await admin_config_reload(req, access_key, ctx);
         } else if (internal &&
@@ -750,11 +749,11 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             resp = co_await admin_tenancy(req, access_key, ctx);
         } else if (internal &&
                    (req.path == "/-/admin/tls-identities" || req.path.rfind("/-/admin/tls-identities/", 0) == 0)) {
-            // mTLS certificate -> credential bindings (backlog-sequence ⑥, root only)
+            // mTLS certificate -> credential bindings (root only)
             api_name = "AdminTlsIdentities";
             resp = co_await admin_tls_identities(req, access_key, ctx);
         } else if (internal && req.path.rfind("/-/admin/fsck/", 0) == 0) {
-            // Offline scrub on a live gateway (backlog-sequence ③, `lights3-ctl fsck --offline`)
+            // Offline scrub on a live gateway (`lights3-ctl fsck --offline`)
             api_name = "AdminFsck";
             resp = co_await admin_fsck(req, access_key, ctx);
         } else if (internal &&
@@ -771,7 +770,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             resp = co_await admin_tables_jobs(req, access_key, ctx);
 #endif
         } else if (internal && req.path.rfind("/-/admin/objects/", 0) == 0) {
-            // Object layout introspection (roadmap §6.2, `lights3-ctl object inspect`)
+            // Object layout introspection (`lights3-ctl object inspect`)
             api_name = "AdminObjectInspect";
             resp = co_await admin_object_inspect(req, access_key, ctx);
 #ifdef LIGHTS3_TABLES
@@ -832,7 +831,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             auth_done = std::chrono::steady_clock::now();
 #endif
         } else if (!addr.vhost && req.path == "/" && req.method == "POST") {
-            // STS AssumeRole (roadmap §2.6): SDKs pointed at this gateway as their STS
+            // STS AssumeRole: SDKs pointed at this gateway as their STS
             // endpoint POST a form body to the service root. Path-style only — under
             // vhost addressing "/" is a bucket root and stays on the S3 plane. The
             // handler does its own verification (service scope "sts") and renders
@@ -840,7 +839,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             api_name = "AssumeRole";
             resp = co_await sts_endpoint(req, ctx, access_key);
         } else if (req.method == "OPTIONS") {
-            // CORS preflight (roadmap §2.1): decided before signature verification —
+            // CORS preflight: decided before signature verification —
             // browsers attach no signature material to preflights; the preflighted
             // request itself is verified as usual when it arrives. The handler answers
             // purely from the rule table (no object access), so nothing is disclosed
@@ -857,14 +856,14 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // everything anyway and the anonymous branch changes nothing (the synthesized
             // read-only policy would only be stricter than "unrestricted")
             if (website_store_) web_snap = website_store_->snapshot();
-            // A bound client certificate (backlog-sequence ⑥) is an identity, not an
+            // A bound client certificate is an identity, not an
             // anonymous reader: it takes the verified path below
             bool anon = auth_.enabled() && !tls_identity_bound(req) && anonymous_website_read(req, addr, web_snap);
-            // Authorization uses the verify-time policy snapshot (docs/archive/gaps.md §3.7): with a second store
+            // Authorization uses the verify-time policy snapshot: with a second store
             // lookup after verification, the policy would vanish entirely in the race window where sync/remove deletes
             // the credential -- a readonly credential becomes unrestricted within the window. The snapshot makes
             // in-flight requests complete strictly with verify-time semantics
-            // STS sessions minted on another instance (backlog-sequence ④): verify's
+            // STS sessions minted on another instance: verify's
             // lookup is synchronous, so a session AK unknown to this instance is read
             // back from .sys before it (no-op for permanent AKs and known sessions)
             if (!anon && cred_store_)
@@ -879,19 +878,19 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                 ak_slot = ak_lim->admit(access_key);
                 if (!ak_slot) throttle(true);
             }
-            // Content-MD5 / x-amz-checksum-* (docs/archive/gaps.md §5.6): installed after verify, hence wrapping
+            // Content-MD5 / x-amz-checksum-*: installed after verify, hence wrapping
             // outside the sha256/aws-chunked decorators -- digests are computed over the de-framed plaintext, the same
             // bytes the client computed over. Independent of the signature; also effective with auth disabled
             install_checksum_guard(req);
             bucket = std::move(addr.bucket);
             key = std::move(addr.key);
-            // Inbound byte counting (docs/archive/gaps.md §7): bucket already resolved, decorated at the outermost
+            // Inbound byte counting: bucket already resolved, decorated at the outermost
             // layer
             if (req.body)
                 req.body = std::make_unique<CountingBodyReader>(std::move(req.body), &metrics_, bucket,
                                                                 /*inbound=*/true);
-            // User-requested bucket names pass full validation here, the **single** authoritative gate
-            // (docs/archive/gaps.md §1.1). Previously only the first character was checked for '.', while under vhost
+            // User-requested bucket names pass full validation here, the **single** authoritative gate.
+            // Previously only the first character was checked for '.', while under vhost
             // addressing the bucket comes entirely from the Host header and may contain '/' or even start with
             // '/', which combined with localfs's root_/bucket/key concatenation (fs::path replaces the whole path
             // on an absolute component) means arbitrary file reads; on the path-style side, %00 could turn the
@@ -910,12 +909,12 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                 backend_name = bucket.empty() ? std::string() : router_.backend_name(bucket);
             }
             // Set when the anonymous plane answered with a redirect before any object
-            // access (RedirectAllRequestsTo / prefix RoutingRules, roadmap §2.3):
+            // access (RedirectAllRequestsTo / prefix RoutingRules):
             // routing and policy are skipped entirely
             std::optional<http::HttpResponse> early;
             if (anon) {
                 const WebsiteBucket* site = WebsiteStore::find(web_snap, bucket);
-                // Per-bucket anonymous rate limit (roadmap §2.3): decided before
+                // Per-bucket anonymous rate limit: decided before
                 // anon_site is set, so the rejection stays a cheap XML 503 — serving
                 // the error document would spend the very backend read the limiter
                 // exists to protect
@@ -967,7 +966,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                 resp = std::move(*early);
             } else {
                 // per-credential policy (docs/architecture/credential-management.md §10.4): the action comes from the
-                // matched route, not the HTTP method (docs/archive/gaps.md §5.10) -- DeleteObjects is a POST yet a
+                // matched route, not the HTTP method -- DeleteObjects is a POST yet a
                 // delete, CreateMultipartUpload is also a POST yet a write; the method dimension cannot separate the
                 // two. The decision input is the snapshot verify returned, never a store lookup (§3.7)
                 RequestAuth auth{access_key, ident.policy ? &*ident.policy : nullptr, ident.tenant, ident.tenant_admin,
@@ -1012,13 +1011,13 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                         }
                     }
                 }
-                // Per-request timeout + cancellation wiring (docs/archive/gaps.md §3.1/§3.3): req_src is dedicated to
+                // Per-request timeout + cancellation wiring: req_src is dedicated to
                 // this request; external tokens (process shutdown, plus client disconnect once the driver is wired)
                 // attach to the same source -- any trigger converges the whole L2/L3 chain with OperationCancelled from
                 // the nearest cancellable suspension point (pool.schedule / semaphore.acquire). The token propagates
                 // down the Task promise automatically, no per-handler/backend signature changes needed
                 CancelSource req_src;
-                // reachable from the metered backends (roadmap §5.1)
+                // reachable from the metered backends
                 req_src.set_data(backend_stats);
                 CancelRegistration link;
                 if (ctx.cancel.valid()) {
@@ -1076,7 +1075,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     // XML only for signed requests). Fetched here because catch blocks cannot co_await;
     // the cancelled path above intentionally stays XML -- 503/SlowDown is retry signaling
     if (website_err) {
-        // Error-phase RoutingRules first (roadmap §2.3): explicit configuration wins
+        // Error-phase RoutingRules first: explicit configuration wins
         // over both the slash redirect and the error document
         if (const auto* r = match_routing_rule(anon_site->routing_rules, anon_orig_key,
                                                http_status(website_err->code))) {
@@ -1085,7 +1084,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             metrics_.website(WebsiteEvent::Redirect);
         } else if (website_err->code == S3ErrorCode::NoSuchKey && !anon_orig_key.empty() &&
                    anon_orig_key.back() != '/') {
-            // AWS website-endpoint behavior (roadmap §2.3): GET /prefix without the
+            // AWS website-endpoint behavior: GET /prefix without the
             // trailing slash 302-redirects to /prefix/ when the directory-style index
             // object exists — the most common felt difference from AWS for real sites
             bool have_index = false;
@@ -1108,7 +1107,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             resp = co_await website_error_page(*website_err, *anon_site, head);
         }
     }
-    // CORS actual-request headers (roadmap §2.1): injected on success and error alike —
+    // CORS actual-request headers: injected on success and error alike —
     // the browser needs Allow-Origin to surface either response to the page. Preflight
     // (OPTIONS) builds its own full header set in the handler
     if (req.method != "OPTIONS") apply_cors_headers(req, bucket, resp);
@@ -1124,7 +1123,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     double secs = mguard.finish(resp.status);
     uint64_t bytes = resp.content_length.value_or(resp.small_body.size());
     metrics_.record_api(api_name, backend_name.empty() ? "-" : backend_name, resp.status, secs);
-    // Access log (roadmap §5.2, docs/architecture/s3-protocol.md §7): one line per request; a
+    // Access log (docs/architecture/s3-protocol.md §7): one line per request; a
     // route that never ran (short-circuited before/at auth) reports handler=0
     auto access = std::make_unique<AccessRecord>();
     access->start = start;
@@ -1149,7 +1148,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     access->backend_calls = backend_stats->calls.load(std::memory_order_relaxed);
     access->ttfb_ms = secs * 1000.0;
     access->slow_threshold_ms = slow_request_ms_.load(std::memory_order_relaxed);
-    // per-bucket request distribution and outbound bytes (docs/archive/gaps.md §7). Streaming response bytes are pulled
+    // per-bucket request distribution and outbound bytes. Streaming response bytes are pulled
     // by the driver after dispatch returns and counted via the decorator (which then also emits the access line with
     // the bytes actually sent and the full wall time); small responses have a known length by now
     metrics_.record_bucket_request(bucket);
@@ -1160,7 +1159,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
         metrics_.add_bytes_out(bucket, resp.small_body.size());
         emit_access(*access, bytes, /*truncated=*/false);
     }
-    // Data-plane audit record (roadmap §3.9 ④): structured twin of the access line
+    // Data-plane audit record: structured twin of the access line
     if (audit_ && audit_->data_plane()) {
         AuditEvent e;
         e.event = "access";
@@ -1232,7 +1231,7 @@ std::span<const S3Service::Route> S3Service::route_table() {
          [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth& auth) {
              return s.delete_bucket_website(std::move(b), auth);
          }},
-        // ?lifecycle subresource (roadmap §2.4, root credential only, same model as ?website)
+        // ?lifecycle subresource (root credential only, same model as ?website)
         {"GET", Scope::Bucket, "lifecycle", "", Action::Read, "GetBucketLifecycle",
          [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth& auth) {
              return s.get_bucket_lifecycle(std::move(b), auth);
@@ -1245,7 +1244,7 @@ std::span<const S3Service::Route> S3Service::route_table() {
          [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth& auth) {
              return s.delete_bucket_lifecycle(std::move(b), auth);
          }},
-        // ?cors subresource (roadmap §2.1, root credential only, same model as ?website)
+        // ?cors subresource (root credential only, same model as ?website)
         {"GET", Scope::Bucket, "cors", "", Action::Read, "GetBucketCors",
          [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth& auth) {
              return s.get_bucket_cors(std::move(b), auth);
@@ -1258,7 +1257,7 @@ std::span<const S3Service::Route> S3Service::route_table() {
          [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth& auth) {
              return s.delete_bucket_cors(std::move(b), auth);
          }},
-        // ?quota subresource (roadmap §3.9 ②, docs/architecture/multi-tenancy.md §3): GET for anyone
+        // ?quota subresource (docs/architecture/multi-tenancy.md §3): GET for anyone
         // admitted to the bucket, PUT/DELETE root only
         {"GET", Scope::Bucket, "quota", "", Action::Read, "GetBucketQuota",
          [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth& auth) {
@@ -1272,7 +1271,7 @@ std::span<const S3Service::Route> S3Service::route_table() {
          [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth& auth) {
              return s.delete_bucket_quota(std::move(b), auth);
          }},
-        // All five parameters now take effect (docs/archive/gaps.md §5.1): previously pagination parameters were
+        // All five parameters now take effect: previously pagination parameters were
         // "allowed
         // but ignored" and prefix/delimiter simply not admitted (ignoring them would mix in uploads outside the filter)
         {"GET", Scope::Bucket, "uploads", "max-uploads key-marker upload-id-marker prefix delimiter encoding-type",
@@ -1306,7 +1305,7 @@ std::span<const S3Service::Route> S3Service::route_table() {
              return s.delete_objects(req, std::move(b), auth);
          }},
 
-        // ?tagging subresource (roadmap §2.5)
+        // ?tagging subresource
         {"GET", Scope::Object, "tagging", "", Action::Read, "GetObjectTagging",
          [](S3Service& s, http::HttpRequest&, std::string b, std::string k, const RequestAuth&) {
              return s.get_object_tagging(std::move(b), std::move(k));
@@ -1349,8 +1348,8 @@ std::span<const S3Service::Route> S3Service::route_table() {
              if (req.headers.has("x-amz-copy-source")) return s.copy_object(req, std::move(b), std::move(k), auth);
              return s.put_object(req, std::move(b), std::move(k), auth);
          }},
-        // response-* override parameters (docs/archive/gaps.md §5.3): the family most used in presigned download links
-        // partNumber (roadmap §2.5): reads one part of a completed multipart object; ranges
+        // response-* override parameters: the family most used in presigned download links
+        // partNumber: reads one part of a completed multipart object; ranges
         // resolve from the part_sizes layout recorded at complete
         {"GET", Scope::Object, "",
          "response-content-type response-content-language response-expires "
@@ -1390,7 +1389,7 @@ Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bu
         enforce_query_whitelist(req, *r);
         co_return co_await r->fn(*this, req, std::move(bucket), std::move(key), auth);
     }
-    // 405 must carry Allow (RFC 9110 §15.5.6, docs/archive/gaps.md §5.9): the answer is the other methods in the same
+    // 405 must carry Allow (RFC 9110 §15.5.6): the answer is the other methods in the same
     // scope that would also match this request's query -- the list comes from the dispatch table itself, so it cannot
     // drift from it
     std::string allow;

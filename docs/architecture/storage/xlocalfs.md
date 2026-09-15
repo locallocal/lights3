@@ -5,7 +5,7 @@ multipart 目录结构与原子提交协议与 localfs 完全一致（继承
 `src/storage/localfs/localfs_backend.h:LocalFsBackend` 并共享 `fs_util` 落盘原语），
 只把「数据字节搬运」——GET 流式读、PUT/分片流式写、complete 拼接、提交期
 fdatasync——换成 io_uring 异步提交：磁盘等待期间**不占用任何线程**，完成后协程
-续体投递回线程池继续执行。roadmap §3.4 之后进一步兑现了单 ring 单在途时代
+续体投递回线程池继续执行。后续又进一步兑现了单 ring 单在途时代
 留在桌上的收益：单流多在途流水线（§5）、注册缓冲/注册文件（§4）、linked SQE
 与元数据 opcode（§5.2/§6）、多 ring 分片（§3）。
 
@@ -106,8 +106,7 @@ ring（`uring.cc:UringRing`）自带 SQ/CQ、提交互斥锁、在途表与专�
    填 SQE：`user_data = Op*`，per-opcode flags（fsync_flags/open_flags/statx_flags/
    rename_flags/unlink_flags）共用 sqe union 的同一槽位，最后 `store_release`
    推进 `sq_tail_`。
-4. 调 `uring.cc:UringRing::flush_locked` 提交。它是**批量提交**的核心
-   （docs/archive/gaps.md §6.3）：若已有线程在 `io_uring_enter` 中（`flushing_`
+4. 调 `uring.cc:UringRing::flush_locked` 提交。它是**批量提交**的核心：若已有线程在 `io_uring_enter` 中（`flushing_`
    为真），本次直接返回——自己的 SQE 落在值班者的提交窗口 `[submitted_, sq_tail_)`
    内被捎带，高并发下 N 个 SQE 合并成一次 enter。值班者循环 enter 直到
    `submitted_` 追平 tail，enter 期间放锁；EINTR/EAGAIN/EBUSY 按
@@ -158,7 +157,7 @@ CQE，改为 1ms 轮询，只为消化内核的迟到 CQE（按第 2 步登记�
 的 `IORING_FEAT_NODROP` 保证 CQE 不丢（溢出转入内核侧缓存）；更老内核本就
 没有任何新 opcode，实际在途量极小，风险可忽略。
 
-## 3. 多 ring 分片（roadmap §3.4 ④）
+## 3. 多 ring 分片
 
 单 ring 意味着全进程一把提交锁、一个 reaper 线程——高核数下的单点。
 `uring.h:UringOptions::rings`（配置项 `rings`，默认 1，`0 = auto =
@@ -173,7 +172,7 @@ hardware_concurrency/8`，钳制在 [1,8]）把引擎切成 N 个互相独立的
   常驻锁页内存；
 - 能力探测只在 ring 0 做一次（同一内核），`describe()` 摘要含 `rings=N`。
 
-## 4. 注册缓冲与注册文件（roadmap §3.4 ②）
+## 4. 注册缓冲与注册文件
 
 均为 ring 作用域资源，建环时注册（`uring.cc:UringRing::register_resources`），
 失败只损失优化、绝不影响 ring 可用性（WARN 一行、相应 feature 位清零）：
@@ -193,7 +192,7 @@ hardware_concurrency/8`，钳制在 [1,8]）把引擎切成 N 个互相独立的
   时反注册；反注册失败则槽位退役不再发放（内核持引用直到 ring 拆除，
   绝不能带着陈旧文件再发出去）。
 
-## 5. 多在途流：UringReadStream / UringWriteStream（roadmap §3.4 ①③）
+## 5. 多在途流：UringReadStream / UringWriteStream
 
 引擎原始纪律是「每协程帧至多一个在途 op」——析构安全不言自明，但
 queue_depth 在单请求内完全用不上：GET/PUT 每 64KiB 都要付一次完整的
@@ -240,7 +239,7 @@ fd 不能使弃置的在途写踩到复用的 fd 号。
 
 ## 6. 数据面路径与 localfs 的差异
 
-元数据 opcode（roadmap §3.4 ③）的通用形状：`xlocalfs_backend.cc:uring_open/
+元数据 opcode 的通用形状：`xlocalfs_backend.cc:uring_open/
 uring_rename/uring_unlink/uring_exists` 先查 `features().op_*` 与配置开关
 `meta_ops`，具备才上 ring，否则原地阻塞 syscall（返回值统一 syscall 约定）。
 路径字符串由调用方保活跨 `co_await`（SQPOLL 下内核延迟取件才拷路径）。
@@ -261,8 +260,7 @@ meta 取**已打开 fd 的 fstat** 防并发覆盖错位；tier stub 竞态抛 `
 
 `XLocalFsBackend::drain_to_tmp`：循环「`ws.acquire()` → `body.read` 直读进
 流水线块（注册缓冲可用时省一次弹跳拷贝）→ MD5 更新（池线程用户态）→
-`ws.commit(n)`」，每块前过故障注入点 `fault::check("xlocalfs.write")`
-（roadmap §6.1）。提交次序保持 localfs 原样——`fsutil::set_meta_xattr` 先写，
+`ws.commit(n)`」，每块前过故障注入点 `fault::check("xlocalfs.write")`。提交次序保持 localfs 原样——`fsutil::set_meta_xattr` 先写，
 然后 `ws.finish(fsync_enabled)` 送出「末块写 + 链式 fdatasync」。
 
 之后的提交阶段换成 `XLocalFsBackend::commit_prepared`：与
@@ -273,7 +271,7 @@ per-key `commit_lock` 与 PutCondition 检查在同一把锁内，协议不变�
 
 `drain_to_tmp` 用**出参**而非返回 `pair<uint64_t,string>`：`body.read` 抛异常
 （Content-MD5 不匹配、客户端断连）时，GCC 会对**从未构造**的绑定目标跑析构，
-表现为 put 路径 double free / SEGV（docs/archive/gaps.md §5.6 的测试用例正是
+表现为 put 路径 double free / SEGV（单测里正是
 此形状）；出参在 `co_await` 前已完整构造，展开销毁的是真实对象。
 
 `upload_part` 同理：流水线写分片临时文件 → finish 链式持久化 → RENAMEAT 落位
@@ -281,7 +279,7 @@ per-key `commit_lock` 与 PutCondition 检查在同一把锁内，协议不变�
 （同号重传 last-write-wins；反序在断电后可能留下「`.md5` 有效但数据零块」）；
 rename 失败时区分「上传已被并发 abort（目录没了）→ NoSuchUpload」与真实 IO
 错误。`.md5` 的内容也与 localfs 一致：`md5=<ETag>` 加上分片带已校验校验和时的
-`checksum_algorithm/checksum_value`（`PartChecksum::resolved()`，roadmap §2.2）。
+`checksum_algorithm/checksum_value`（`PartChecksum::resolved()`）。
 
 ### 6.3 complete_multipart
 
@@ -327,7 +325,7 @@ UNLINKAT SQE（幂等语义同基类——ENOENT 不是错误，真实 EACCES/EI
 1. **先置 `stopped_` 拒绝新提交**——否则「排空」无从谈起；
 2. **等在途 CQE 清零**（`inflight_cv_`，上限 10s）：CQE 完成序**不保证** NOP
    哨兵排在既有读写之后，不排空就 munmap 会让内核继续往已释放的用户缓冲写
-   （UAF，docs/archive/gaps.md §2.9）。超时只告警不死等——进程退出不可因此死锁，
+   （UAF）。超时只告警不死等——进程退出不可因此死锁，
    风险此刻已无法消除，至少留下证据；
 3. 提交 `user_data=0` 的 **NOP 哨兵**唤醒并终止 reaper，join 之。ring 已
    `failed_` 时跳过 2/3 中的等待与哨兵（reaper 处于轮询退出路径）。

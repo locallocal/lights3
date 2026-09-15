@@ -5,7 +5,7 @@
 > 抽象接入，CI 用 MemoryBackend 充当云端全覆盖（单测 `test_tiered.cc` +
 > `e2e_tiered`）；P5 的真实 CloudProxyBackend 见
 > [cloudproxy-design.md](cloudproxy-design.md)，组合场景由
-> `e2e_tiered_cloudproxy` 验收。P6（2026-09-02，roadmap §3.6）：local 侧抽象为
+> `e2e_tiered_cloudproxy` 验收。P6（2026-09-02）：local 侧抽象为
 > `ITierLocal`（localfs/xlocalfs 与 duostore 两个适配器）、访问记录落对象
 > xattr + 时间轮增量扫描、prefix 策略、多维淘汰评分、对账隔离区、Range
 > 块缓存。
@@ -131,7 +131,7 @@ content_type/user_meta），本地 stub 意外丢失时可对账重建（§9）�
 `AccessTable`（仅 duostore 适配器用；localfs 适配器持私有表 + `atime.tsv`
 快照）+ `TieredBackend` 内的 `Touch` 写后缓冲与扫描协程，无独立类。）
 
-- **访问记录**（P6，roadmap §3.6 ⑤）：每个对象一条
+- **访问记录**（P6）：每个对象一条
   `AccessRec{atime, hits, enrolled}`，**随对象持久化**而非常驻内存——
   localfs 侧写进数据文件的第二个 xattr `user.lights3.access`
   （不 fsync，随 inode 走；PUT 覆盖/stub 化换 inode 后自然消失，回落
@@ -143,7 +143,7 @@ content_type/user_meta），本地 stub 意外丢失时可对账重建（§9）�
   记录时缓冲优先、其次持久记录、最后 mtime 兜底，因此刷写窗口内的访问不会
   被误判。崩溃最多丢一个刷写周期，只影响判冷精度；不依赖文件系统 atime
   （relatime 不可靠）。
-- **时间轮**（roadmap §3.6 ①）：`<state>/wheel/<slot>` 按小时分槽的追加文件，
+- **时间轮**：`<state>/wheel/<slot>` 按小时分槽的追加文件，
   行 = `bucket\tkey`；一个键在其 `atime + cold_after` 落入的槽登记一次
   （`enrolled` 记住已登记槽，再次访问只在槽变化时追加）。到期槽被扫描消费
   后删除，仍热的键改登记到新槽。它是判冷候选与淘汰候选的唯一来源，全量
@@ -157,7 +157,7 @@ content_type/user_meta），本地 stub 意外丢失时可对账重建（§9）�
 ### 5.1 触发
 
 后台 **TierScanner**：`TimerQueue` 周期触发（默认 1h）→ 投递到线程池跑扫描协程。
-一轮先刷写访问缓冲，再按模式产出候选（P6，roadmap §3.6 ①）：
+一轮先刷写访问缓冲，再按模式产出候选（P6）：
 
 - **增量轮（常态）**：只读时间轮里已到期的槽（`slot ≤ now/1h`），逐键复核当前
   访问记录——仍热的重新登记到新槽，已删的丢弃，冷的下沉。成本正比于**活动
@@ -177,7 +177,7 @@ content_type/user_meta），本地 stub 意外丢失时可对账重建（§9）�
    （≈ LRU 顺序）取，只读到"累计候选字节 ≥ max(4×缺口, 缺口+64MiB)"即止；排序键为
    `(rank, score)`——`cached` 与 remote 对象残留的块缓存 rank 0（零上传），
    `local` rank 1；`score = age × (1 + size_weight × log2(1 + size/1MiB)) /
-   (1 + frequency_weight × hits)`，两个权重默认 0 即纯 LRU（roadmap §3.6 ③）。
+   (1 + frequency_weight × hits)`，两个权重默认 0 即纯 LRU。
 
 并发由 `core/semaphore.h` 限流（`max_concurrent_transfers`，默认 4），
 避免打满上行带宽与线程池。
@@ -243,7 +243,7 @@ range），响应按 docs/architecture/object-read-write-flow.md §3.1 正常走
 `cache_fill_on_range`（默认开）：命中时向后台提交一个 single-flight 的整对象
 回迁任务（独立云端 GET → 缓存回填 → 提交为 cached），空间不足同样直接放弃。
 
-**块级部分缓存**（P6，roadmap §3.6 ⑦，`range_cache: true`，仅 localfs 侧支持）：
+**块级部分缓存**（P6，`range_cache: true`，仅 localfs 侧支持）：
 remote 对象的 Range 命中先查 `<state>/rcache/` 下的块缓存——数据文件是对象
 等长的稀疏文件、位图文件记录已有块（按 `remote.etag` 绑定副本）。全部命中
 块本地直接服务；否则向云端请求**块对齐的超集** `[af, al]`，`RangeTeeReader`
@@ -324,7 +324,7 @@ backends:
     gc_retry_cap: 1h                  # 退避上限
     reconcile_interval: 1d            # 双向对账周期（§9）；0 = 关（scan_interval=0 时全停）
     reconcile_orphans: rebuild        # 云端孤儿处置：rebuild（默认，重建 stub）| delete
-    # ---- P6（roadmap §3.6）----
+    # ---- P6----
     full_scan_interval: 1d            # 全量枚举兜底周期；0 = 每轮全量（旧行为）
     evict_size_weight: 0              # 淘汰评分的大小加权；0 = 忽略大小
     evict_frequency_weight: 0         # 淘汰评分的访问频次加权；0 = 纯 LRU
@@ -374,7 +374,7 @@ buckets:
   stub**——对象保留在列表中供人工介入；cached 引用失效只降级告警（数据仍
   在本地，下轮判冷重新上传）。
 
-**隔离区**（P6，roadmap §3.6 ④）：`refs_missing`（stub 引用的云副本已丢）与
+**隔离区**（P6）：`refs_missing`（stub 引用的云副本已丢）与
 `foreign`（无 lights3 冗余头的云端孤儿）两类发现进入
 `<state>/quarantine/` 账本（每条一个 TSV：kind/bucket/key/etag/首末次发现/
 次数）。**首次发现才 ERROR/WARN**，之后每轮只累加次数（DEBUG），不再刷屏；
@@ -395,7 +395,7 @@ gauge `lights3_tiered_quarantine_entries{kind}` 常驻显示账本规模。本�
 | P3 | Tee 缓存回填 + 空间兜底降级 + single-flight | 断连/ENOSPC 注入测试 | ✅ |
 | P4 | GC 队列 + 对账工具 | 崩溃注入后对账收敛 | ✅ 全部落地（对账工具 + GC 指数退避 2026-07-31 收尾；stub 丢失重建/删除模式/防复活/反向告警/退避恢复专项全绿） |
 | P5 | 接入真实 CloudProxyBackend（其自身为独立特性，见 docs/architecture/storage/cloudproxy-design.md） | 对公有云端到端 | ✅（`e2e_tiered_cloudproxy` 双实例组合） |
-| P6 | roadmap §3.6：`ITierLocal` 抽象 + duostore 热层、xattr 访问记录 + 时间轮增量扫描、prefix 策略、多维淘汰评分、对账隔离区、Range 块缓存 | 增量轮/规则/评分/块缓存/隔离区/duostore 热层专项单测 | ✅（2026-09-02） |
+| P6 | `ITierLocal` 抽象 + duostore 热层、xattr 访问记录 + 时间轮增量扫描、prefix 策略、多维淘汰评分、对账隔离区、Range 块缓存 | 增量轮/规则/评分/块缓存/隔离区/duostore 热层专项单测 | ✅（2026-09-02） |
 
 P1–P4 完全不依赖云 SDK，`tiered` + `memory` 组合即可在 CI 全覆盖，
 这是把 local 侧耦合具体类型、cloud 侧走抽象接口这一决策换来的直接红利。

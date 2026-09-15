@@ -41,7 +41,7 @@ void put_u64(std::string& s, uint64_t v) {
     for (int i = 0; i < 8; ++i) s.push_back(char(v >> (8 * i)));
 }
 // An over-limit on the encode side is a **request** problem, not library
-// corruption (docs/archive/gaps.md §4): a user submitting oversized user-meta should get
+// corruption: a user submitting oversized user-meta should get
 // a 400, not a 500 "corrupt meta value"
 [[noreturn]] void too_large(const char* what) {
     throw S3Error(S3ErrorCode::InvalidArgument, std::string("Metadata field too large: ") + what);
@@ -102,7 +102,7 @@ void check_ver(Cursor& c, uint8_t expect) {
     if (c.u8() != expect) corrupt("unsupported value version");
 }
 
-// Version-tolerant read (docs/archive/gaps.md §5.2): v1 records have no first-class
+// Version-tolerant read: v1 records have no first-class
 // metadata section, v2 onwards does. A strict-equality check_ver would turn all
 // old values into 500 "corrupt", forcing a downtime rewrite of all metadata on
 // upgrade
@@ -193,7 +193,7 @@ std::vector<Extent> read_extent_runs(Cursor& c) {
         if (count == 0) corrupt("empty run");
         // The encoding convention says packs never merge (count is always 1);
         // count must also be covered by the remaining crc array bytes — a corrupt
-        // value must not decode into a string of fake extents (docs/archive/gaps.md §4)
+        // value must not decode into a string of fake extents
         if (kind == uint8_t(Extent::Kind::kPack) && count != 1) corrupt("pack run count");
         if (size_t(count) * 4 > c.s.size() - c.pos) corrupt("run count beyond payload");
         uint64_t chunk_len = c.u64();
@@ -235,7 +235,7 @@ std::map<std::string, std::string> read_user_meta(Cursor& c) {
 // only non-empty entries are written. Made kv rather than six fixed slots so the
 // next field addition needs no version bump — unknown keys are dropped on read
 void put_std_meta(std::string& s, const ObjectMeta& m) {
-    // Checksum closure + multipart layout (roadmap §2.2/§2.5) ride the self-describing
+    // Checksum closure + multipart layout ride the self-describing
     // kv section exactly as its header comment invites — no version bump needed.
     // Trailer-form checksum values resolve from checksum_pending (body drained by now)
     std::vector<std::pair<std::string_view, std::string>> extra;
@@ -374,7 +374,7 @@ int64_t decode_bucket(std::string_view v) {
 //              | str content_type | u16 n_meta (str k, str v)*
 //              | [v2] u16 n_std (str k, str v)*
 //              | [v3] u8 tier | str remote_etag | str remote_at | runs (§4.2) ----
-// v1 = no first-class metadata section, v2 = no tier section (roadmap §3.6 ⑥); the read
+// v1 = no first-class metadata section, v2 = no tier section; the read
 // side accepts every version, the write side always emits the newest (existing records
 // stay readable in place, no rewrite). A binary older than v3 cannot read v3 records —
 // upgrade every gateway sharing a meta engine together
@@ -475,7 +475,7 @@ UploadRec decode_upload(std::string key, std::string upload_id, std::string_view
 
 // ---- part: u8 ver | u64 size | str md5 | i64 modified_ms
 //            | [v2] str checksum_algorithm, str checksum_value | runs ----
-// v2 adds the verified part checksum (roadmap §2.2); v1 records stay readable
+// v2 adds the verified part checksum; v1 records stay readable
 
 std::string encode_part(const PartRec& rec) {
     std::string s;

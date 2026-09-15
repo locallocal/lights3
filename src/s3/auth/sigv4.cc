@@ -621,7 +621,7 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req, std::sp
                           "The difference between the request time and the server's time is too large.");
     }
 
-    // Credentials: one lookup returns both the SK and the policy snapshot (docs/archive/gaps.md §3.7) -- authorization
+    // Credentials: one lookup returns both the SK and the policy snapshot -- authorization
     // uses this snapshot, so even if the credential is revoked while this request is in flight, it completes with
     // verify-time semantics
     auto cred = provider_->lookup(f.access_key);
@@ -630,7 +630,7 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req, std::sp
                       "The AWS access key ID you provided does not exist in our records.");
     const std::string& secret_key = cred->secret_key;
 
-    // STS session credentials (roadmap §2.6): a session AK is only usable with its
+    // STS session credentials: a session AK is only usable with its
     // matching token; a token alongside a permanent AK is equally invalid. Token match
     // is judged before expiry so a wrong token never reads as merely "expired"
     {

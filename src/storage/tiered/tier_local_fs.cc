@@ -233,7 +233,7 @@ Task<void> LocalFsTierLocal::commit_stub(std::string_view bucket, std::string_vi
     // reconcile rebuilds into a possibly missing tree
     fs::create_directories(path.parent_path(), ec);
     fsutil::commit_stub(path, meta, tier, tmp_dir());
-    // roadmap §3.8: the record changed under the backend
+    // the record changed under the backend
     local_->invalidate_object_meta(bucket, key);
     co_return;
 }
@@ -264,7 +264,6 @@ public:
         ::close(tmp_.fd);
         tmp_.fd = -1;
         fsutil::commit_cached(owner_.data_path(bucket_, key_), tmp_, meta, tier, owner_.tmp_dir());
-        // roadmap §3.8
         owner_.localfs()->invalidate_object_meta(bucket_, key_);
         // the whole object is local now
         owner_.drop_range_cache(bucket_, key_);
@@ -371,7 +370,7 @@ private:
 
 std::unique_ptr<IWalker> LocalFsTierLocal::walk() { return std::make_unique<FsWalker>(*this); }
 
-// ---------- range cache (roadmap §3.6 ⑦) ----------
+// ---------- range cache ----------
 // Layout: <state>/rcache/data/<bucket>/<key> is a sparse file of the object's size whose
 // present blocks hold cloud bytes; <state>/rcache/map/<bucket>/<key> is
 // "v1\t<remote_etag>\t<block>\t<size>\n<bitmap hex>\n". The map is rewritten whole on

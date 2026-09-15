@@ -246,7 +246,7 @@ std::unique_ptr<httplib::Client> ClientPool::make_client() const {
 
 // Idle entries age at the front (back = most recently used); anything idle beyond
 // pool_idle_timeout is dropped — the remote/NAT likely closed it already, and reusing
-// it would surface as a first-request transport error and retry spike (roadmap §3.3).
+// it would surface as a first-request transport error and retry spike.
 // Invariant: waiters exist only while idle_ is empty (release hands off before pushing
 // idle), so reaping never needs to wake anyone — it only shrinks total_
 void ClientPool::reap_stale_locked() {
@@ -430,7 +430,7 @@ Task<ClientPool::Lease> ClientPool::acquire_async() {
 
 void ClientPool::release(PooledClient pc) {
     auto now = std::chrono::steady_clock::now();
-    // Age retirement (roadmap §3.3): drop instead of pooling; the connection closes
+    // Age retirement: drop instead of pooling; the connection closes
     // when pc goes out of scope below, outside any handoff
     if (cfg_.pool_max_lifetime_ms > 0 && now - pc.created > std::chrono::milliseconds(cfg_.pool_max_lifetime_ms)) {
         // close the socket before any waiter bookkeeping
@@ -490,7 +490,7 @@ httplib::Headers RemoteContext::signed_headers(const std::string& method, const 
     req.headers.set("Host", host.empty() ? ep.signed_host : host);
     for (auto& [k, v] : extra) req.headers.set(k, v);
     if (cred_chain) {
-        // Chain credentials (roadmap §3.3): may block briefly on a refresh — always on a
+        // Chain credentials: may block briefly on a refresh — always on a
         // pool/pump thread here. The session token is set before signing so it enters
         // SignedHeaders (x-amz-* are swept in automatically)
         auto c = cred_chain->get();
@@ -571,7 +571,7 @@ void RemoteContext::throw_remote_error(int status, const std::string& body, ErrC
                     break;
             }
         }
-        // Unknown 4xx must not collapse into 500 (docs/archive/gaps.md §3.9): SDKs auto-retry 500s,
+        // Unknown 4xx must not collapse into 500: SDKs auto-retry 500s,
         // turning deterministic rejections like InvalidObjectState into infinite retry
         // loops. Map to a local 400 (InvalidRequest is not scrubbed by public_error), with
         // the remote code and original text carried in the message
@@ -618,7 +618,7 @@ std::optional<int64_t> RemoteContext::retry_after_hint(const httplib::Result& r)
 }
 
 int64_t RemoteContext::backoff_delay_ms(int attempt, std::optional<int64_t> retry_after_ms) const {
-    // The server's own hint wins over the formula (roadmap §3.3): it knows its
+    // The server's own hint wins over the formula: it knows its
     // overload horizon; the clamp in retry_after_hint bounds a hostile value
     if (retry_after_ms) return *retry_after_ms;
     thread_local std::mt19937 rng{std::random_device{}()};
@@ -634,7 +634,7 @@ void RemoteContext::backoff(int attempt, std::optional<int64_t> retry_after_ms) 
     std::this_thread::sleep_for(std::chrono::milliseconds(backoff_delay_ms(attempt, retry_after_ms)));
 }
 
-// ---------- Circuit breaker (roadmap §3.3) ----------
+// ---------- Circuit breaker ----------
 
 bool RemoteContext::breaker_allow() {
     if (cfg.breaker_threshold <= 0) return true;

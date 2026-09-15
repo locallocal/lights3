@@ -47,14 +47,14 @@ class CredentialStore;
 
 struct RequestContext {
     std::string request_id;
-    // x-amz-id-2 / <HostId> (docs/archive/gaps.md §5.9): one of the two ids AWS support tickets ask for; clients only
+    // x-amz-id-2 / <HostId>: one of the two ids AWS support tickets ask for; clients only
     // relay the pair they saw, so the log side must be able to match it
     std::string host_id;
     // Cancellation signal: client disconnect (detected by the driver), request timeout, process shutdown
     // (docs/architecture/concurrency.md §5); defaults to "never cancelled". Long loops (between chunks of streaming
     // reads/writes) and pool.schedule() observe it
     CancelToken cancel;
-    // W3C trace context (roadmap §5.4, core/trace.h): inherited from the client's
+    // W3C trace context (core/trace.h): inherited from the client's
     // traceparent or started here; stamped on log lines and propagated outbound
     TraceContext trace;
 };
@@ -75,16 +75,16 @@ public:
     // Thread pool metrics source for /-/metrics (optional, injected during main assembly)
     void set_pool_stats(std::function<ThreadPool::Stats()> fn) { pool_stats_ = std::move(fn); }
 
-    // Ingress throttling admission snapshot (docs/archive/gaps.md §7, optional, injected during main assembly)
+    // Ingress throttling admission snapshot (optional, injected during main assembly)
     void set_admission_stats(std::function<AdmissionStats()> fn) { admission_stats_ = std::move(fn); }
 
-    // Timer thread health (docs/archive/gaps.md §7, optional)
+    // Timer thread health (optional)
     void set_timer_stats(std::function<TimerQueue::Stats()> fn) { timer_stats_ = std::move(fn); }
 
-    // L1 connection counters for /-/metrics (roadmap §4.2, optional)
+    // L1 connection counters for /-/metrics (optional)
     void set_conn_stats(std::function<http::ConnStats()> fn) { conn_stats_ = std::move(fn); }
 
-    // Per-client rate limits (roadmap §4.2, docs/architecture/http-adapter.md §2.3): the IP
+    // Per-client rate limits (docs/architecture/http-adapter.md §2.3): the IP
     // limiter is consulted before signature verification on every non-internal
     // request, the access-key limiter after it on the S3 plane. null = off
     // Swappable at runtime (config hot reload): dispatch pins the limiter it admitted
@@ -94,10 +94,10 @@ public:
         ak_limiter_.store(std::move(per_ak));
     }
 
-    // Config hot reload (roadmap §4.4): POST /-/admin/config/reload (root) runs the
+    // Config hot reload: POST /-/admin/config/reload (root) runs the
     // hook the app installs and renders its report as JSON
     void set_reload_hook(std::function<ConfigReloadReport()> fn) { reload_hook_ = std::move(fn); }
-    // Maintenance jobs on the live gateway (backlog-sequence ③ fsck, plus the
+    // Maintenance jobs on the live gateway (fsck, plus the
     // duostore / tier groups, docs/usage/cli.md §3.12): the application supplies them
     // through hooks so the service never sees backend types. start(backend, group,
     // op, max_bytes_per_sec) returns the job document with "job_id" or throws
@@ -124,7 +124,7 @@ public:
     // /-/admin/credentials is always AccessDenied
     void set_credential_store(std::shared_ptr<CredentialStore> s) { cred_store_ = std::move(s); }
 
-    // mTLS identity mapping (backlog-sequence ⑥, docs/usage/tls.md §2.1): the binding
+    // mTLS identity mapping (docs/usage/tls.md §2.1): the binding
     // table (.sys/tls-identities/) and which certificate field names the subject
     // (auth.tls_identity: off | subject-cn | san-uri). Mode off = certificates
     // stay transport admission only, the table is still manageable. Restart-only
@@ -136,19 +136,19 @@ public:
     void set_tls_identity_mode(TlsIdentityMode m) { tls_mode_ = m; }
     TlsIdentityMode tls_identity_mode() const { return tls_mode_; }
 
-    // Per-request timeout (docs/archive/gaps.md §3.3): 0 = disabled. On expiry, cooperative cancellation interrupts the
+    // Per-request timeout: 0 = disabled. On expiry, cooperative cancellation interrupts the
     // whole handler chain; suspension points throw OperationCancelled -> 503
     void set_request_timeout(std::chrono::milliseconds t) {
         request_timeout_ms_.store(t.count(), std::memory_order_relaxed);
     }
 
-    // Minimum multipart part size (docs/archive/gaps.md §5.7): defaults to AWS's 5MiB, 0 = unlimited.
+    // Minimum multipart part size: defaults to AWS's 5MiB, 0 = unlimited.
     // A knob rather than hardcoded because toolchains in front of the gateway may not honor the rule
     // (bouncing small-part uploads costs more than making ops fix the tool), and so that a
     // "proxy to another lights3" deployment is not judged once per layer
     void set_min_part_size(uint64_t n) { min_part_size_.store(n, std::memory_order_relaxed); }
 
-    // /-/metrics exposure (roadmap §5.3, http.metrics_access): true = a root
+    // /-/metrics exposure (http.metrics_access): true = a root
     // credential's signature is required (bucket names and backend topology are
     // business information); false = anonymous, the classic scrape setup.
     // Moot when authentication is disabled altogether. Hot-reloadable
@@ -159,7 +159,7 @@ public:
     // probes stay on both. Off = every face on every listener (single-port layout)
     void set_admin_split(bool on) { admin_split_.store(on, std::memory_order_relaxed); }
 
-    // Slow-request channel (roadmap §5.2): an access line whose total time reaches
+    // Slow-request channel: an access line whose total time reaches
     // the threshold is logged at WARN with per-stage timings; 0 = off. Read once per
     // request at dispatch end (streaming responses judge at end of body)
     void set_slow_request_threshold(std::chrono::milliseconds t) {
@@ -177,15 +177,15 @@ public:
     // Full store (phase ③): static entries + .sys-persisted dynamic entries + sync
     void set_website_store(std::shared_ptr<WebsiteStore> store) { website_store_ = std::move(store); }
 
-    // CORS (roadmap §2.1): per-bucket rules persisted in .sys/cors/, managed via
+    // CORS: per-bucket rules persisted in .sys/cors/, managed via
     // ?cors (root only). Not injected = no preflight answers, no CORS headers
     void set_cors_store(std::shared_ptr<CorsStore> store) { cors_store_ = std::move(store); }
 
-    // Lifecycle (roadmap §2.4): ?lifecycle rule management (root only); enforcement
+    // Lifecycle: ?lifecycle rule management (root only); enforcement
     // lives in LifecycleRunner, wired separately in the app assembly
     void set_lifecycle_store(std::shared_ptr<LifecycleStore> store) { lifecycle_store_ = std::move(store); }
 
-    // Usage accounting + quotas + tenancy + audit (roadmap §3.9, docs/architecture/multi-tenancy.md).
+    // Usage accounting + quotas + tenancy + audit (docs/architecture/multi-tenancy.md).
     // Each is optional: not injected = feature off (no counters / no ?quota / no
     // ownership filter / no audit records)
     void set_usage_tracker(std::shared_ptr<UsageTracker> u) { usage_ = std::move(u); }
@@ -203,7 +203,7 @@ public:
     }
     const std::shared_ptr<tables::TableBucketGuard>& table_guard() const { return table_guard_; }
 
-    // Verification result passed down the dispatch chain to handlers (docs/archive/gaps.md §5.10): ListBuckets must
+    // Verification result passed down the dispatch chain to handlers: ListBuckets must
     // filter results by policy, and the policy previously lived only in dispatch's local variable
     struct RequestAuth {
         // empty when auth is disabled
@@ -227,17 +227,17 @@ public:
         Scope scope;
         // "" = fallback; "k" matches on query presence; "k=v" matches on value
         std::string_view flag;
-        // Query allowlist (docs/archive/gaps.md §3.5): extra query keys this route permits (space-separated).
+        // Query allowlist: extra query keys this route permits (space-separated).
         // The flag key and presigned signature params are inherently allowed; a key outside the list -> 501.
         // The structural flaw of a blocklist fallback is that any omission silently degrades into
         // "read/write the whole object" -- ?attributes returns the whole object body, ?partNumber returns the whole
         // object, response-* gets swallowed
         std::string_view extra_query;
-        // The action this route corresponds to (docs/archive/gaps.md §5.10): authorization is decided by it, not
+        // The action this route corresponds to: authorization is decided by it, not
         // guessed from the HTTP method -- DeleteObjects is a POST yet clearly a delete, CreateMultipartUpload is also a
         // POST yet a write; the method dimension simply cannot separate the two
         Action action;
-        // S3 API name (roadmap §5.1): the single source for the api label of the
+        // S3 API name: the single source for the api label of the
         // (api, backend) metrics and the access log. The two routes shared by two
         // APIs (PutObject/CopyObject, UploadPart/UploadPartCopy) are refined by
         // dispatch on x-amz-copy-source
@@ -262,11 +262,11 @@ private:
     Task<http::HttpResponse> get_bucket_website(std::string bucket, const RequestAuth& auth);
     Task<http::HttpResponse> put_bucket_website(http::HttpRequest& req, std::string bucket, const RequestAuth& auth);
     Task<http::HttpResponse> delete_bucket_website(std::string bucket, const RequestAuth& auth);
-    // handlers/bucket_cors.cc (roadmap §2.1, root credential only)
+    // handlers/bucket_cors.cc (root credential only)
     Task<http::HttpResponse> get_bucket_cors(std::string bucket, const RequestAuth& auth);
     Task<http::HttpResponse> put_bucket_cors(http::HttpRequest& req, std::string bucket, const RequestAuth& auth);
     Task<http::HttpResponse> delete_bucket_cors(std::string bucket, const RequestAuth& auth);
-    // handlers/bucket_lifecycle.cc (roadmap §2.4, root credential only)
+    // handlers/bucket_lifecycle.cc (root credential only)
     Task<http::HttpResponse> get_bucket_lifecycle(std::string bucket, const RequestAuth& auth);
     Task<http::HttpResponse> put_bucket_lifecycle(http::HttpRequest& req, std::string bucket, const RequestAuth& auth);
     Task<http::HttpResponse> delete_bucket_lifecycle(std::string bucket, const RequestAuth& auth);
@@ -278,7 +278,7 @@ private:
     void apply_cors_headers(const http::HttpRequest& req, const std::string& bucket, http::HttpResponse& resp);
     Task<http::HttpResponse> delete_bucket(std::string bucket, const RequestAuth& auth);
     Task<http::HttpResponse> get_bucket_location(std::string bucket);
-    // handlers/bucket_quota.cc (roadmap §3.9 ②): ?quota subresource. GET for any
+    // handlers/bucket_quota.cc: ?quota subresource. GET for any
     // credential admitted to the bucket, PUT/DELETE root only
     Task<http::HttpResponse> get_bucket_quota(std::string bucket, const RequestAuth& auth);
     Task<http::HttpResponse> put_bucket_quota(http::HttpRequest& req, std::string bucket, const RequestAuth& auth);
@@ -290,7 +290,7 @@ private:
                                          const RequestAuth& auth);
     Task<http::HttpResponse> get_object(http::HttpRequest& req, std::string bucket, std::string key, bool head_only);
     Task<http::HttpResponse> delete_object(std::string bucket, std::string key);
-    // ?tagging subresource (roadmap §2.5)
+    // ?tagging subresource
     Task<http::HttpResponse> get_object_tagging(std::string bucket, std::string key);
     Task<http::HttpResponse> put_object_tagging(http::HttpRequest& req, std::string bucket, std::string key);
     Task<http::HttpResponse> delete_object_tagging(std::string bucket, std::string key);
@@ -311,7 +311,7 @@ private:
 
     Task<http::HttpResponse> readyz();
 
-    // handlers/sts.cc (roadmap §2.6): AssumeRole at POST / (path-style deployments),
+    // handlers/sts.cc: AssumeRole at POST / (path-style deployments),
     // verified with service scope "sts"; errors render in the STS XML shape
     Task<http::HttpResponse> sts_endpoint(http::HttpRequest& req, const RequestContext& ctx, std::string& access_key);
 
@@ -320,14 +320,14 @@ private:
     Task<http::HttpResponse> admin_credentials(http::HttpRequest& req, std::string& access_key);
     // handlers/admin_tenants.cc (docs/architecture/multi-tenancy.md §6): /-/admin/tenants,
     // /-/admin/usage — root, or a tenant admin scoped to its own tenant
-    // GET /-/admin/objects/<bucket>/<key>: object layout for operators (roadmap §6.2)
+    // GET /-/admin/objects/<bucket>/<key>: object layout for operators
     Task<http::HttpResponse> admin_object_inspect(http::HttpRequest& req, std::string& access_key,
                                                   const RequestContext& ctx);
     Task<http::HttpResponse> admin_tenancy(http::HttpRequest& req, std::string& access_key, const RequestContext& ctx);
     // handlers/admin_tenants.cc: POST /-/admin/config/reload (root only)
     Task<http::HttpResponse> admin_config_reload(http::HttpRequest& req, std::string& access_key,
                                                  const RequestContext& ctx);
-    // handlers/admin_tls_identities.cc (backlog-sequence ⑥): /-/admin/tls-identities
+    // handlers/admin_tls_identities.cc: /-/admin/tls-identities
     // (root only) -- certificate subject -> credential bindings
     Task<http::HttpResponse> admin_tls_identities(http::HttpRequest& req, std::string& access_key,
                                                   const RequestContext& ctx);
@@ -345,7 +345,7 @@ private:
     // Whether the request's certificate subject is bound (anonymous website reads
     // yield to a bound certificate: the more specific identity wins)
     bool tls_identity_bound(const http::HttpRequest& req) const;
-    // handlers/admin_fsck.cc: POST/GET /-/admin/fsck/<backend> (root only, backlog-sequence ③)
+    // handlers/admin_fsck.cc: POST/GET /-/admin/fsck/<backend> (root only)
     Task<http::HttpResponse> admin_fsck(http::HttpRequest& req, std::string& access_key, const RequestContext& ctx);
     // handlers/admin_jobs.cc: POST/GET /-/admin/duostore/<backend>/gc|scan and
     // /-/admin/tier/<backend>/scan|gc|reconcile, GET .../quarantine (root only)
@@ -382,7 +382,7 @@ private:
     }
 
     // virtual-host style: when Host matches *.base_domain, the bucket is prepended for path parsing.
-    // The vhost flag steers internal-endpoint routing (docs/archive/gaps.md §3.8): under vhost, req.path is the key,
+    // The vhost flag steers internal-endpoint routing: under vhost, req.path is the key,
     // and "/-/metrics" may be a legitimate object key in mybucket that internal endpoints must not shadow
     struct Address {
         std::string bucket, key;
@@ -403,7 +403,7 @@ private:
     // object's content under the ORIGINAL status code, or a built-in HTML page
     Task<http::HttpResponse> website_error_page(const S3Error& e, const WebsiteBucket& site, bool head_only);
 
-    // Per-bucket anonymous rate limit (roadmap §2.3): token bucket, burst = rps.
+    // Per-bucket anonymous rate limit: token bucket, burst = rps.
     // false = over the limit, the caller answers 503 SlowDown without touching storage
     bool website_rate_admit(const std::string& bucket, uint32_t rps);
 
@@ -447,7 +447,7 @@ private:
     // null = no audit file
     std::shared_ptr<AuditLog> audit_;
 
-    // Anonymous website rate limiting (roadmap §2.3): one token bucket per website
+    // Anonymous website rate limiting: one token bucket per website
     // bucket; entries are bounded by the number of configured website buckets
     struct RateBucket {
         double tokens = 0;

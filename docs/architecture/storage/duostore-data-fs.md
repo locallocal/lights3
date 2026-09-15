@@ -162,7 +162,7 @@ finish 即析构时缓冲直接丢弃，盘上无痕迹（已 spill 则由 Chunk
 | pack 文件已建、首条 record 未提交 | 有文件无 packstat 账 | `scan_packs` 反向对账（mtime 逾 grace + 无 pin + 无写锁 → 删） |
 | seal 回执未达（崩溃/失败） | packstat 停留 unsealed | 启动期 `duostore_backend.cc:DuoStoreBackend::abandon_stale_packs` 补 `seal_pack(id, 0)`；file_size=0 由 GC 轮 `stat_pack` 回填分母 |
 
-**故障注入点**（roadmap §6.1，`core/fault.h:fault::check`，均在
+**故障注入点**（`core/fault.h:fault::check`，均在
 `append_pack_records` 内）：`duostore.pack.pwrite`（每次 record `pwrite` 前）、
 `duostore.pack.fdatasync`（`sync_slot` 的 `fdatasync` 前）；命中即以注入的
 errno 走 `throw_errno`，用于逐点验证上表的崩溃窗口。
@@ -230,7 +230,7 @@ HTTP 响应逃逸出 backend 生命周期（驱动器在 handler 返回后继续
 | payload 越过 EOF | torn tail（重启弃用 active pack 的预期残留） | 静默停止 | 不计损坏 |
 
 存活迁移按批交付：`kMigrateBatchRecs`=64 条或 `kMigrateBatchBytes`=4MiB 攒一批
-调 `migrate_`（gaps §2.13：逐条交付每条一次 fdatasync + 一次 meta 提交，
+调 `migrate_`（逐条交付每条一次 fdatasync + 一次 meta 提交，
 128MiB pack ≈ 千次）；批间 `pool_->schedule()` 让出池线程。回调标准实现
 `duostore_backend.cc:migrate_pack_records`：按 owner 聚组 → `get_object` 反查
 存活（extent 逐位配对）→ `write_batch` 批量回写 → `swap_extents_batch` 乐观
@@ -260,7 +260,7 @@ HTTP 响应逃逸出 backend 生命周期（驱动器在 handler 返回后继续
 必须可见）→ 若挂了 uring 引擎则 `shutdown()` 其收割线程（§9）。backend 的
 close 顺序保证 data 先于 meta 关闭，seal 回调此时仍可用。
 
-## 9. io_uring 变体（roadmap §3.4 ⑤）
+## 9. io_uring 变体
 
 `fs_uring: true`（键表见 [duostore-design.md](duostore-design.md) §11）
 时，DuoStoreBackend 构造一个与 xlocalfs 同源的

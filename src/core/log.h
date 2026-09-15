@@ -1,4 +1,4 @@
-// L4: logging facade — implemented by spdlog (roadmap §5.2: stderr or a size-rotated
+// L4: logging facade — implemented by spdlog (stderr or a size-rotated
 // file, optional writer thread, text or JSON lines, UTC timestamps, fmt-style
 // placeholders). The access log is a second logger sharing the same sink so a
 // line-oriented consumer sees one stream, while the JSON formatter can render
@@ -24,7 +24,7 @@ public:
     static void init(const LogConfig& cfg);
     // Same wiring over a caller-supplied sink (tests capture the rendered lines)
     static void init(const LogConfig& cfg, std::shared_ptr<spdlog::sinks::sink> sink);
-    // Runtime change (config hot reload, roadmap §4.4)
+    // Runtime change (config hot reload)
     static void set_level(LogLevel lv);
     // unknown -> Info (config.cc rejects those first)
     static LogLevel parse_level(std::string_view s);

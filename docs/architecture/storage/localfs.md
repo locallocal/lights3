@@ -56,7 +56,7 @@ xlocalfs 继承本类、只覆盖数据面字节搬运（io_uring）；tiered �
 | `etag` | 内容 MD5 hex（无引号） |
 | `content_type` | Content-Type |
 | `cache_control` / `content_disposition` / `content_encoding` / `content_language` / `expires` / `website_redirect` / `tagging` | 七个一等元数据字段，键名来自 `backend.h:kStdMetaFields`（空值不写） |
-| `checksum_algorithm` / `checksum_value` / `checksum_type` | 已校验的对象校验和（roadmap §2.2）；值取 `backend.h:resolved_checksum_value`（trailer 形式的值在 body 读穿后才落定，提交顺序保证此时已就绪），无校验和不写 |
+| `checksum_algorithm` / `checksum_value` / `checksum_type` | 已校验的对象校验和；值取 `backend.h:resolved_checksum_value`（trailer 形式的值在 body 读穿后才落定，提交顺序保证此时已就绪），无校验和不写 |
 | `part_sizes` | multipart 对象各分片大小（逗号连接，`join_part_sizes`/`parse_part_sizes`），供 GET `?partNumber` 与 §11 scrub 切段 |
 | `meta.<k>` | `x-amz-meta-*` 用户元数据 |
 | `tier` / `size` / `remote.etag` / `remote.at` | 仅 tiered 的 stub/cached 对象写入（tier=local 不写，存量 sidecar 字节不变） |
@@ -67,7 +67,7 @@ xlocalfs 继承本类、只覆盖数据面字节搬运（io_uring）；tiered �
   `user.lights3.meta`，随 inode 走，**一次 rename 同批提交数据与元数据**，
   读到的 etag 不可能描述另一个 inode 的 body。`setxattr` 失败
   （ENOTSUP/E2BIG 等）降级为纯 sidecar 语义，按 errno 种类只告警一次——并计入
-  `fs_util.h:MetaXattrPolicy`（roadmap §3.5）：常驻 gauge
+  `fs_util.h:MetaXattrPolicy`：常驻 gauge
   `lights3_localfs_xattr_fallback`（首次失败起恒为 1）与计数器
   `lights3_localfs_xattr_write_failures_total`。构造期先用
   `fs_util.cc:probe_meta_xattr` 在 staging 探测一次（staging 与 root 同文件系
@@ -102,8 +102,7 @@ size/mtime 取 stat，然后 **xattr 优先**（`fs_util.cc:get_meta_xattr`，ER
 4. 循环 `body.read(64KiB)` → `HashStream::update`（增量 MD5）→ `write(tmp)`
    短写重试直到写完。读到 EOF（返回 0）为止——接口契约要求读穿 EOF，
    上层验签装饰器挂在 EOF 点（见 `backend.h:IStorageBackend::put_object` 注释）。
-   每次 `write` 前过故障注入点 `fault::check("localfs.write")`（roadmap §6.1；
-   upload_part / complete 拼接的写循环同名），`fsync_file`/`fsync_path` 内为
+   每次 `write` 前过故障注入点 `fault::check("localfs.write")`（upload_part / complete 拼接的写循环同名），`fsync_file`/`fsync_path` 内为
    `localfs.fsync`，`commit_object_file` 的 rename 前为 `localfs.rename`；
 5. 填 `meta.key/size/etag/last_modified`，ETag = 全文 MD5 hex。
 
@@ -136,7 +135,7 @@ sidecar=B）由 per-key 锁消除，只剩单写者崩溃窗口。
 `body.read` 因客户端断连抛错），未 `committed` 的 tmp 自动 unlink，最终路径
 要么旧要么新。
 
-**sidecar 写策略**（`LocalFsOptions::sidecar`，配置键 `sidecar`，roadmap §3.5）：
+**sidecar 写策略**（`LocalFsOptions::sidecar`，配置键 `sidecar`）：
 小对象负载下上面第 8 步的元数据开销（sidecar 的 1 次 fdatasync + 1 次 rename +
 1 次目录 fsync）大于数据本身，而 xattr 已是权威读源。
 `fs_util.cc:finish_object_sidecar` 按模式收尾（`commit_object_file` 与 xlocalfs
@@ -180,7 +179,7 @@ sidecar=B）由 per-key 锁消除，只剩单写者崩溃窗口。
 文件的完整快照**；文件被外部截断（`pread` 返回 0）则提前 EOF。析构关 fd，
 协程链取消/断连时 RAII 自动清理。
 
-零拷贝出口（roadmap §4.3）：`FdStreamReader::try_as_file` 返回
+零拷贝出口：`FdStreamReader::try_as_file` 返回
 `http::FileSpan{fd, offset, remaining}`，builtin HTTP 驱动据此直接
 `::sendfile` 送出并经 `file_bytes_sent(n)` 推进流位置（`builtin_server.cc`）；
 驱动不取该出口时仍走上面的 `read` 路径。xlocalfs 的 `UringStreamBodyReader`
@@ -195,7 +194,7 @@ GET 的延迟指标只统计到流句柄就绪（open + 元数据），不含 bo
   `pool_->schedule()` 后查元数据缓存（§5.1）：命中且戳校验通过（或关闭校验）
   直接返回；否则 `require_bucket` + `meta_from_stat`（复用同一次 stat 做
   xattr/sidecar 权威读 + 回填）。
-- **inspect_object**（`localfs_backend.cc:inspect_object`，roadmap §6.2）：
+- **inspect_object**（`localfs_backend.cc:inspect_object`）：
   `lights3-ctl object inspect` 的运维视图，返回 `backend.h:ObjectLayout`——
   attrs 含 `data_path/inode/on_disk_bytes/logical_size/etag/content_type/
   last_modified/meta_xattr（present|absent，`fsutil::has_meta_xattr`）/sidecar/
@@ -216,7 +215,7 @@ GET 的延迟指标只统计到流句柄就绪（open + 元数据），不含 bo
   user_meta/content_type 已由 handler 装配进 meta。提交与 PUT 完全同路
   （目标 key 的 commit_lock + `commit_object_file`）。
 
-### 5.1 对象元数据缓存（roadmap §3.8）
+### 5.1 对象元数据缓存
 
 `meta_cache.h:MetaCache<FsCachedMeta>`（`localfs_backend.h:FsMetaCache`）按
 (bucket, key) 缓存 `ObjectMeta + TierInfo + FsMetaStamp`，戳 =
@@ -255,7 +254,7 @@ rename 覆盖对象（PUT / complete / copy / tiered 的 stub 与回填），就
   key 都以该串为前缀，故中序输出等价全排序）、目录标记文件 `.lights3-dir` 的
   排序键是**空串**（还原为 key `<rel>`，恰好排在同目录其他条目之前，与全排序
   中 `a/b/ < a/b/x` 一致）。`kBucketMarker` 与 sidecar 过滤掉。
-- **目录快照缓存**（`list_cache.h:DirListCache`，roadmap §3.5 ②）：翻页曾需对
+- **目录快照缓存**（`list_cache.h:DirListCache`）：翻页曾需对
   路径上每个目录重做 readdir + 全排序，页码越深越贵。目录的**名字表**由目录
   自身的 inode + mtime/ctime 唯一标识（POSIX 规定该目录内任何条目增删改名都
   更新二者），因此可缓存：读目录前先 `stat` 取 `Stamp`，命中返回共享的排序
@@ -280,7 +279,7 @@ rename 覆盖对象（PUT / complete / copy / tiered 的 stub 与回填），就
   （`localfs_backend.cc:max_key_with_prefix`，降序扫描第一命中即最大，同样走
   目录缓存；组被并发删空则回落组名本身），与"最后返回的 key"语义一致——下
   一页从组尾之后继续，不会重发组内 key。
-- **元数据并行装载**（`LocalFsBackend::load_page_meta`，roadmap §3.5 ①）：遍历
+- **元数据并行装载**（`LocalFsBackend::load_page_meta`）：遍历
   只收集本页 key；随后按 `list_meta_concurrency`（默认 8，受池大小与"每
   worker ≥32 key"限制）条带分给池线程 `when_all` 并行 `load_meta`（每 key 一
   次 stat + 一次 getxattr），结果按下标复原顺序。readdir 与 stat 之间被并发删
@@ -328,7 +327,7 @@ marker 并 **fdatasync marker、fsync bucket 目录与 root 两级目录项**（
   分片数据已持久——反序在"写完 .md5 后掉电"时会留下 fsync 过的 .md5 配
   零块数据，complete 会拼出 ETag 正确、内容为零的对象。rename 失败时若目录
   已消失，说明 body 读取期间上传被并发 abort，报 `NoSuchUpload`。分片校验和
-  （`upload_part` 的 `PartChecksum` 参数，roadmap §2.2）在 body 读穿后以
+  （`upload_part` 的 `PartChecksum` 参数）在 body 读穿后以
   `resolved()` 值随 `.md5` 一起落盘，`list_parts` 与 complete 从同处读回。
 - **complete**（`localfs_backend.cc:complete_multipart`）：
   1. 逐个校验声明的分片：`part.NNNNN` 存在且 `.md5` 与客户端 ETag
@@ -373,7 +372,7 @@ GET 的 body 传输阶段每块各自 hop 一次池（`FdStreamReader::read`）�
 所有中间产物由 `TmpFile` RAII 兜底删除，接口契约（`backend.h`）要求
 "body.read 抛错则绝不提交"在此天然成立。
 
-**故障注入点**（roadmap §6.1，`fault::check`）：`localfs.write`（staging 写
+**故障注入点**（`fault::check`）：`localfs.write`（staging 写
 循环，PUT / upload_part / complete 拼接）、`localfs.fsync`（`fsync_file` 与
 `fsync_path`）、`localfs.rename`（`commit_object_file` 与 tiered 提交原语的
 rename 前）；xlocalfs 的 ring 写路径另有 `xlocalfs.write`。
@@ -431,11 +430,11 @@ rename 前）；xlocalfs 的 ring 写路径另有 `xlocalfs.write`。
 RAII，`ok` 默认 false，任何未走到成功标记的退出路径（S3Error、errno 异常、
 断连）都计为错误，无需在每个 throw 前补代码。
 
-roadmap §3.5 追加的序列：`lights3_localfs_xattr_fallback`（gauge，§2）、
+另一组序列：`lights3_localfs_xattr_fallback`（gauge，§2）、
 `lights3_localfs_xattr_write_failures_total`、
 `lights3_localfs_orphan_sidecars_removed_total`（listing 自愈 + §12 扫描合计）、
 `lights3_localfs_list_dir_cache_total{result=hit|miss}` 与
-`lights3_localfs_list_dir_cache_entries`（§6 目录快照缓存）；roadmap §3.8 的
+`lights3_localfs_list_dir_cache_entries`（§6 目录快照缓存）；以及
 `lights3_meta_cache_lookups_total{result}` / `lights3_meta_cache_invalidations_total` /
 `lights3_meta_cache_entries`（§5.1 元数据缓存，族名跨后端共用）。
 
@@ -445,7 +444,7 @@ roadmap §3.5 追加的序列：`lights3_localfs_xattr_fallback`（gauge，§2�
 收尾。xlocalfs 的 override 须回链本实现。定时任务统一经
 `LocalFsBackend::schedule_periodic`：完成后再重挂，永不重叠。
 
-## 11. scrub（`run_scrub_once`，roadmap §3.1）
+## 11. scrub（`run_scrub_once`）
 
 > 触发面：离线 `lights3 fsck <backend>`、在线网关的 `POST /-/admin/fsck/<backend>`
 > （`lights3-ctl fsck --offline`，[cli.md §3.5](../../usage/cli.md)）；两者共用 `app/admin_jobs.h` 的分派。
@@ -475,7 +474,7 @@ roadmap §3.5 追加的序列：`lights3_localfs_xattr_fallback`（gauge，§2�
 限速与中断同 duostore scrub（`storage/scrub_throttle.h:ScrubThrottle` +
 `bg_.closing()` 探测），见 [duostore-core.md §8.4](duostore-core.md)。
 
-## 12. 孤儿 sidecar 定期扫描（`run_sidecar_sweep_once`，roadmap §3.5）
+## 12. 孤儿 sidecar 定期扫描（`run_sidecar_sweep_once`）
 
 §6 的自愈只覆盖被 listing 真正 readdir 过的目录，从不被列举的目录里的残留
 会永久占位。`LocalFsBackend::run_sidecar_sweep_once` 沿 mpu 超期清理的定时器

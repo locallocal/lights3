@@ -1,4 +1,4 @@
-// L2: /-/admin/tenants and /-/admin/usage (roadmap §3.9 ①③, docs/architecture/multi-tenancy.md
+// L2: /-/admin/tenants and /-/admin/usage (docs/architecture/multi-tenancy.md
 // §6). Tiered admin model:
 //   root (static credential)            everything
 //   tenant admin (role=admin)           read its own tenant, its buckets' usage,
@@ -298,7 +298,7 @@ Task<http::HttpResponse> S3Service::admin_tenancy(http::HttpRequest& req, std::s
     }
 }
 
-// POST /-/admin/config/reload (roadmap §4.4): root only; the app's hook re-reads
+// POST /-/admin/config/reload: root only; the app's hook re-reads
 // the file, applies the reloadable subset and reports the rest. The same path a
 // SIGHUP takes, exposed so `lights3-ctl reload` can drive it and read the outcome
 Task<http::HttpResponse> S3Service::admin_config_reload(http::HttpRequest& req, std::string& access_key,

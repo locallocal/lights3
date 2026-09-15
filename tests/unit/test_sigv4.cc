@@ -641,7 +641,7 @@ TEST(sigv4_presigned_url_expiry) {
     auth.verify(skewed);
 }
 
-// ---------- percent_decode semantic split (gaps §2.13) ----------
+// ---------- percent_decode semantic split ----------
 
 TEST(percent_decode_preserves_literal_plus) {
     // path / copy-source / canonical query: '+' is a legal literal character

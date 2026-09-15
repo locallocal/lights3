@@ -1,7 +1,7 @@
-# Testing: Matrix, e2e Coverage, Fuzzing, Fault Injection, Bench/Soak, Coverage (roadmap §6.1)
+# Testing: Matrix, e2e Coverage, Fuzzing, Fault Injection, Bench/Soak, Coverage
 
 The basic shape of unit tests and e2e is in [s3-protocol.md §8](../architecture/s3-protocol.md);
-this document covers the eight items roadmap §6.1 filled in: the ctest inventory
+this document covers eight things: the ctest inventory
 and labels, the website / lights3-ctl / fault-injection e2e sections, the fuzz
 harnesses, the fault-injection facade, the performance gate and soak, mint in
 ctest, ubsan/coverage builds, and the one-shot matrix script.
@@ -104,8 +104,7 @@ brings all three up and runs them in one go ([deployment.md §4.3](../usage/depl
   revocation), `website set/get/delete` (curl reads back what lights3-ctl wrote),
   `bench put/get` error-free, `fsck` with zero mismatches over the bench objects;
   the existing `usage/quota/tenant/reload` cases stay.
-- **Multi-gateway multipart** (`duostore-redis` variant,
-  [archive/multi-gateway-multipart-design.md §4 ②](../../archive/multi-gateway-multipart-design.md)):
+- **Multi-gateway multipart** (`duostore-redis` variant):
   two gateways on the same redis meta + the same data root; create on A, 5 parts
   uploaded alternating B/A, ListParts / ListMultipartUploads consistent on both sides,
   complete on B, HEAD/GET on A; the composite ETag is computed independently by the
@@ -199,7 +198,7 @@ only as client-c's nested submodule and is not a repository-wide dependency.
 
 - `scripts/bench_matrix.sh <lights3> <lights3-ctl> [--drivers a,b] [--tls on|off|both]
   [--duration N] [--concurrency N] [--size SZ] [--objects N] [--modes put,get]
-  [--io-threads N] [--json FILE] [--label TEXT] [--keep-log]`: the performance baseline matrix (roadmap §4.3) -- one
+  [--io-threads N] [--json FILE] [--label TEXT] [--keep-log]`: the performance baseline matrix -- one
   localfs gateway per (driver × TLS) cell running `lights3-ctl bench put/get`, output
   as a Markdown table plus one JSON line per cell; the driver list defaults to
   the `drivers:` line of `lights3 --version`. Results are kept in

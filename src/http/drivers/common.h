@@ -24,14 +24,14 @@ namespace lights3::http::driver {
 
 // ---------- Driver-internal buffer constants ----------
 // Shutdown/backpressure bounds (drain cap, trailer cap, chunk size, shutdown
-// grace) have been promoted to HttpConfig options (docs/archive/gaps.md §7), with
+// grace) have been promoted to HttpConfig options, with
 // defaults consolidated in config.h; only purely internal values remain here
 // Streaming read/write chunk size (default of http.io_chunk_size)
 inline constexpr size_t kIoChunkBytes = 64 * 1024;
 // Scratch buffer for draining, line parsing, etc.
 inline constexpr size_t kScratchBytes = 16 * 1024;
 
-// ---------- Pooled I/O buffers (roadmap §4.3 ②) ----------
+// ---------- Pooled I/O buffers ----------
 // Streaming responses used to construct a zero-initialized std::vector per
 // response (a 64KiB memset plus a heap round trip each time, in every driver).
 // Buffers now come from a per-thread free list and are never cleared: the
@@ -105,7 +105,7 @@ private:
     size_t cap_ = 0;
 };
 
-// ---------- Double-buffered body pull (roadmap §4.3 ①) ----------
+// ---------- Double-buffered body pull ----------
 // The drivers used to alternate strictly: read a chunk from the backend, write
 // it to the socket, read the next one -- throughput ~ 1 / (read latency +
 // write latency). StreamPrefetch keeps one read in flight while the caller
@@ -164,12 +164,11 @@ private:
     bool eof_ = false;
 };
 
-// Lock-free counters behind IHttpServer::stats() (roadmap §4.2); shared by the
+// Lock-free counters behind IHttpServer::stats(); shared by the
 // drivers that own their accept loop
 struct ConnCounters {
     std::atomic<uint64_t> accepted{0}, rejected_limit{0}, active{0}, keepalive_closes{0};
     std::atomic<uint64_t> timeouts_idle{0}, timeouts_header{0}, timeouts_body{0}, timeouts_write{0};
-    // roadmap §5.3
     std::atomic<uint64_t> requests{0}, tls_ok{0}, tls_failed{0}, parse_errors{0};
     ConnStats snapshot() const {
         auto ld = [](const std::atomic<uint64_t>& a) { return a.load(std::memory_order_relaxed); };
@@ -320,7 +319,7 @@ inline BodyFraming parse_body_framing(const HeaderMap& headers) {
     return f;
 }
 
-// Request id for driver fallback responses (docs/archive/gaps.md §4): 400/500 are
+// Request id for driver fallback responses: 400/500 are
 // precisely the two error classes that most need log correlation, yet
 // previously carried neither an x-amz-request-id header nor a RequestId in
 // the XML. L2 dispatch never ran at this point, so the id can only be

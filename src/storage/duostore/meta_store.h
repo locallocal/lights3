@@ -30,7 +30,7 @@
 namespace lights3::storage::duostore {
 
 // Tiering state of an object when duostore is the local side of a TieredBackend
-// (roadmap §3.6 ⑥, docs/architecture/storage/tiered-design.md §3): remote = the data lives in the cloud and
+// (docs/architecture/storage/tiered-design.md §3): remote = the data lives in the cloud and
 // `data` is empty (a stub), cached = local extents are a cache of the cloud replica.
 // Codec object record v3; absent on older records = local
 struct TierState {
@@ -67,13 +67,13 @@ struct PartRec {
     std::string etag;
     int64_t modified_ms = 0;
     DataRef data;
-    // Verified part checksum (roadmap §2.2), codec part-record v2; empty = none
+    // Verified part checksum, codec part-record v2; empty = none
     std::string checksum_algorithm;
     // base64
     std::string checksum_value;
 };
 
-// gcq entry source (docs/archive/gaps.md §6.1): only with per-source bucketed counters can
+// gcq entry source: only with per-source bucketed counters can
 // GC pinpoint whether "reclaim pressure comes from overwrites, bulk deletes, or
 // abandoned mpu parts". Persisted as the reason byte of the codec gcq record
 // (previously always written as 0 and discarded on decode); old entries decode to
@@ -165,7 +165,7 @@ struct LeaseInfo {
 };
 
 // Read-only slice of the meta shared by IMetaStore and its point-in-time
-// snapshots (roadmap §3.7 online meta dump): exactly the reads dump_meta needs.
+// snapshots (online meta dump): exactly the reads dump_meta needs.
 // A snapshot implementation must make every method observe one consistent state
 // KV facade records (see IMetaStore::kv_*)
 struct KvItem {
@@ -205,7 +205,7 @@ struct IMetaReadView {
     virtual ~IMetaReadView() = default;
 };
 
-// One entry of a meta backup chain (backlog-sequence ⑧, docs/architecture/storage/duostore-core.md
+// One entry of a meta backup chain (docs/architecture/storage/duostore-core.md
 // §11.1): what an engine wrote into the backup directory and how to address it
 // at restore time. full=false is a delta over the previous entry of the chain
 struct MetaBackupEntry {
@@ -231,7 +231,7 @@ struct IMetaStore : IMetaReadView {
     virtual bool bucket_exists(std::string_view b) = 0;
 
     // ---- object ----
-    // Meta only, no manifest (docs/archive/gaps.md §3.9): HEAD/precondition reads go here.
+    // Meta only, no manifest: HEAD/precondition reads go here.
     // decode_object materializes the entire extent vector (650k extents ≈ 26MB)
     // only to discard it immediately; decode_object_meta decodes just the
     // fixed-length header
@@ -251,12 +251,12 @@ struct IMetaStore : IMetaReadView {
     // the old same-number part enters the GC ledger in the same batch
     virtual void put_part(std::string_view b, std::string_view k, std::string_view id, PartRec p) = 0;
     virtual std::vector<PartRec> list_parts(std::string_view b, std::string_view k, std::string_view id) = 0;
-    // Pagination hint (docs/archive/gaps.md §5.1): return entries with (key, upload_id)
+    // Pagination hint: return entries with (key, upload_id)
     // strictly greater than (key_marker, id_marker), in ascending order; with
     // limit>0 return at most limit entries. An empty id_marker with a non-empty
     // key_marker means "key > key_marker" (the whole key was paged past, S3
     // key-marker-only semantics) -- not "(key_marker, "") < (key, id)".
-    // prefix (roadmap §3.5): only entries whose key starts with prefix. An engine
+    // prefix: only entries whose key starts with prefix. An engine
     // that honors limit MUST honor prefix as well (seek to it and stop past it):
     // returning `limit` entries from before the prefix range would let the
     // caller's own prefix filter empty the page and misreport end-of-list.
@@ -275,7 +275,7 @@ struct IMetaStore : IMetaReadView {
     virtual void abort_upload(std::string_view b, std::string_view k, std::string_view id) = 0;
 
     // ---- resource allocation and GC accounting (§9) ----
-    // Batch dispatch (docs/archive/gaps.md §3.9): returns the first id of a contiguous run
+    // Batch dispatch: returns the first id of a contiguous run
     // [first, first+n); durably monotonic, segment-reserved. With per-id dispatch,
     // concurrent writers interleave one object's chunk ids and the manifest's run
     // encoding becomes useless (it actually bloats 28% after encoding); writers
@@ -288,7 +288,7 @@ struct IMetaStore : IMetaReadView {
     // The GC consumer resumes scanning from the min_seq checkpoint: head entries
     // skipped by grace/pin and not yet acked cannot stall the whole round or get
     // double-counted (§9.1). max_extents = cap on cumulative extents per batch
-    // (docs/archive/gaps.md §2.11: a 256-entry count-based batch can resident GB-scale in
+    // (a 256-entry count-based batch can resident GB-scale in
     // the worst case): close the batch early once the cap is reached, but return at
     // least 1 entry (oversized single entries left from before splitting must still
     // be consumable)
@@ -323,7 +323,7 @@ struct IMetaStore : IMetaReadView {
     // compaction ref swap
     virtual bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version, const DataRef& from,
                               const DataRef& to) = 0;
-    // Batch ref swap (docs/archive/gaps.md §2.13 batched compaction): independent CAS per
+    // Batch ref swap (batched compaction): independent CAS per
     // item, returns per-item success/failure. Forwards entry by entry by default;
     // local engines (rocks/sqlite) override with a single-batch/single-transaction
     // commit — per-entry sqlite swap is one fsync per entry and contends for the
@@ -337,7 +337,7 @@ struct IMetaStore : IMetaReadView {
         for (const auto& r : reqs) out.push_back(swap_extents(r.bucket, r.key, r.expect_version, r.from, r.to));
         return out;
     }
-    // Multi-gateway GC lease (docs/archive/gaps.md §6.1): single-instance GC/orphan-scan
+    // Multi-gateway GC lease: single-instance GC/orphan-scan
     // was previously only a gc_enabled **convention** — two machines misconfigured
     // with GC both on would unlink each other's empty-pack verdicts. Take the lease
     // before each round: shared engines (redis/tikv) implement it as an atomic CAS
@@ -350,8 +350,7 @@ struct IMetaStore : IMetaReadView {
     // other gateways); that is what the read lease below covers on shared
     // engines, with gc_grace as the fallback when it is off
     virtual bool try_gc_lease(std::string_view /*owner*/, int64_t /*ttl_ms*/) { return true; }
-    // Multi-gateway read / write leases (roadmap §3.7; write side:
-    // docs/archive/multi-gateway-multipart-design.md §4 ①): each gateway
+    // Multi-gateway read / write leases (write side): each gateway
     // periodically publishes, under its owner id with a TTL (crashed publishers
     // yield via expiry), the start time of its oldest in-flight read and of its
     // oldest in-flight write. The GC gateway reads the min across live leases:
@@ -377,7 +376,7 @@ struct IMetaStore : IMetaReadView {
     // (a gateway running an older build): the write floor is then unknown and
     // the consumer falls back to grace-only for that round
     virtual std::optional<LeaseInfo> min_lease() { return std::nullopt; }
-    // Point-in-time read snapshot for the online meta dump (roadmap §3.7):
+    // Point-in-time read snapshot for the online meta dump:
     // every read through the returned view observes one consistent state while
     // writes continue. nullptr = engine cannot snapshot (redis) — the caller
     // must then guarantee write quiescence for a consistent dump. The view
@@ -424,7 +423,7 @@ struct IMetaStore : IMetaReadView {
         (void)puts;
         throw s3::S3Error(s3::S3ErrorCode::NotImplemented, "this meta engine has no KV facade");
     }
-    // ---- Incremental backup / PITR (backlog-sequence ⑧) ----
+    // ---- Incremental backup / PITR ----
     // Engines with a gateway-side physical mechanism (sqlite: WAL segment archive;
     // rocksdb: BackupEngine) implement backup_physical: write entry `id` into dir --
     // full=true a complete copy that starts a chain, full=false the delta since the
@@ -447,7 +446,7 @@ struct IMetaStore : IMetaReadView {
     // point-in-time chunk_referenced, and only warns without deleting on "refs
     // present, file missing"; both directions tolerate a weakly consistent snapshot
     virtual void scan_refs(const std::function<void(uint64_t file_id)>& cb) = 0;
-    // Cross-gateway cache invalidation (backlog-sequence ⑤): an engine that can push
+    // Cross-gateway cache invalidation: an engine that can push
     // peers' commits calls on_key(bucket, key) for every object-record change it
     // observes (including this instance's own) and on_reset() whenever the feed
     // (re)connects -- messages during a gap are lost, so the subscriber drops

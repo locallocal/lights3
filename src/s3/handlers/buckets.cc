@@ -21,7 +21,7 @@ Task<http::HttpResponse> S3Service::list_buckets(const RequestAuth& auth) {
             // Internal reserved names never appear in the user-visible list (docs/architecture/credential-management.md
             // §4.1)
             if (b.name == storage::kSysBucketName) continue;
-            // Filter by policy (docs/archive/gaps.md §5.10): not filtering was previously a documented trade-off
+            // Filter by policy: not filtering was previously a documented trade-off
             // ("only bucket names leak"), but bucket names are exactly step one of an attack chain -- restricted
             // credentials should not see that buckets outside their allowlist exist
             if (auth.policy && !auth.policy->allows_bucket(b.name)) continue;
@@ -64,7 +64,7 @@ Task<http::HttpResponse> S3Service::list_buckets(const RequestAuth& auth) {
     co_return resp;
 }
 
-// CreateBucket: parses CreateBucketConfiguration/LocationConstraint (docs/archive/gaps.md §5.4).
+// CreateBucket: parses CreateBucketConfiguration/LocationConstraint.
 // Previously the request body was never read, so cross-region bucket creation silently succeeded while a later
 // GetBucketLocation echoed the local region -- leading clients to conclude the data lived elsewhere. Empty body
 // and empty LocationConstraint are both treated as us-east-1 (S3 convention: that region writes no constraint)
@@ -154,7 +154,7 @@ Task<http::HttpResponse> S3Service::create_bucket(http::HttpRequest& req, std::s
 Task<http::HttpResponse> S3Service::head_bucket(std::string bucket) {
     bool exists = co_await router_.resolve(bucket).bucket_exists(bucket);
     if (!exists) throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist", bucket);
-    // boto3's cross-region redirect depends on this header (docs/archive/gaps.md §5.9)
+    // boto3's cross-region redirect depends on this header
     http::HttpResponse resp;
     resp.headers.set("x-amz-bucket-region", auth_.region());
     co_return resp;

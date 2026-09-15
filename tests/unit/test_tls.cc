@@ -1,4 +1,4 @@
-// roadmap §4.1: TLS on every OpenSSL-backed driver (builtin/beast/httplib) —
+// TLS on every OpenSSL-backed driver (builtin/beast/httplib)
 // knobs (min version, cipher suites, client auth), SNI multi-certificate,
 // certificate hot reload, config validation (docs/usage/tls.md)
 #include <arpa/inet.h>
@@ -284,7 +284,7 @@ TEST(tls_client_auth_require_and_optional) {
     }
 }
 
-// backlog-sequence ⑥: the verified client certificate's subject CN and URI SAN
+// the verified client certificate's subject CN and URI SAN
 // reach L2 on HttpRequest::tls_identity, on every driver; absent without a
 // certificate (optional mode) and on plaintext
 TEST(tls_client_identity_reaches_the_request) {
@@ -475,7 +475,7 @@ TEST(tls_config_validation) {
     // knob without
     // listener
     CHECK(rejects("backends:\n  - name: m\n    type: memory\nhttp:\n  tls_client_ca: /ca.pem\n"));
-    // auth.tls_identity (backlog-sequence ⑥) presupposes client auth
+    // auth.tls_identity presupposes client auth
     CHECK(rejects(base + "  tls_client_ca: /ca.pem\n  tls_client_auth: require\nauth:\n  tls_identity: cn\n"));
     CHECK(rejects(base + "auth:\n  tls_identity: subject-cn\n"));
     auto with_id = Config::from_string(

@@ -70,7 +70,7 @@ struct TikvUndetermined {
     std::string what;
 };
 
-// ---- Upstream write-conflict classification (backlog-sequence ⑨) ----
+// ---- Upstream write-conflict classification ----
 // client-c's resolveLocksForWrite aborts a writer whose key is held by a live optimistic
 // transaction newer than its start_ts. At tikv/client-c@78a557e that exception carries
 // UnknownError and only the message says "write conflict"; the proposed upstream change

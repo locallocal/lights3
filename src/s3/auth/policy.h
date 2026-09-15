@@ -1,6 +1,6 @@
 // per-credential policy（docs/architecture/credential-management.md §10.4）。
-// Standalone header: the signature layer (sigv4.h) must carry a policy snapshot at verify time (docs/archive/gaps.md
-// §3.7), while credential_store.h depends on sigv4.h -- moving this back would create a cycle.
+// Standalone header: the signature layer (sigv4.h) must carry a policy snapshot at verify time, while
+// credential_store.h depends on sigv4.h -- moving this back would create a cycle.
 #pragma once
 
 #include <optional>
@@ -10,7 +10,7 @@
 
 namespace lights3::s3 {
 
-// Action granularity (docs/archive/gaps.md §5.10): previously the only switch was readonly, so "can write" implied
+// Action granularity: previously the only switch was readonly, so "can write" implied
 // "can delete" -- making it impossible to express the most common backup policy (write-only, no delete).
 // Classification is by consequence, not HTTP method: DeleteObjects is a POST yet clearly belongs to Delete
 enum class Action { Read, Write, Delete };

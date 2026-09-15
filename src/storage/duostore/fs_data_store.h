@@ -42,7 +42,7 @@ struct FsDataOptions {
     uint64_t pack_max_size = 128ull << 20;
     // number of concurrent active packs
     int pack_writers = 4;
-    // Age-based rotation (docs/archive/gaps.md §6.1): an active pack is sealed once its
+    // Age-based rotation: an active pack is sealed once its
     // first record was written longer than this ago, complementing the capacity
     // threshold. With capacity-only sealing under low write volume, an active pack
     // never rotates — its overwritten/deleted records become a dead region outside
@@ -54,7 +54,7 @@ struct FsDataOptions {
     // lifetime — the callback must not reference the store/backend (the assembly
     // side captures only a counter)
     std::function<void()> on_corruption{};
-    // io_uring data plane (roadmap §3.4 ⑤): when set, chunk writes/reads and pack
+    // io_uring data plane: when set, chunk writes/reads and pack
     // record reads go through the shared engine's pipelined streams and the
     // durability fdatasyncs become FSYNC SQEs; null = the original synchronous
     // path. Layout is identical either way. Readers copy these options and escape
@@ -72,7 +72,7 @@ public:
     // IMetaStore::alloc_file_run): returns the first id of a contiguous run
     // [first, first+n). Writers batch-allocate with geometric growth; chunk ids of
     // the same object stay contiguous, which is what makes the manifest's run
-    // encoding effective (docs/archive/gaps.md §3.9)
+    // encoding effective
     using FileIdAlloc = std::function<uint64_t(Extent::Kind, uint32_t)>;
     // Pack sealing callback (IMetaStore::seal_pack): reports the final file size
     // on rotation and close. Unsealed packs left behind by a crash (callback never
@@ -87,7 +87,7 @@ public:
     FsDataStore(const FsDataStore&) = delete;
 
     Task<std::unique_ptr<DataWriter>> open_writer(WriteHint hint) override;
-    // Batch-write override (compaction migration, docs/archive/gaps.md §2.13):
+    // Batch-write override (compaction migration):
     // pack-eligible items are batch-appended with one slot lock + one fdatasync;
     // items over the threshold / with packs disabled fall back to the per-item
     // open_writer path
@@ -143,10 +143,10 @@ private:
     // first flushes the unsynced writes to disk). The slot std::mutex cannot be
     // held across a suspension point, so the pwrites and any rotation fdatasync
     // stay blocking inside the lock; only the final batch fdatasync moves off-lock
-    // (on a dup of the pack fd) onto the ring (roadmap §3.4 ⑤)
+    // (on a dup of the pack fd) onto the ring
     Task<std::vector<Extent>> append_pack_records(std::span<const PackAppendItem> items);
 
-    // Sealing split in two steps (docs/archive/gaps.md §3.9): inside the lock only close
+    // Sealing split in two steps: inside the lock only close
     // the fd / clear slot state and push (id,size) onto seal_retry_; seal_'s meta
     // commit (possibly a network RTT/fsync) runs outside the lock in flush_seals.
     // Previously seal_ running inside the slot mutex would block that slot; on

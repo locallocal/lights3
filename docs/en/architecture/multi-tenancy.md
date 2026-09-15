@@ -1,15 +1,16 @@
-# Usage Accounting, Quotas and Multi-Tenancy (roadmap §3.9)
+# Usage Accounting, Quotas and Multi-Tenancy
 
 > Status: all four items landed (2026-09-04). Code: `src/s3/usage.{h,cc}`,
 > `src/s3/quota.{h,cc}`, `src/s3/tenant.{h,cc}`, `src/s3/audit.{h,cc}`,
 > `src/s3/handlers/{quota_gate,bucket_quota,admin_tenants}.cc`; CLI
 > `src/tools/lights3_ctl_{usage,quota,tenant}.cc`. Unit tests in
-> `tests/unit/test_tenancy.cc`, e2e in the "roadmap §3.9" section of
+> `tests/unit/test_tenancy.cc`, e2e in the "usage accounting / quotas /
+> tenants" section of
 > `tests/e2e/run_e2e.sh`.
 
 ## 1. Goals and Boundaries
 
-Roadmap §3.9 defines four items as one dependency chain: **usage accounting →
+This module defines four items as one dependency chain: **usage accounting →
 quotas → tenant entities → audit log**. This document follows the chain. One
 principle runs through all of it: **everything lives at L2 (the S3 service
 layer); the storage layer and the meta schema are untouched** —
@@ -25,7 +26,7 @@ layer); the storage layer and the meta schema are untouched** —
 
 The price: counters are "approximate between two full recounts" (§2.4) rather
 than strongly consistent inside a meta transaction — the "offline aggregation"
-option of the two the roadmap offered; §2.5 gives the reasoning.
+one of the two candidate routes; §2.5 gives the reasoning.
 
 ## 2. Usage Accounting
 
@@ -101,7 +102,7 @@ single-flight (a concurrent rescan gets `SlowDown`).
 
 ### 2.5 Why Not Meta-Side Counters
 
-The roadmap listed two routes: counters inside the meta transaction (one
+There were two routes on the table: counters inside the meta transaction (one
 implementation per IMetaStore, with tikv needing the §3.7-style append-only
 delta rows to avoid hot-row conflicts) or an offline aggregation scan. The
 latter won because (1) of the six backends, localfs/xlocalfs/cloudproxy/tiered
@@ -171,7 +172,7 @@ writes an audit record (§5).
 
 ### 3.4 Mid-Flight Multipart Semantics
 
-The roadmap asked for the multipart mid-flight semantics to be defined:
+The multipart mid-flight semantics are defined as follows:
 
 1. **Parts consume quota.** UploadPart is judged by the part's size and adds it
    to `mpu_bytes` — the part really occupies disk; not counting it would be a
@@ -236,7 +237,7 @@ mTLS client certificate (auth.tls_identity) acts as the credential bound in .sys
 ```
 
 `tenant`/`role` are snapshotted at verify time together with the policy
-(`VerifiedIdentity`, the same reason as docs/archive/gaps.md §3.7), so in-flight
+(`VerifiedIdentity`, the same reason as), so in-flight
 requests are unaffected by concurrent edits. `role` accepts only
 `user`/`admin`; anything else is `InvalidRequest` (a typo in the credentials
 file is a startup error, never a silent downgrade).
@@ -308,11 +309,11 @@ fields are **omitted, never empty strings**:
 | `usage.rescan` | on-demand scan | `bucket`, `detail`=result |
 | `config.reload` | `POST /-/admin/config/reload` ([config-reload.md](../usage/config-reload.md)) | `detail`=applied / requires_restart counts, or the error |
 | `tables.metrics` | Iceberg REST `reportMetrics` ([s3-protocol.md §1](s3-protocol.md), Tables row) | `bucket`, `key`=`<ns>/<table>`, `detail`=filter / projection / counters |
-| `access` | **only with `audit.data_plane=true`**: one per request | `method`/`path`/`status`/`bytes`/`bucket`/`key`/`tenant`/`trace_id` (roadmap §5.4) |
+| `access` | **only with `audit.data_plane=true`**: one per request | `method`/`path`/`status`/`bytes`/`bucket`/`key`/`tenant`/`trace_id` |
 
 Control-plane events are flushed one by one (rare and critical); `access`
 records are not (buffered by the sink under high QPS). `access` is the audit
-counterpart of roadmap §5.2's "structured access log"; §5.2's async operational
+counterpart of the "structured access log"; the async operational
 logging and slow-request log remain separate items.
 
 ## 6. Admin API Reference

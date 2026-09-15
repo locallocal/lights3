@@ -1,4 +1,4 @@
-// L2: request body integrity verification (docs/archive/gaps.md §5.6). Content-MD5 and x-amz-checksum-*
+// L2: request body integrity verification. Content-MD5 and x-amz-checksum-*
 // are both "client pre-declares the body digest"; unlike x-amz-content-sha256 they are independent of
 // the signature: they still apply when auth is disabled, catching request bodies rewritten in transit.
 //
@@ -223,7 +223,7 @@ inline void validate_checksum_algorithm(const http::HttpRequest& req) {
     }
 }
 
-// ---- Checksum persistence support (roadmap §2.2) ----
+// ---- Checksum persistence support ----
 
 // Uppercase wire name ("CRC32C") from a spec entry (header is "x-amz-checksum-crc32c")
 inline std::string checksum_wire_name(const ChecksumSpec& sp) {

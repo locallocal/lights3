@@ -159,7 +159,7 @@ TEST(duostore_backend_suite_all_pack) {
     sync_wait(b->close());
 }
 
-// io_uring fs data plane (roadmap §3.4 ⑤): the same suite over the uring-backed
+// io_uring fs data plane: the same suite over the uring-backed
 // FsDataStore -- default parameters (mixed pack/chunk) and small-chunk (multi-chunk
 // manifests exercising the read-ahead stream across extents). Where io_uring is
 // unavailable the config constructor falls back to the sync path, so the suite stays
@@ -231,7 +231,7 @@ TEST(xlocalfs_large_object_roundtrip) {
     sync_wait(b.close());
 }
 
-// Kernel capability probing (docs/archive/gaps.md §6.3): previously IORING_OP_READ/WRITE (5.6+) was used
+// Kernel capability probing: previously IORING_OP_READ/WRITE (5.6+) was used
 // unconditionally, so on 5.1-5.5 every IO got -EINVAL. With probing in effect, old kernels take the READV/WRITEV
 // fallback -- here we positively verify the probe conclusion is self-consistent and exercise the fallback path itself
 // (forcing READ/WRITE off cannot be injected, so uring_forced_readv_roundtrip covers it via direct engine calls
@@ -281,7 +281,7 @@ TEST(xlocalfs_uring_readv_writev_fallback_roundtrip) {
     eng->shutdown();
 }
 
-// Batched submission (docs/archive/gaps.md §6.3): previously one io_uring_enter per SQE. After switching to "the
+// Batched submission: previously one io_uring_enter per SQE. After switching to "the
 // on-duty flusher submits on behalf of others", concurrent submissions piggyback on each other -- the correctness
 // criterion is that every co_await gets its own result, with no lost or mismatched completions. SQ depth is set below
 // the concurrency, also covering "SQ full -> wait for the flusher to make progress"
@@ -321,7 +321,7 @@ TEST(xlocalfs_uring_batched_submit_under_concurrency) {
     eng->shutdown();
 }
 
-// Same-backend copy fast path (docs/archive/gaps.md §6.3): copy_file_range in-kernel transfer, etag identical to the
+// Same-backend copy fast path: copy_file_range in-kernel transfer, etag identical to the
 // source; new user_meta with REPLACE semantics takes effect
 TEST(localfs_copy_object_fast) {
     TmpDir tmp;
@@ -510,7 +510,7 @@ TEST(localfs_orphan_sidecar_reaped_by_list) {
     CHECK(fs::exists(tmp.path / "data/bkt/stay.bin.lights3-meta"));
 }
 
-// ---------- scrub (roadmap §3.1) ----------
+// ---------- scrub ----------
 
 // Full verify over the real layout: single-part, directory marker, and a
 // multipart composite recomputed from part_sizes all pass clean; a silently
@@ -652,7 +652,7 @@ TEST(localfs_commit_cached_persists_data_before_sidecar) {
     sync_wait(b->close());
 }
 
-// ---------- Diff between localfs pruned LIST and the full-scan reference implementation (gaps §2.7) ----------
+// ---------- Diff between localfs pruned LIST and the full-scan reference implementation ----------
 // The memory backend goes through apply_listing (full collection + sort) as the semantic reference; localfs's
 // pruned directory-tree walk must produce identical results for any prefix/delimiter/pagination combination
 TEST(localfs_list_pruning_matches_reference) {
@@ -733,7 +733,7 @@ TEST(localfs_list_pruning_matches_reference) {
     check_same(mid);
 }
 
-// ---------- roadmap §3.5: listing fan-out + directory snapshot cache ----------
+// ---------- listing fan-out + directory snapshot cache ----------
 
 namespace {
 
@@ -884,7 +884,7 @@ TEST(localfs_list_tolerates_vanished_key) {
     }
 }
 
-// ---------- roadmap §3.5: sidecar modes ----------
+// ---------- sidecar modes ----------
 
 TEST(localfs_sidecar_modes) {
     TmpDir tmp;
@@ -961,7 +961,7 @@ TEST(localfs_sidecar_modes) {
     }
 }
 
-// ---------- roadmap §3.5: xattr degradation visibility + fail-fast ----------
+// ---------- xattr degradation visibility + fail-fast ----------
 
 TEST(localfs_xattr_fallback_gauge_and_require_xattr) {
     TmpDir tmp;
@@ -1009,7 +1009,7 @@ TEST(localfs_xattr_fallback_gauge_and_require_xattr) {
     }
 }
 
-// ---------- roadmap §3.5: orphan sidecar sweep ----------
+// ---------- orphan sidecar sweep ----------
 
 TEST(localfs_orphan_sidecar_sweep) {
     TmpDir tmp;
@@ -1036,7 +1036,7 @@ TEST(localfs_orphan_sidecar_sweep) {
     sync_wait(b.close());
 }
 
-// ---------- roadmap §3.4: multi-in-flight streams, fixed resources, meta opcodes ----------
+// ---------- multi-in-flight streams, fixed resources, meta opcodes ----------
 
 namespace {
 
@@ -1057,7 +1057,7 @@ void write_file(const fs::path& p, const std::string& data) {
 
 }  // namespace
 
-// Read-ahead stream (roadmap §3.4 ①): multi-block file consumed through caller buffers
+// Read-ahead stream: multi-block file consumed through caller buffers
 // that are deliberately not divisors of the block size (partial slot consumption), plus a
 // Range window crossing a block boundary
 TEST(uring_read_stream_readahead_roundtrip) {
@@ -1134,7 +1134,7 @@ TEST(uring_read_stream_abandon_inflight_safe) {
     eng->shutdown();
 }
 
-// Write pipeline (roadmap §3.4 ①③): odd-sized commits exercise block reuse and the
+// Write pipeline: odd-sized commits exercise block reuse and the
 // hold-back; finish(true) sends the final write + FSYNC as one linked chain. Also the
 // empty-stream edge (finish with nothing written)
 TEST(uring_write_stream_linked_fsync_roundtrip) {
@@ -1181,7 +1181,7 @@ TEST(uring_write_stream_linked_fsync_roundtrip) {
     eng->shutdown();
 }
 
-// Fixed buffer pool exhaustion (roadmap §3.4 ②): more concurrent streams than registered
+// Fixed buffer pool exhaustion: more concurrent streams than registered
 // blocks -- the overflow silently falls back to heap blocks with identical results, and
 // every registered block returns to the pool once the streams are gone
 TEST(uring_fixed_buffers_exhaust_and_return) {
@@ -1226,7 +1226,7 @@ TEST(uring_fixed_buffers_exhaust_and_return) {
     eng->shutdown();
 }
 
-// Fixed file table (roadmap §3.4 ②): register -> IO through the slot with
+// Fixed file table: register -> IO through the slot with
 // IOSQE_FIXED_FILE -> unregister returns the slot to the pool
 TEST(uring_fixed_files_register_roundtrip) {
     TmpDir tmp;
@@ -1265,7 +1265,7 @@ TEST(uring_fixed_files_register_roundtrip) {
     eng->shutdown();
 }
 
-// Metadata opcodes (roadmap §3.4 ③): openat -> statx -> renameat -> unlinkat through the
+// Metadata opcodes: openat -> statx -> renameat -> unlinkat through the
 // ring, each gated on its probe bit (older kernels skip the missing ones)
 TEST(uring_meta_opcodes_roundtrip) {
     TmpDir tmp;
@@ -1309,7 +1309,7 @@ TEST(uring_meta_opcodes_roundtrip) {
     eng->shutdown();
 }
 
-// Ring sharding (roadmap §3.4 ④): the batched-submission correctness criterion (every
+// Ring sharding: the batched-submission correctness criterion (every
 // co_await gets its own result) holds across two independent rings with tiny SQs
 TEST(uring_multi_ring_concurrent_roundtrip) {
     TmpDir tmp;
@@ -1378,7 +1378,7 @@ TEST(xlocalfs_backend_suite_no_meta_ops) {
     sync_wait(b.close());
 }
 
-// ---------- object metadata cache (roadmap §3.8) ----------
+// ---------- object metadata cache ----------
 
 // MetaCache core: LRU budget, invalidation, the fill token, TTL, clear
 TEST(meta_cache_lru_token_ttl) {

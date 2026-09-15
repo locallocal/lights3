@@ -98,7 +98,7 @@ TEST(metrics_histogram_render) {
 }
 
 TEST(metrics_nonfinite_render) {
-    // Non-finite values must use the Prometheus spelling (docs/archive/gaps.md §4): the raw to_chars output
+    // Non-finite values must use the Prometheus spelling: the raw to_chars output
     // "inf"/"nan" would make the scraper reject the entire target, same failure mode as bucket-bound collapsing
     MetricsRegistry reg;
     reg.gauge_callback("lights3_test_nf_pos", "cb", [] { return std::numeric_limits<double>::infinity(); });
@@ -189,7 +189,7 @@ TEST(metrics_concurrent_smoke) {
     CHECK_EQ(h->snapshot().count, uint64_t(40000));
 }
 
-// ---------- §7 increment for L2 request metrics (docs/archive/gaps.md §7) ----------
+// ---------- §7 increment for L2 request metrics ----------
 
 TEST(s3_metrics_renders_pool_wait_histogram) {
     // The dedicated-pool criterion of concurrency.md §3.1 depends on this histogram; once collected it must be readable
@@ -247,7 +247,7 @@ TEST(s3_metrics_bytes_and_per_bucket) {
 
 TEST(s3_metrics_split_totals_and_bucket_batches) {
     // The streaming decorator feeds the lock-free totals per chunk and the
-    // per-bucket slot in batches (roadmap §4.3 ⑦); both halves must render
+    // per-bucket slot in batches; both halves must render
     s3::Metrics m;
     m.add_bytes_out_total(64 * 1024);
     m.add_bytes_out_total(64 * 1024);
@@ -270,7 +270,7 @@ TEST(s3_metrics_bucket_cardinality_capped) {
     CHECK(out.find("lights3_bucket_requests_total{bucket=\"_other\"}") != std::string::npos);
 }
 
-// roadmap §5.3: exact status codes and website-plane events
+// exact status codes and website-plane events
 TEST(s3_metrics_status_codes_and_website_events) {
     s3::Metrics m;
     for (int st : {200, 206, 304, 304, 404}) {
@@ -295,7 +295,7 @@ TEST(s3_metrics_status_codes_and_website_events) {
     CHECK(out.find("lights3_website_events_total{event=\"throttled\"} 0\n") != std::string::npos);
 }
 
-// roadmap §5.3: admission wait histogram / queue / cancellation / stall cuts and the
+// admission wait histogram / queue / cancellation / stall cuts and the
 // added L1 series (requests, TLS handshakes, parse errors)
 TEST(s3_metrics_renders_admission_counters_and_l1_extras) {
     s3::Metrics m;

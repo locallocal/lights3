@@ -1,4 +1,4 @@
-// cloudproxy AWS credential chain (roadmap §3.3): resolves signing credentials
+// cloudproxy AWS credential chain: resolves signing credentials
 // when the config carries no static access_key/secret_key — the near-mandatory
 // shape for EC2/EKS deployments. Order: environment (AWS_ACCESS_KEY_ID /
 // AWS_SECRET_ACCESS_KEY [/ AWS_SESSION_TOKEN]) → container endpoint

@@ -55,7 +55,7 @@ int parse_max(const http::HttpRequest& req, const char* name, int cap) {
     return std::min(v, cap);
 }
 
-// "scheme://host": Location must be a full URL (docs/archive/gaps.md §5.7). The scheme can only be relayed by the
+// "scheme://host": Location must be a full URL. The scheme can only be relayed by the
 // reverse proxy -- on direct connections this implementation is plaintext HTTP, TLS is terminated by a front proxy
 // (docs/architecture/s3-protocol.md)
 std::string request_base_url(const http::HttpRequest& req) {
@@ -65,13 +65,11 @@ std::string request_base_url(const http::HttpRequest& req) {
     return scheme + "://" + host;
 }
 
-// Pre-complete validation over one listing: minimum part size (docs/archive/gaps.md §5.7,
-// last part exempt) plus declared-checksum cross-check (roadmap §2.2 — the complete XML's
-// Checksum values are client claims and must match the stored, upload-time-verified
-// ones; a mismatch is BadDigest, a claim against a checksum-less part is InvalidPart).
-// Missing parts are not reported here but left to the backend's InvalidPart.
-// want_sizes (usage accounting, roadmap §3.9 ①) forces the listing and reports the
-// bytes of the parts named in the request plus the bytes of every stored part
+// Pre-complete validation over one listing: minimum part size (last part exempt) plus declared-checksum cross-check
+// (the complete XML's Checksum values are client claims and must match the stored, upload-time-verified ones; a
+// mismatch is BadDigest, a claim against a checksum-less part is InvalidPart). Missing parts are not reported here but
+// left to the backend's InvalidPart. want_sizes (usage accounting) forces the listing and reports the bytes of the
+// parts named in the request plus the bytes of every stored part
 struct PartTotals {
     bool listed = false;
     // sum over parts named in the complete XML
@@ -158,11 +156,11 @@ storage::ByteRange parse_copy_source_range(const std::string& v, uint64_t src_si
 
 Task<http::HttpResponse> S3Service::create_multipart(http::HttpRequest& req, std::string bucket, std::string key,
                                                      const RequestAuth& auth) {
-    // Quota gate (roadmap §3.9 ②): a bucket already over its limit refuses to start an
+    // Quota gate: a bucket already over its limit refuses to start an
     // upload at all; the per-part gate in upload_part then judges each part's bytes
     check_quota(bucket, 0, 0, auth);
     auto meta = meta_from_headers(req);
-    // Declared checksum algorithm survives create→complete (roadmap §2.2). Only the
+    // Declared checksum algorithm survives create→complete. Only the
     // COMPOSITE form is implemented: CRC64NVME (full-object only per AWS) and an
     // explicit FULL_OBJECT request get an honest 501 instead of a silently absent
     // checksum at complete time
@@ -219,7 +217,7 @@ Task<http::HttpResponse> S3Service::upload_part(http::HttpRequest& req, std::str
         check_copy_preconditions(req, src_meta);
         std::optional<storage::ByteRange> range;
         if (auto r = req.headers.get("x-amz-copy-source-range")) range = parse_copy_source_range(*r, src_meta.size);
-        // Part bytes count toward the bucket (in-flight multipart bytes, roadmap §3.9 ②)
+        // Part bytes count toward the bucket (in-flight multipart bytes)
         uint64_t part_bytes = range ? (*range->last - *range->first + 1) : src_meta.size;
         check_quota(bucket, static_cast<int64_t>(part_bytes), 0, auth);
 
@@ -238,17 +236,17 @@ Task<http::HttpResponse> S3Service::upload_part(http::HttpRequest& req, std::str
         co_return resp;
     }
 
-    // 411 (roadmap §2.5); UploadPartCopy above is body-less and exempt
+    // 411; UploadPartCopy above is body-less and exempt
     require_content_length(req);
     // Quota gate on the declared part length, then count what actually streamed
-    // (roadmap §3.9 ②; a re-uploaded part number over-counts until complete/abort
+    // (a re-uploaded part number over-counts until complete/abort
     // settle the upload against the stored parts)
     uint64_t declared = req.body && req.body->length() ? *req.body->length() : 0;
     check_quota(bucket, static_cast<int64_t>(declared), 0, auth);
     uint64_t written = 0;
     if (usage_ && usage_->enabled() && req.body)
         req.body = std::make_unique<ByteCountingReader>(std::move(req.body), &written);
-    // Declared part checksum persists with the part record (roadmap §2.2)
+    // Declared part checksum persists with the part record
     auto part_checksum = extract_part_checksum(req);
     http::StringBodyReader empty{""};
     http::BodyReader& body = req.body ? *req.body : static_cast<http::BodyReader&>(empty);
@@ -280,7 +278,7 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req, s
     std::vector<storage::PartInfo> parts;
     for (auto& child : root.children) {
         if (child.name != "Part") continue;
-        // Part count upper bound (docs/archive/gaps.md §5.7): previously unbounded appends, so one crafted XML could
+        // Part count upper bound: previously unbounded appends, so one crafted XML could
         // make this request read an arbitrarily long list into memory
         if (parts.size() >= size_t(storage::kMaxParts))
             throw S3Error(S3ErrorCode::InvalidRequest,
@@ -293,7 +291,7 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req, s
         // Re-check the upper bound: validated at upload time, but complete's list is a separate input
         storage::validate_part_number(p.part_no);
         p.etag = child.get("ETag");
-        // Optional per-part checksum claims (roadmap §2.2): cross-checked against the
+        // Optional per-part checksum claims: cross-checked against the
         // stored values before the backend commit
         for (std::string_view a : {"CRC32", "CRC32C", "CRC64NVME", "SHA1", "SHA256"}) {
             std::string v = child.get("Checksum" + std::string(a));
@@ -315,7 +313,7 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req, s
     bool accounting = usage_ && usage_->enabled();
     auto totals = co_await check_parts_before_complete(backend, bucket, key, upload_id, parts, min_part_size(),
                                                        accounting);
-    // Accounting at complete (roadmap §3.9 ①②): the named parts become the object's
+    // Accounting at complete: the named parts become the object's
     // bytes, every stored part leaves the in-flight pool, and a replaced object is
     // netted out. The gate therefore only refuses when the finished object would
     // still not fit (quota lowered after the parts were admitted): the upload stays
@@ -344,7 +342,7 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req, s
     w.element("Bucket", bucket);
     w.element("Key", key);
     w.element("ETag", quote_etag(result.etag));
-    // Composite checksum echo (roadmap §2.2): present when every part carried one
+    // Composite checksum echo: present when every part carried one
     if (!result.checksum_value.empty()) {
         w.element("Checksum" + result.checksum_algorithm, result.checksum_value);
         w.element("ChecksumType", result.checksum_type.empty() ? "COMPOSITE" : result.checksum_type);
@@ -359,7 +357,7 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req, s
 Task<http::HttpResponse> S3Service::abort_multipart(http::HttpRequest& req, std::string bucket, std::string key) {
     std::string upload_id = require_upload_id(req);
     auto& backend = router_.resolve(bucket);
-    // In-flight bytes leave the pool with the upload (roadmap §3.9 ①); a missing upload
+    // In-flight bytes leave the pool with the upload; a missing upload
     // surfaces the same NoSuchUpload the abort itself would
     uint64_t stored = co_await upload_parts_bytes(backend, bucket, key, upload_id);
     co_await backend.abort_multipart(bucket, key, upload_id);
@@ -373,13 +371,13 @@ Task<http::HttpResponse> S3Service::abort_multipart(http::HttpRequest& req, std:
 Task<http::HttpResponse> S3Service::list_parts(http::HttpRequest& req, std::string bucket, std::string key) {
     std::string upload_id = require_upload_id(req);
     // Previously neither max-parts nor part-number-marker was read, and IsTruncated=false was always reported
-    // （docs/archive/gaps.md §5.1）
+    //
     storage::ListPartsOptions opt;
     opt.max_parts = parse_max(req, "max-parts", 1000);
     opt.part_number_marker = parse_int_param(req, "part-number-marker", 0);
     if (opt.part_number_marker < 0) throw S3Error(S3ErrorCode::InvalidArgument, "Invalid part-number-marker value");
 
-    // encoding-type=url (roadmap §2.5): SDKs occasionally pass it through; before it entered
+    // encoding-type=url: SDKs occasionally pass it through; before it entered
     // the allowlist the whole request was 501. Same semantics as the two bucket listings
     bool encode_url = false;
     if (auto et = req.query_get("encoding-type")) {
@@ -406,7 +404,7 @@ Task<http::HttpResponse> S3Service::list_parts(http::HttpRequest& req, std::stri
         w.element("LastModified", util::iso8601(p.last_modified));
         w.element("ETag", quote_etag(p.etag));
         w.element("Size", p.size);
-        // Stored per-part checksum (roadmap §2.2)
+        // Stored per-part checksum
         if (!p.checksum_value.empty() && !p.checksum_algorithm.empty())
             w.element("Checksum" + p.checksum_algorithm, p.checksum_value);
         w.close();

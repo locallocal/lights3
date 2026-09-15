@@ -49,5 +49,5 @@ if(LIGHTS3_BUILD_TESTS)
   add_subdirectory(tests)
 endif()
 
-# ---- Install tree + packages (roadmap §6.3) ----
+# ---- Install tree + packages ----
 include(cmake/Packaging.cmake)

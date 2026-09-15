@@ -63,7 +63,7 @@ lights3 help [duostore [<sub>] | tier [<sub>] | fsck | tables [<sub>]]
 | Option | Applies to | Default | Meaning |
 | --- | --- | --- | --- |
 | `-c, --config=<path>` | all | `config/lights3.yaml` | YAML config file (format: [architecture.md §5](../architecture/overview.md#5-example-configuration-file)) |
-| `--version` | root command (`lights3-ctl` too) | — | print `lights3 <ver> (git <commit>, <build type>, <date>)` plus the `drivers:` / `features:` lines, exit 0; wins over `--check-config` (roadmap §6.3, [deployment.md §1](deployment.md)) |
+| `--version` | root command (`lights3-ctl` too) | — | print `lights3 <ver> (git <commit>, <build type>, <date>)` plus the `drivers:` / `features:` lines, exit 0; wins over `--check-config` ([deployment.md §1](deployment.md)) |
 | `--backend=<name>` | `duostore *`, `tier *`, `fsck` | — | backend name, same as the first positional |
 | `--file=<path>` | `duostore dump|load`, `tables export|import` | — | dump / JSON-lines file path, same as the second (for tables: the first) positional |
 | `--to=<dir>` / `--from=<dir>` | `duostore backup` / `restore` | — | backup chain directory (required) |
@@ -78,7 +78,7 @@ No subcommand means start: `Application(config)` → `open_storage()` →
 `start_server()` → `run()`, blocking until SIGINT/SIGTERM, then a graceful
 shutdown in the order of [architecture.md §4](../architecture/overview.md#4-process-structure-and-startup-flow);
 `run()`'s return value is the exit code: `0` = clean exit; `3` = unclean
-shutdown (roadmap §4.5) — requests still in flight past `http.shutdown_grace`,
+shutdown — requests still in flight past `http.shutdown_grace`,
 or a backend `close()` / thread-pool join that failed (each LOG_ERRORs; the
 process used to exit 0 regardless, invisible to a process manager). The drain
 deadline is `http.shutdown_grace` itself: one quantity bounds both the driver's
@@ -94,7 +94,7 @@ export LIGHTS3_SECRET_1=my-secret
 ./build/lights3 -c /etc/lights3/lights3.yaml
 ```
 
-**`--check-config`** (roadmap §6.2): a dry run that only parses and validates the
+**`--check-config`**: a dry run that only parses and validates the
 configuration — no backend is opened, no port bound. It runs the exact
 `Config::load` validation the server runs, then checks that `http.driver` and
 every `backends[].type` are compiled into this binary; `type: duostore`
@@ -102,7 +102,7 @@ backends additionally have their parameters parsed by the constructor's own
 `from_params` (engine selection, ranges, engines not compiled in fail right
 here), and the single-gateway combination of shared meta (redis / tikv) over
 local fs data is reported as `config warning:` on stderr without changing the
-exit code ([../archive/multi-gateway-multipart-design.md §4 ④](../../archive/multi-gateway-multipart-design.md));
+exit code;
 then it prints the resolved summary (driver/listener/TLS, threads, credential
 count, backends — duostore with `meta=… data=…`, routing rules, website
 entries, log and audit settings). Exit `0` = the file would
@@ -122,7 +122,7 @@ in `LIGHTS3_DUOSTORE` builds; both build every backend **without listening**,
 run, and exit. `<backend>` must name a `type: duostore` backend in the config,
 otherwise the command errors out. When run next to live gateways on a shared
 meta engine: `dump` is online-consistent on rocksdb/sqlite/tikv via an engine
-snapshot (roadmap §3.7); redis has no MVCC, so a dump is only consistent with
+snapshot; redis has no MVCC, so a dump is only consistent with
 writes stopped (the entry point warns). `load` always requires target-side
 write quiescence.
 
@@ -172,7 +172,7 @@ order as §2.2: put the data directory back before `restore`.
 > <backend>` (§3.5). The offline CLI and the admin endpoint share the type
 > dispatch and the findings definition in `app/admin_jobs.h`.
 
-Offline data-integrity scrub (roadmap §3.1; implementation details in
+Offline data-integrity scrub (implementation details in
 [storage/duostore-core.md §8.4](../../architecture/storage/duostore-core.md) and
 [storage/localfs.md §11](../../architecture/storage/localfs.md)). Same pattern as dump/load:
 builds every backend without listening, runs, and exits; **strictly
@@ -220,7 +220,7 @@ MPU completing mid-scrub; re-run to confirm. Safe against a live instance too
 
 ### 2.4 Background tasks on demand: `duostore gc|scan|quarantine`, `tier scan|gc|reconcile|quarantine`
 
-CLI exits for the background hooks (roadmap §3.2): `run_gc_once` /
+CLI exits for the background hooks: `run_gc_once` /
 `run_orphan_scan_once` / `scan_once` / tiered `run_gc_once` /
 `run_reconcile_once` used to be reachable only through timers and unit tests —
 an operator wanting space back *now* had to wait for the next tick (GC every
@@ -279,7 +279,7 @@ integrity-verdict surface is `lights3 fsck`.
 ### 2.5 Configuration hot reload: `SIGHUP`
 
 `kill -HUP <pid>` makes the server re-read the file given by `--config`
-(roadmap §4.4, [config-reload.md](config-reload.md)): after validating it as a
+([config-reload.md](config-reload.md)): after validating it as a
 whole, only the hot-reloadable subset is applied (log level,
 `log.slow_request_threshold`, `request_timeout`/`transfer_stall_timeout`,
 `http.metrics_access`, `max_inflight_requests`,
@@ -313,8 +313,7 @@ is "export with the old configuration → change it → import".
 `src/tools/lights3_ctl*.cc`, built next to `lights3`. Command groups: `cred`
 (credential admin plane), `website` (bucket static-website configuration),
 `bench` (load testing), `fsck` (online object verification), `quota` (bucket
-quotas), `tenant` (tenants and bucket ownership), `usage` (usage counters;
-roadmap §3.9, see [multi-tenancy.md](../architecture/multi-tenancy.md)), `reload`
+quotas), `tenant` (tenants and bucket ownership), `usage` (usage counters; see [multi-tenancy.md](../architecture/multi-tenancy.md)), `reload`
 (configuration hot reload, [config-reload.md](config-reload.md)), `object` (object
 internal layout, §3.10), `mpu` (zombie multipart cleanup, §3.11), `duostore` / `tier`
 (background rounds and quarantine ledgers on a live gateway, §3.12), `tables` (S3 Tables
@@ -433,7 +432,7 @@ lights3-ctl bench list-buckets  ListBuckets (no --bucket needed)
 | `--prefix=<p>` | `lights3-ctl-bench/` | key prefix |
 | `--max-keys=<n>` | 100 | `list` only |
 | `--keep` | false | keep the objects instead of deleting the pool at the end |
-| `-o, --output=text\|json` | `text` | `json`: stdout carries exactly one JSON object (mode, wall_s, workers, keys, size, ops, errors, ops_per_s, mib_per_s, latency_ms{avg,p50,p90,p99,max}); the per-second table and the prepare/cleanup notes move to stderr — the baseline-comparison input of `scripts/bench_gate.sh` (roadmap §6.2) |
+| `-o, --output=text\|json` | `text` | `json`: stdout carries exactly one JSON object (mode, wall_s, workers, keys, size, ops, errors, ops_per_s, mib_per_s, latency_ms{avg,p50,p90,p99,max}); the per-second table and the prepare/cleanup notes move to stderr — the baseline-comparison input of `scripts/bench_gate.sh` |
 
 The first error is printed to stderr (`lights3-ctl: bench: first error: …`); later
 ones only increment the err counter. A failure in the prepare phase (bucket
@@ -449,7 +448,7 @@ lights3-ctl bench list-buckets -j 16
 
 ### 3.5 `fsck` — online object verification / server-side scrub
 
-**`--offline <backend>`** (backlog-sequence ③): instead of the S3 API, ask the
+**`--offline <backend>`**: instead of the S3 API, ask the
 **running gateway** to scrub one backend (duostore manifest/crc/refs
 reconciliation, localfs/xlocalfs ETag full-verify -- the same implementation as
 `lights3 fsck`) through the admin plane:
@@ -587,7 +586,7 @@ lights3-ctl reload
 lights3-ctl reload --endpoint=https://s3.example.com
 ```
 
-### 3.10 `object` — object internal layout (roadmap §6.2)
+### 3.10 `object` — object internal layout
 
 CLI wrapper of `GET /-/admin/objects/<bucket>/<key>` (root only): prints where the
 object's bytes live inside the backend it routes to, so troubleshooting no longer
@@ -611,7 +610,7 @@ lights3-ctl object inspect photos 2026/01/a.jpg              # the server's JSON
 lights3-ctl object inspect photos 2026/01/a.jpg -o text      # table
 ```
 
-### 3.11 `mpu` — zombie multipart cleanup (roadmap §6.2)
+### 3.11 `mpu` — zombie multipart cleanup
 
 Over the standard S3 API (ListMultipartUploads / AbortMultipartUpload): any
 credential allowed on the bucket works, no admin plane involved. `list` walks

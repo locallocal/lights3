@@ -14,7 +14,7 @@ namespace lights3_cli {
 
 namespace {
 
-// Tiered background tasks on demand (roadmap §3.2; same offline pattern as the
+// Tiered background tasks on demand (same offline pattern as the
 // duostore admin commands — tiered sits over localfs + a cloud backend, no
 // exclusive lock issue, but the coldness verdict is atime-based and an offline
 // run sees its own process's access table, so `tier scan` demotes by
@@ -66,7 +66,7 @@ void run_tier_reconcile(const Cmd& c) {
     app.shutdown();
 }
 
-// Quarantine ledger (roadmap §3.6 ④): list / forget / purge. forget and purge take
+// Quarantine ledger: list / forget / purge. forget and purge take
 // `<backend> <bucket> <key>` positionals (or --backend= plus two positionals)
 std::tuple<std::string, std::string, std::string> backend_key_args(const Cmd& c) {
     std::string backend = c->var<std::string>("backend");

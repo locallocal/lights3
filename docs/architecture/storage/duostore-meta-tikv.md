@@ -214,12 +214,12 @@ extents ≤ 20 万且编码 ≤ 6MiB（`kMaxObjectValueBytes`，raft entry 8MiB 
   下推**——`id_marker` 非空时 marker 拼成 `lo + key_marker + '\0' + id_marker + '\0'`
   抬高扫描下界；只有 `key_marker` 时语义 `key > key_marker`，下界 =
   `lo + key_marker + '\x01'`（key 无 NUL，`\x01` 即最小的更大 key）；`prefix`
-  （roadmap §3.5）`lo + prefix` 大于上述下界时取代之，回调内越出 prefix 即停；limit
+  `lo + prefix` 大于上述下界时取代之，回调内越出 prefix 即停；limit
   在回调内截断；
 - `scan_parts` / `list_parts`：`P` 前缀扫，be16 尾缀天然升序，`codec::part_no_of_key`
   反解；list_parts 的 upload 校验与 parts 读取同快照；
 - `scan_refs`：`R` 前缀分页扫，key 尾 8 字节反解 file_id（弱一致由孤儿扫描契约容忍）。
-- `snapshot()`（在线 dump，roadmap §3.7）：`tikv_meta_store.cc:TikvMetaStore::SnapshotView`
+- `snapshot()`（在线 dump）：`tikv_meta_store.cc:TikvMetaStore::SnapshotView`
   构造时取一个 TSO 并固定为 `ver_`，`list_buckets` / `get_object` / `list_objects` /
   `pack_stats` 全部转发到带版本参数的 `*_at(ver)` 读体（`pack_stats_at(ver, fold=false)`
   ——视图只读不折叠）；MVCC 让整个 dump 免费得到一致视图、server 侧无需持任何
@@ -300,7 +300,7 @@ Cluster（顺序颠倒会让 worker 正常退出路径变成 500 抛出）。
 
 ## 10. 备份与 PITR 恢复点
 
-总体约定见[主文档 §11.1](duostore-core.md#111-备份链与-pitrmeta_backuph--meta_backupccbacklog-sequence-)。
+总体约定见[主文档 §11.1](duostore-core.md#111-备份链与-pitrmeta_backuph--meta_backupcc)。
 tikv 的增量与 PITR 属集群侧（BR 全量 / 日志备份、CDC）；网关侧：
 
 - `supports_physical_backup()=false`：`backup` 落成逻辑 dump（TSO 快照，在线一致，

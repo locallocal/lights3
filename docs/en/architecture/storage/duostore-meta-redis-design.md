@@ -84,13 +84,13 @@ the `duo:` prefix):
 | `default` | `schema` | STRING | On open, `SET NX` writes `"r1"`; if already present, read and validate; the lineage is distinct from the RocksDB schema. No `instance` key—meta is inherently shared by multiple gateways, not bound to an instance |
 | `buckets` | `buckets` | HASH: field=`<bucket>`, value=`encode_bucket` | `create_bucket` = `HSETNX`, atomic as a single command; return 0 → BucketAlreadyOwnedByYou, no script needed; `list_buckets` = `HGETALL` + client-side sort by name (bucket count is small) |
 | `objects` | `o:<b>` + `oz:<b>` | HASH + ZSET (§2.1 principle 3) | Point lookup `HGET o:<b> <key>`; iteration via `oz:<b>` |
-| `uploads` | `up:<b>` + `uz:<b>` | HASH: field=`<key>\0<id>`, value=`encode_upload`; ZSET (score 0) whose members are the same fields (§2.1 principle 3, roadmap §3.5) | `list_uploads` = `ZRANGEBYLEX uz:<b>` paged from the cursor/prefix + `HMGET up:<b>` for the values — cursor and prefix are pushed down (same order and cost shape as the RocksDB prefix scan). When `ZCARD≠HLEN` (a table written before the index existed, or by an older gateway) it falls back to the `HSCAN COUNT 512` full scan and rebuilds the index on the way |
+| `uploads` | `up:<b>` + `uz:<b>` | HASH: field=`<key>\0<id>`, value=`encode_upload`; ZSET (score 0) whose members are the same fields (§2.1 principle 3) | `list_uploads` = `ZRANGEBYLEX uz:<b>` paged from the cursor/prefix + `HMGET up:<b>` for the values — cursor and prefix are pushed down (same order and cost shape as the RocksDB prefix scan). When `ZCARD≠HLEN` (a table written before the index existed, or by an older gateway) it falls back to the `HSCAN COUNT 512` full scan and rebuilds the index on the way |
 | `parts` | `pt:<b>\0<key>\0<id>` | HASH: field=decimal `part_no`, value=`encode_part` | One HASH per upload; `complete/abort` deletes the whole key with `DEL` (corresponding to RocksDB's range delete); ≤10k fields, `HGETALL` + client-side numeric sort |
 | `refs` | `refs` | HASH: field=decimal `file_id`, value=owner summary | `chunk_referenced` = `HEXISTS`, O(1) |
 | `gcq` | `gcq` | ZSET: score=`seq`, member=`be64(seq) ‖ encode_reclaim(...)` | The be64 prefix keeps members unique and self-contained with seq; `peek_reclaims` = `ZRANGEBYSCORE gcq -inf +inf LIMIT 0 max` (seq parsed exactly from the member's first 8 bytes); `ack_reclaim` = `ZREMRANGEBYSCORE gcq seq seq`. Constraint: score is a double, requiring seq < 2^53—at 10k deletes per second that lasts 28,000 years; declaring it suffices |
 | `stats` (segment counters) | `ctr:chunk` / `ctr:pack` / `ctr:seq` | STRING (integer) | `INCRBY` segment reservation (§4) |
 | `stats` (pack liveness accounting) | `pack:<id>` | HASH: live_bytes / live_recs / file_size / sealed | `HINCRBY` gives incremental accounting (replacing the RocksDB merge operator; the commit script adds an `hincr` op batched with business writes); `pack_stats()` = SCAN MATCH `pack:*` + per-key HGETALL (a low-frequency GC path); `seal_pack` with file_size=0 uses HSETNX so a known value is not overwritten |
-| — (multi-gateway leases) | `gc_lease` / `readlease:<owner>` | STRING (PX expiry) | `try_gc_lease` = a Lua SET-NX / renew script (a crashed holder yields automatically); `publish_lease` writes one key per gateway `"<oldest_read_ms> <oldest_write_ms>"`, `min_lease` = SCAN + MGET folded field-wise (roadmap §3.7) |
+| — (multi-gateway leases) | `gc_lease` / `readlease:<owner>` | STRING (PX expiry) | `try_gc_lease` = a Lua SET-NX / renew script (a crashed holder yields automatically); `publish_lease` writes one key per gateway `"<oldest_read_ms> <oldest_write_ms>"`, `min_lease` = SCAN + MGET folded field-wise |
 | — (invalidation feed) | `inv` | Pub/Sub channel | the commit script `PUBLISH`es `"<origin>\0<bucket>\0<key>"` (§3.6) |
 | `tc` | `tc` / `tce` / `tcz` | HASH (key→value) / HASH (key→etag) / ZSET (lex index) | KV facade for the S3 Tables catalog (`kv_*`) |
 
@@ -117,7 +117,7 @@ iteration primitive changes from the RocksDB Iterator to
 
 Inside the script, keys are paged with `ZRANGEBYLEX … LIMIT 0 200` and, after
 the loop, the values are fetched with batched `HMGET o:<b>` (500 per call) and
-returned together (gaps §3.9; previously one HGET per key); decoding happens on the C++ side
+returned together (previously one HGET per key); decoding happens on the C++ side
 (`codec::decode_object_meta`, skipping extent runs without materializing
 them—the same optimization as the RocksDB version). When a delimiter group
 closes the page exactly full, `next_token` must land at the group's tail: the
@@ -248,7 +248,7 @@ data-plane precondition see §1 non-goals).
   0 is not in this category—0 is a definite outcome, safe.
 
 
-### 3.6 Cross-Gateway Cache Invalidation Broadcast (backlog-sequence ⑤)
+### 3.6 Cross-Gateway Cache Invalidation Broadcast
 
 The object metadata cache ([storage/duostore-core.md §7.1](../../../architecture/storage/duostore-core.md))
 on a shared meta engine cannot see a peer gateway's writes by itself. Redis has

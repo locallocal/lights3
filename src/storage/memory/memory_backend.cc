@@ -43,7 +43,7 @@ uint64_t MemoryBackend::used_bytes() const {
     return used_bytes_;
 }
 
-// Capacity gate (docs/archive/gaps.md §6.3): previously this backend had no limit at all --
+// Capacity gate: previously this backend had no limit at all --
 // misconfigured as a production backend it would put the entire gateway's data into the
 // heap until the OOM killer stepped in. Over the limit returns 503 SlowDown (retryable,
 // and visible to operators on the metrics) rather than letting the allocator decide who dies
@@ -66,7 +66,7 @@ void MemoryBackend::check_inflight(size_t buffered) const {
         throw S3Error(S3ErrorCode::SlowDown, "memory backend is at its configured max_bytes capacity");
 }
 
-// mpu expiry cleanup (docs/archive/gaps.md §6.3): this backend takes no timer (having no
+// mpu expiry cleanup: this backend takes no timer (having no
 // background threads is part of its role as a unit-test fixture), so it sweeps as a side
 // task at multipart operation entry points instead -- uploads never completed/aborted used
 // to occupy memory forever
@@ -191,7 +191,7 @@ Task<ObjectStream> MemoryBackend::get_object(std::string_view bucket, std::strin
     std::shared_ptr<const std::string> blob;
     {
         // Inside the lock, grab only the meta and the data block's shared_ptr
-        // (docs/archive/gaps.md §3.9): previously the object was copied wholesale under the global
+        //: previously the object was copied wholesale under the global
         // lock (1GB object = 2GB resident + all buckets locked for the duration)
         std::lock_guard lk(m_);
         auto& b = bucket_or_throw(std::string(bucket));
@@ -253,7 +253,7 @@ Task<ListResult> MemoryBackend::list_objects(std::string_view bucket, const List
     keys.reserve(b.objects.size());
     for (auto& [k, _] : b.objects) keys.push_back(k);
     // at() rather than operator[]: the latter silently inserts an empty object for a
-    // missing key (docs/archive/gaps.md §3.9)
+    // missing key
     co_return apply_listing(keys, opt, [&](const std::string& k) { return b.objects.at(k).meta; });
 }
 
@@ -350,10 +350,10 @@ Task<PutResult> MemoryBackend::complete_multipart(std::string_view bucket, std::
     meta.size = data.size();
     meta.etag = combined_etag(md5s);
     meta.last_modified = std::chrono::system_clock::now();
-    // GET ?partNumber layout (roadmap §2.5)
+    // GET ?partNumber layout
     meta.part_sizes = std::move(sizes);
     PutResult r{meta.etag};
-    // Composite checksum from the stored, verified per-part values (roadmap §2.2)
+    // Composite checksum from the stored, verified per-part values
     apply_composite_checksum(digests, meta, r);
     // The concatenated object and the parts are resident simultaneously for a moment:
     // account the new object first (may throw on over-limit, in which case the upload

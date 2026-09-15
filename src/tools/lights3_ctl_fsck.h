@@ -1,5 +1,5 @@
 // lights3-ctl `fsck` command: online end-to-end object verification over the S3 API
-// (roadmap §3.1) — list a bucket, GET every object back and compare the
+// — list a bucket, GET every object back and compare the
 // recomputed MD5 against its ETag. Implementation in lights3_ctl_fsck.cc.
 #pragma once
 

@@ -47,7 +47,7 @@ int main(int argc, char* argv[]) {
         "`lights3-ctl help <command>` for details.",
         "lights3 ops CLI.",
         // Bare lights3-ctl / lights3-ctl -x: nothing actionable to run; print help and exit as a
-        // usage error. `lights3-ctl --version` is the one root-level flag (roadmap §6.3)
+        // usage error. `lights3-ctl --version` is the one root-level flag
         [](const std::shared_ptr<ccmd::command>& c) {
             if (c->var<bool>("version")) {
                 fputs(lights3::version_report("lights3-ctl").c_str(), stdout);

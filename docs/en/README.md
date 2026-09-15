@@ -72,11 +72,8 @@ Every configuration key is documented with its default in the comments of
 
 ### Archive (`docs/archive/`, Chinese only)
 
-The closed ledgers (gaps.md / issues.md / roadmap.md / backlog.md /
-backlog-sequence.md) and the finished design-step document
-(multi-gateway-multipart-design.md): read-only, no longer updated, and the
-place source comments point at with `docs/archive/<name>.md §N`, `roadmap §N`,
-`backlog §N`, `backlog-sequence ①…⑩` and `multi-gateway-multipart §4 ①…④`.
+The closed ledger (backlog.md): read-only, no longer updated, and the place
+source comments point at with `backlog §N`.
 
 ## One-page architecture
 

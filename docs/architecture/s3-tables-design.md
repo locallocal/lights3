@@ -436,7 +436,7 @@ uuid（此时不可重放，与规范一致）。
 rados data）与 cloudproxy 做默认后端时跨网关成立；localfs / xlocalfs /
 rocksdb / sqlite 默认后端只能单网关。`--check-config` 在 `tables.enabled` 且
 多网关标志（`read_lease` 等）出现在非共享默认后端上时 WARN，与
-multi-gateway-multipart §4 ④ 同一防线。表桶自身可在任何后端（数据面无跨网关
+`--check-config` 对多网关部署的其余告警同一防线。表桶自身可在任何后端（数据面无跨网关
 状态）。
 
 已实现（⑤）：`tables_deployment_warning(cfg)`（`core/config.h`）——`tables.enabled` 且默认

@@ -1,4 +1,4 @@
-# TLS：全驱动 HTTPS、证书热重载与 TLS 旋钮（roadmap §4.1）
+# TLS：全驱动 HTTPS、证书热重载与 TLS 旋钮
 
 > 状态：四项全部落地（2026-09-05）。代码：`src/http/tls.{h,cc}`（OpenSSL 共享层）、
 > 四个驱动各自的接入点（`src/http/drivers/*/`）；单测 `tests/unit/test_tls.cc`
@@ -49,7 +49,7 @@ CA 文件在构造期加载，坏路径、坏 PEM、私钥与证书不匹配、c
 证书**不映射为身份**——SigV4 仍是唯一的身份来源，mTLS 只是传输层准入（"没有
 公司 CA 签发的证书连握手都过不了"）。
 
-**证书 → 凭证 / 租户身份映射**（backlog-sequence ⑥）。`auth.tls_identity:
+**证书 → 凭证 / 租户身份映射**。`auth.tls_identity:
 subject-cn | san-uri` 打开后，验证通过的客户端证书取一个字段作为**主体**
 （subject 的 CN，或首个 URI 类型的 subjectAltName——SPIFFE 风格部署用后者），
 按 root 维护的绑定表 `.sys/tls-identities/<主体>` → 凭证 AK 参与鉴权：

@@ -6,7 +6,7 @@
 # ---- Core library: L2/L3/L4 + HTTP boundary ----
 add_library(lights3_core STATIC)
 target_include_directories(lights3_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-# libssl is unconditional since roadmap §4.1: the shared TLS material/holder
+# libssl is unconditional because the shared TLS material/holder
 # (src/http/tls.cc) serves every OpenSSL-backed driver, builtin included
 target_link_libraries(lights3_core PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads spdlog::spdlog)
 # JSON is used only in the admin handler / CredentialStore .cc files, never in public headers (docs/architecture/credential-management.md §5.4)
@@ -19,7 +19,7 @@ add_subdirectory(storage)
 add_subdirectory(tables)
 add_subdirectory(app)
 
-# ---- Build identity (roadmap §6.3, src/core/version.h) ----
+# ---- Build identity (src/core/version.h) ----
 # The git commit is stamped at *build* time by a script-mode CMake run so that it
 # follows the checkout rather than the last configure; the file is rewritten only
 # when its content changes. LIGHTS3_GIT_COMMIT overrides the probe for builds

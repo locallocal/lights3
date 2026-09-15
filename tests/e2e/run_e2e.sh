@@ -6,7 +6,7 @@ BIN="${1:?usage: run_e2e.sh <path-to-lights3-binary> [driver] [backend-type]}"
 DRIVER="${2:-builtin}"
 # localfs | xlocalfs | tiered (localfs+memory, docs/architecture/storage/tiered-design.md)
 # | cloudproxy | tiered-cloudproxy (two instances: instance B acts as the "cloud", docs/architecture/storage/cloudproxy-design.md §10)
-# | tiered-duostore (duostore as the cloud) | tiered-duolocal (duostore as the local/hot side, roadmap §3.6 ⑥)
+# | tiered-duostore (duostore as the cloud) | tiered-duolocal (duostore as the local/hot side)
 BACKEND="${3:-localfs}"
 AK=E2EACCESSKEY
 SK=e2e-secret-key
@@ -322,7 +322,7 @@ s3curl() {  # s3curl <curl args...> -- with SigV4 signing
     curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$AK:$SK" "$@"
 }
 
-# ---------- roadmap §6.2: lights3 --check-config (dry run, no backend opened) ----------
+# ---------- lights3 --check-config (dry run, no backend opened) ----------
 check "lights3 --check-config accepts the running config" "0" \
     "$("$BIN" --check-config --config="$WORK/config.yaml" > "$WORK/check-config.out" 2>&1; echo $?)"
 check "check-config prints the resolved summary" "0" "$(grep -q '^config .*: ok$' "$WORK/check-config.out" && grep -q '^  backends ' "$WORK/check-config.out"; echo $?)"
@@ -330,7 +330,7 @@ sed 's/^  default_backend: tierdata$/  default_backend: ghost/' "$WORK/config.ya
 check "lights3 --check-config rejects a broken config with exit 1" "1" \
     "$("$BIN" --check-config --config="$WORK/config-bad.yaml" >/dev/null 2>&1; echo $?)"
 check "check-config leaves no data directories behind" "0" "$([[ ! -e "$WORK/check-config-data" ]]; echo $?)"
-# multi-gateway-multipart §4 ④: shared meta over local fs data is flagged by the dry run
+# shared meta over local fs data is flagged by the dry run
 # (and by the server at startup), every other combination stays silent
 if [[ "$BACKEND" == "duostore-redis" || "$BACKEND" == "duostore-tikv" ]]; then
     check "check-config warns about shared meta over local fs data" "0" \
@@ -356,7 +356,7 @@ check "CreateBucket" "200" "$(s3curl -o /dev/null -w '%{http_code}' -X PUT "$BAS
 check "HeadBucket" "200" "$(s3curl -o /dev/null -w '%{http_code}' -I "$BASE/mybucket")"
 check "duplicate create 409" "409" "$(s3curl -o /dev/null -w '%{http_code}' -X PUT "$BASE/mybucket")"
 
-# roadmap §5.4: W3C trace context — the client's trace id is kept on the access
+# W3C trace context — the client's trace id is kept on the access
 # line (with the caller's span as parent) and echoed in traceresponse; the
 # cloudproxy hop forwards a child span so the remote instance logs the same id
 E2E_TRACE=4bf92f3577b34da6a3ce929d0e0e4736
@@ -434,7 +434,7 @@ check "CopyObject" "0" \
 check "Copy content matches" "y" "$(s3curl "$BASE/mybucket/copy.txt")"
 
 # Multipart: two 5MiB parts (real flow, docs/architecture/s3-protocol.md §8). 5MiB is AWS's minimum
-# for non-final parts (docs/archive/gaps.md §5.7) -- 3MiB was used before, which real AWS would reject too
+# for non-final parts -- 3MiB was used before, which real AWS would reject too
 dd if=/dev/urandom of="$WORK/p1" bs=1M count=5 2>/dev/null
 dd if=/dev/urandom of="$WORK/p2" bs=1M count=5 2>/dev/null
 INIT=$(s3curl -X POST "$BASE/mybucket/mpu.bin?uploads")
@@ -482,7 +482,7 @@ check "UploadPartCopy out-of-range rejected" "400" \
        "$BASE/mybucket/upc.bin?partNumber=3&uploadId=$UPC_ID")"
 s3curl -o /dev/null -X DELETE "$BASE/mybucket/upc.bin"
 
-# Non-final part smaller than 5MiB -> EntityTooSmall (docs/archive/gaps.md §5.7)
+# Non-final part smaller than 5MiB -> EntityTooSmall
 INIT3=$(s3curl -X POST "$BASE/mybucket/small.bin?uploads")
 SM_ID=$(echo "$INIT3" | sed -n 's/.*<UploadId>\(.*\)<\/UploadId>.*/\1/p')
 s3curl -o /dev/null -D "$WORK/hs1" --data-binary 'tiny-part-one' -X PUT \
@@ -502,7 +502,7 @@ check "out-of-order InvalidPartOrder" "0" \
         | grep -q 'InvalidPartOrder'; echo $?)"
 s3curl -o /dev/null -X DELETE "$BASE/mybucket/small.bin?uploadId=$SM_ID"
 
-# DeleteObjects batch deletion (AWS requires Content-MD5, docs/archive/gaps.md §5.6)
+# DeleteObjects batch deletion (AWS requires Content-MD5)
 DEL_XML='<Delete><Object><Key>copy.txt</Key></Object><Object><Key>mpu.bin</Key></Object></Delete>'
 DEL_MD5=$(printf '%s' "$DEL_XML" | openssl dgst -md5 -binary | openssl base64)
 check "DeleteObjects missing integrity header 400" "400" \
@@ -618,7 +618,7 @@ check "POST unknown field rejected" "400" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X POST --data-binary '{"bogus":1}' \
        "$BASE/-/admin/credentials")"
 
-# Action/prefix granularity of policies and ListBuckets filtering (docs/archive/gaps.md §5.10)
+# Action/prefix granularity of policies and ListBuckets filtering
 # First create a real bucket outside the whitelist as root: otherwise no real bucket
 # exists outside the whitelist and the assertion would pass vacuously even if filtering
 # were entirely broken (empty assertion)
@@ -677,7 +677,7 @@ check "static credential SK not returned via admin" "0" \
     "$(s3curl "$BASE/-/admin/credentials/$AK?show-secret=true" | grep -q '"secret_key"' && echo 1 || echo 0)"
 s3curl -o /dev/null -X DELETE "$BASE/credbkt/keep/a"
 
-# ---------- roadmap §6.1: static website hosting e2e (docs/usage/static-website.md) ----------
+# ---------- static website hosting e2e (docs/usage/static-website.md) ----------
 # The static entry e2esite comes from config.yaml; the anonymous plane is the
 # security-sensitive face: reads of listed buckets only, never listing / writes /
 # other buckets; the index/error documents and the object-level 301 all through
@@ -727,7 +727,7 @@ s3curl -o /dev/null -X DELETE "$BASE/e2esite"
 s3curl -o /dev/null -X DELETE "$BASE/dynsite/index.html"
 s3curl -o /dev/null -X DELETE "$BASE/dynsite"
 
-# ---------- roadmap §6.1: lights3-ctl cross-validation (self-signed client vs. the server's verifier) ----------
+# ---------- lights3-ctl cross-validation (self-signed client vs. the server's verifier) ----------
 # curl signs with libcurl's SigV4, lights3-ctl with its own implementation: the same
 # flows through both catch a drift in either signer
 LIGHTS3_CTL="$(dirname "$BIN")/lights3-ctl"
@@ -753,7 +753,7 @@ if [[ -x "$LIGHTS3_CTL" ]]; then
     s3curl -o /dev/null -X DELETE "$BASE/admsite"
     BENCH_OUT=$(adm bench put --bucket=admbench --concurrency=2 --duration-sec=1 --objects=8 --size=4K --keep 2>&1)
     check "lights3-ctl bench put runs error-free" "0" "$(echo "$BENCH_OUT" | grep -q '^ops [0-9]* ok, 0 err'; echo $?)"
-    # backlog-sequence ③: the offline scrub through the admin plane (root only; the
+    # the offline scrub through the admin plane (root only; the
     # localfs-family and duostore backends have one, memory/cloudproxy/tiered do not)
     FSCK_KIND=""
     case "$BACKEND" in
@@ -830,11 +830,11 @@ if [[ -x "$LIGHTS3_CTL" ]]; then
     [[ $FSCK_RC -ne 0 ]] && echo "$FSCK_OUT"
     check "lights3-ctl fsck reports zero mismatches" "0" "$(echo "$FSCK_OUT" | grep -q ' 0 mismatches, 0 errors'; echo $?)"
     check "lights3-ctl bench get runs error-free" "0" "$(adm bench get --bucket=admbench --concurrency=2 --duration-sec=1 --objects=8 --size=4K 2>&1 | grep -q '^ops [0-9]* ok, 0 err'; echo $?)"
-    # roadmap §6.2: machine-readable bench summary (stdout is exactly one JSON object)
+    # machine-readable bench summary (stdout is exactly one JSON object)
     BENCH_JSON=$(adm bench put --bucket=admbench --concurrency=2 --duration-sec=1 --objects=8 --size=4K --output=json 2>/dev/null)
     check "lights3-ctl bench --output=json is a JSON object with the summary fields" "0" \
         "$(echo "$BENCH_JSON" | python3 -c 'import json,sys; j=json.load(sys.stdin); assert j["mode"]=="put" and j["errors"]==0 and j["ops"]>0 and j["ops_per_s"]>0 and "p99" in j["latency_ms"]' 2>/dev/null; echo $?)"
-    # roadmap §6.2: object layout introspection through the admin endpoint
+    # object layout introspection through the admin endpoint
     s3curl -o /dev/null -X PUT --data-binary 'layout me' "$BASE/admbench/dir/layout.txt"
     INSPECT=$(adm object inspect admbench dir/layout.txt 2>&1)
     if [[ "$BACKEND" == "cloudproxy" ]]; then
@@ -851,7 +851,7 @@ if [[ -x "$LIGHTS3_CTL" ]]; then
     check "object inspect denied for non-root" "403" \
         "$(curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$AK2:$SK2" -o /dev/null -w '%{http_code}' "$BASE/-/admin/objects/admbench/dir/layout.txt")"
     s3curl -o /dev/null -X DELETE "$BASE/admbench/dir/layout.txt"
-    # roadmap §6.2: zombie multipart uploads listed and aborted through lights3-ctl
+    # zombie multipart uploads listed and aborted through lights3-ctl
     s3curl -o /dev/null -X POST "$BASE/admbench/zombie-1?uploads"
     s3curl -o /dev/null -X POST "$BASE/admbench/zombie-2?uploads"
     check "lights3-ctl mpu list shows both uploads" "2" "$(adm mpu list admbench | grep -c 'zombie-')"
@@ -864,7 +864,7 @@ if [[ -x "$LIGHTS3_CTL" ]]; then
     s3curl -o /dev/null -X DELETE "$BASE/admbench"
 fi
 
-# ---------- roadmap §3.9: usage accounting / quotas / tenants (docs/architecture/multi-tenancy.md) ----------
+# ---------- usage accounting / quotas / tenants (docs/architecture/multi-tenancy.md) ----------
 json_num() {  # json_num <key> -- extract a numeric field from the indented JSON on stdin
     sed -n "s/.*\"$1\": \([0-9]*\).*/\1/p" | head -1
 }
@@ -933,7 +933,7 @@ s3curl -o /dev/null -X DELETE "$BASE/qbkt/ten"
 s3curl -o /dev/null -X DELETE "$BASE/qbkt/second"
 s3curl -o /dev/null -X DELETE "$BASE/qbkt"
 
-# ---------- roadmap §4.4: config hot reload (SIGHUP + lights3-ctl reload, docs/usage/config-reload.md) ----------
+# ---------- config hot reload (SIGHUP + lights3-ctl reload, docs/usage/config-reload.md) ----------
 sed -i 's/^  level: info$/  level: debug/' "$WORK/config.yaml"
 kill -HUP "$SRV_PID"
 for _ in $(seq 1 50); do
@@ -960,7 +960,7 @@ check "invalid config refused on reload" "400" \
 sed -i '/^  idle_timeout: 0s$/d' "$WORK/config.yaml"
 sed -i '/^  request_timeout: 600s$/d' "$WORK/config.yaml"  # restore for the restart phase
 
-# ---------- backlog-sequence ⑦: backend instances added / removed on reload (docs/usage/config-reload.md §3) ----------
+# ---------- backend instances added / removed on reload (docs/usage/config-reload.md §3) ----------
 # A memory backend "hot" joins the running instance with a hot-* rule; then it is
 # removed while a rate-limited GET still streams from it: the removal applies at
 # once (routing, metrics, admin view) and the instance closes only after the stream
@@ -1013,7 +1013,7 @@ check "restoring the file retires the extra instance" "0" "$(echo "$RELOAD_OUT" 
 for _ in $(seq 1 50); do grep -q 'backend alt removed: closed' "$WORK/server.log" && break; sleep 0.1; done
 check "extra instance closed" "0" "$(grep -q 'backend alt removed: closed' "$WORK/server.log"; echo $?)"
 
-# ---------- roadmap §4.2: L1 connection counters + rate-limit series on /-/metrics ----------
+# ---------- L1 connection counters + rate-limit series on /-/metrics ----------
 METRICS_OUT=$(curl -s "$BASE/-/metrics")
 check "metrics: connection counters present" "0" \
     "$(echo "$METRICS_OUT" | grep -q 'lights3_http_connections_total{result="accepted"}'; echo $?)"
@@ -1021,12 +1021,12 @@ check "metrics: timeout phases present" "0" \
     "$(echo "$METRICS_OUT" | grep -q 'lights3_http_timeouts_total{phase="header"}'; echo $?)"
 check "metrics: rate-limit series present" "0" \
     "$(echo "$METRICS_OUT" | grep -q 'lights3_ratelimit_rejections_total{scope="ip"}'; echo $?)"
-# roadmap §5.1: API x backend series, per-backend op histograms, backend time in the access log
+# API x backend series, per-backend op histograms, backend time in the access log
 check "metrics: api x backend series present" "0" \
     "$(echo "$METRICS_OUT" | grep -q 'lights3_api_requests_total{api="PutObject",backend="tierdata",class="2xx"}'; echo $?)"
 check "metrics: backend op histogram present" "0" \
     "$(echo "$METRICS_OUT" | grep -q 'lights3_backend_op_seconds_count{backend="tierdata",op="put_object"}'; echo $?)"
-# roadmap §5.3: L1 request/parse series, admission wait histogram, exact status
+# L1 request/parse series, admission wait histogram, exact status
 # codes, website-plane events
 check "metrics: L1 request counter present" "0" \
     "$(echo "$METRICS_OUT" | grep -q '^lights3_http_requests_total [1-9]'; echo $?)"
@@ -1057,7 +1057,7 @@ check "metrics: anonymous scrape back after reload" "200" \
     "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/-/metrics")"
 check "access log carries api and backend time" "0" \
     "$(grep -q 'access .* PUT "/mybucket/dir/big.bin" 200 .* api=PutObject backend=tierdata:' "$WORK/server.log"; echo $?)"
-# roadmap §5.2: quoted path, remote address, bucket and TTFB slots; the streaming GET
+# quoted path, remote address, bucket and TTFB slots; the streaming GET
 # line is written at end of body with the bytes actually sent
 check "access log carries remote/bucket/ttfb slots" "0" \
     "$(grep -q 'access .* PUT "/mybucket/dir/big.bin" 200 .* remote=127.0.0.1 bucket=mybucket ttfb=[0-9.]*ms ua="' "$WORK/server.log"; echo $?)"
@@ -1278,7 +1278,7 @@ for _ in $(seq 1 50); do
 done
 check "SIGTERM graceful shutdown" "0" "$EXITED"
 wait "$SRV_PID" 2>/dev/null
-check "clean shutdown exit code" "0" "$?"  # roadmap §4.5: unclean teardown would exit 3
+check "clean shutdown exit code" "0" "$?"  # unclean teardown would exit 3
 SRV_PID=""
 
 # ---------- Restart: dynamic credential persistence check (docs/architecture/credential-management.md §8) ----------
@@ -1314,7 +1314,7 @@ kill -TERM "$SRV_PID"
 wait "$SRV_PID" 2>/dev/null
 SRV_PID=""
 
-# ---------- roadmap §4.1: TLS smoke on the same driver (docs/usage/tls.md) ----------
+# ---------- TLS smoke on the same driver (docs/usage/tls.md) ----------
 # A second instance with an openssl-CLI self-signed certificate: SigV4 over HTTPS
 # end to end through curl, plus a plaintext probe refused on the TLS port
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 \
@@ -1355,7 +1355,7 @@ fi
 kill -TERM "$TLS_PID" 2>/dev/null
 wait "$TLS_PID" 2>/dev/null
 
-# ---------- backlog-sequence ⑥: mTLS client certificate -> credential identity (docs/usage/tls.md §2.1) ----------
+# ---------- mTLS client certificate -> credential identity (docs/usage/tls.md §2.1) ----------
 # A private client CA signs two client certificates; the instance requires client
 # auth and maps the subject CN (auth.tls_identity: subject-cn). Root binds one CN
 # to a readonly dynamic credential through lights3-ctl; unsigned requests over that
@@ -1423,7 +1423,7 @@ fi
 kill -TERM "$MTLS_PID" 2>/dev/null
 wait "$MTLS_PID" 2>/dev/null
 
-# ---------- backlog-sequence ④: STS sessions shared across gateways (docs/architecture/s3-protocol.md §3.5) ----------
+# ---------- STS sessions shared across gateways (docs/architecture/s3-protocol.md §3.5) ----------
 # A second gateway on the SAME localfs root (.sys included): a session minted by the
 # first is honored by the second at first sight (read-through), with the token checked
 if [[ "$BACKEND" == "localfs" || "$BACKEND" == "xlocalfs" ]]; then
@@ -1461,7 +1461,7 @@ if [[ "$BACKEND" == "localfs" || "$BACKEND" == "xlocalfs" ]]; then
     wait "$STA_PID" 2>/dev/null; wait "$STB_PID" 2>/dev/null
 fi
 
-# ---------- backlog-sequence ⑤: cross-gateway meta cache invalidation over redis pub/sub ----------
+# ---------- cross-gateway meta cache invalidation over redis pub/sub ----------
 # A second gateway on the same redis meta + same data root, both with the object cache
 # on (100 s TTL): a peer's overwrite/delete must be visible at once, not after the TTL
 if [[ "$BACKEND" == "duostore-redis" ]]; then
@@ -1509,7 +1509,7 @@ if [[ "$BACKEND" == "duostore-redis" ]]; then
     wait "$INV_A" 2>/dev/null; wait "$INV_B" 2>/dev/null
 fi
 
-# ---------- multi-gateway-multipart §4 ②: one multipart upload spread over two gateways ----------
+# ---------- one multipart upload spread over two gateways ----------
 # Two gateways on the same redis meta + the same data root (chunk data shared at
 # object level, as a rados data plane gives every gateway): create on A, parts
 # alternately on B and A, ListParts on both, complete on B, GET through A. The
@@ -1577,7 +1577,7 @@ print(hashlib.md5(b"".join(bytes.fromhex(p) for p in parts)).hexdigest() + "-%d"
     wait "$MGA_PID" 2>/dev/null; wait "$MGB_PID" 2>/dev/null
 fi
 
-# ---------- backlog-sequence ②: separate admin listener (docs/architecture/http-adapter.md §2.1) ----------
+# ---------- separate admin listener (docs/architecture/http-adapter.md §2.1) ----------
 # A third instance with http.admin_port: the /-/ face moves to the admin port, the
 # data-plane port answers 404 for it, probes stay on both, lights3-ctl points at the admin port
 sed -e "s#^  port: 0#  port: 0\n  admin_port: 0#" \
@@ -1622,7 +1622,7 @@ wait "$ADM_PID" 2>/dev/null
 for _ in $(seq 1 50); do grep -q "lights3 exited cleanly" "$WORK/server-admin.log" && break; sleep 0.1; done
 check "admin-port instance exited cleanly" "0" "$(grep -q "lights3 exited cleanly" "$WORK/server-admin.log"; echo $?)"
 
-# ---------- roadmap §6.1: fault injection through the whole stack (docs/development/testing.md §4) ----------
+# ---------- fault injection through the whole stack (docs/development/testing.md §4) ----------
 # A second instance armed via LIGHTS3_FAULTS: the first staging write fails with
 # EIO -> the PUT answers 500 InternalError, the object does not exist, the retry
 # succeeds, and the backend error shows up on /-/metrics. Only backends with a

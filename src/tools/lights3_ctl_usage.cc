@@ -20,7 +20,7 @@ std::shared_ptr<ccmd::command> make_usage() {
         "Show bucket usage counters (objects, committed bytes, in-flight multipart bytes, "
         "last full count). Without a bucket every visible bucket is listed (--tenant "
         "filters by owner, root only). --rescan runs a full count of the given bucket "
-        "now and prints the result (roadmap §3.9 ①).",
+        "now and prints the result.",
         "show bucket usage counters.", [](const std::shared_ptr<ccmd::command>& c) {
             if (c->args().size() > 1) {
                 fprintf(stderr, "lights3-ctl: usage: %s\n", c->usage().c_str());

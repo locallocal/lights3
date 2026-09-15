@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Performance baseline matrix (roadmap §4.3, docs/development/performance-baseline.md):
+# Performance baseline matrix (docs/development/performance-baseline.md):
 # `lights3-ctl bench put|get` against one gateway per (driver × TLS) cell, localfs
 # backend on a scratch directory, results as a Markdown table plus one JSON
 # line per cell. Drivers not compiled into the binary are skipped.
@@ -52,7 +52,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Drivers compiled into this binary (lights3 --version, roadmap §6.3); a binary
+# Drivers compiled into this binary (lights3 --version); a binary
 # from before --version existed is benchmarked as whatever --drivers says
 VERSION=$("$BIN" --version 2>/dev/null | head -n 1)
 BUILT=$("$BIN" --version 2>/dev/null | sed -n 's/^drivers:  *//p')

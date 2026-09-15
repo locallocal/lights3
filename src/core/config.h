@@ -42,7 +42,7 @@ struct YamlNode {
 YamlNode yaml_parse(const std::string& text);
 
 // ---------- Typed configuration ----------
-// Extra certificate served by SNI (roadmap §4.1, docs/usage/tls.md §2.3): hosts is a
+// Extra certificate served by SNI (docs/usage/tls.md §2.3): hosts is a
 // comma-separated list of exact names or "*.example.com" wildcards
 struct TlsSniEntry {
     std::string hosts;
@@ -54,7 +54,7 @@ struct HttpConfig {
     std::string driver = "builtin";
     std::string bind = "0.0.0.0";
     uint16_t port = 9000;
-    // Separate admin listener (backlog-sequence ②): when admin_port is set (>= 0;
+    // Separate admin listener: when admin_port is set (>= 0;
     // 0 = kernel-picked, like port) a second server of the same driver serves the
     // /-/ face (metrics, admin API) and the data-plane port answers 404 for it;
     // probes (/-/healthz, /-/readyz) stay on both. -1 = no admin listener (every
@@ -65,7 +65,7 @@ struct HttpConfig {
     // Validated to [1KiB, 1MiB]: beast passes it into parser.header_limit(uint32_t),
     // where an unbounded value like 4GiB would truncate to 0 and reject every request
     size_t max_header_size = 16 * 1024;
-    // Timeout family (roadmap §4.2, docs/architecture/http-adapter.md §2.1). All validated to
+    // Timeout family (docs/architecture/http-adapter.md §2.1). All validated to
     // [1s, 86400s]; 0 is rejected: drivers disagree on its meaning (builtin's
     // SO_RCVTIMEO 0 = never time out, beast's expires_after(0s) = expire
     // immediately), so "no timeout" is not a supported configuration
@@ -81,13 +81,13 @@ struct HttpConfig {
     // Connection: close (lets load balancers re-balance long-lived connections);
     // 0 = unlimited. httplib had a hard-coded 1024 before, the other three had none
     int max_requests_per_connection = 1024;
-    // Per-request timeout (docs/archive/gaps.md §3.3): the clock starts when the handler
+    // Per-request timeout: the clock starts when the handler
     // begins executing; on expiry the request is interrupted via cooperative
     // cancellation (suspension points throw OperationCancelled -> 503 SlowDown,
     // retryable by SDKs). idle_timeout only covers socket syscalls, not the
     // handler execution window. 0 = disabled
     int request_timeout_sec = 300;
-    // Minimum multipart part size in bytes (docs/archive/gaps.md §5.7): AWS fixes it at
+    // Minimum multipart part size in bytes: AWS fixes it at
     // 5MiB, 0 = no limit. Relax it when a toolchain that ignores this rule sits in
     // front, or when this instance is merely a proxy for another lights3
     uint64_t min_part_size = 5ull * 1024 * 1024;
@@ -103,12 +103,12 @@ struct HttpConfig {
     // above the limit; without one, per-connection threads/coroutine frames/buffers
     // can exhaust memory
     int max_connections = 4096;
-    // /-/metrics exposure (roadmap §5.3): anonymous (default, classic scrape) or
+    // /-/metrics exposure: anonymous (default, classic scrape) or
     // root (a statically configured credential must sign the GET). Hot-reloadable
     std::string metrics_access = "anonymous";
     // non-empty enables virtual-host style (docs/architecture/s3-protocol.md §2)
     std::string base_domain;
-    // TLS (docs/archive/gaps.md §7): HTTPS is enabled when both cert and key are given.
+    // TLS: HTTPS is enabled when both cert and key are given.
     // SigV4's UNSIGNED-PAYLOAD integrity relies on transport-layer encryption, and
     // this covers the inbound direction. Only the httplib/beast drivers support it;
     // builtin/seastar error out at startup if TLS is configured — never
@@ -117,7 +117,7 @@ struct HttpConfig {
     std::string tls_cert;
     // path to PEM private key
     std::string tls_key;
-    // TLS knobs (roadmap §4.1, docs/usage/tls.md): all four drivers honor them (seastar
+    // TLS knobs (docs/usage/tls.md): all four drivers honor them (seastar
     // maps versions/client auth onto GnuTLS, see docs/usage/tls.md §4)
     // PEM CA bundle for client certificates (mTLS); empty = none
     std::string tls_client_ca;
@@ -135,17 +135,17 @@ struct HttpConfig {
     std::vector<TlsSniEntry> tls_sni;
     // The builtin driver is thread-per-connection, so io_threads is meaningless for
     // it; when explicitly configured, WARN at startup instead of silently ignoring
-    // (docs/archive/gaps.md §7). Set by the parser
+    //. Set by the parser
     bool io_threads_set = false;
-    // ---- Shutdown/backpressure knobs (docs/archive/gaps.md §7): formerly hard-coded once per driver ----
+    // ---- Shutdown/backpressure knobs: formerly hard-coded once per driver ----
     // max request body drained before returning an error
     uint64_t drain_limit = 4 * 1024 * 1024;
     // chunked trailer section limit (builtin/seastar)
     size_t trailer_max_size = 16 * 1024;
     // streaming read/write chunk size
     size_t io_chunk_size = 64 * 1024;
-    // sendfile(2) for file-backed fixed-length plaintext responses (roadmap §4.3 ④;
-    // builtin driver; TLS / chunked / non-file bodies always take the read() path)
+    // sendfile(2) for file-backed fixed-length plaintext responses (builtin driver; TLS / chunked / non-file bodies
+    // always take the read() path)
     bool sendfile = true;
     // push-to-pull body queue capacity (httplib only, i.e. the backpressure watermark)
     size_t body_queue_cap = 256 * 1024;
@@ -160,7 +160,7 @@ struct RuntimeConfig {
     int max_inflight_requests = 1024;
 };
 
-// Per-client rate limits (roadmap §4.2, docs/architecture/http-adapter.md §2.3): token bucket +
+// Per-client rate limits (docs/architecture/http-adapter.md §2.3): token bucket +
 // concurrency cap per source IP (decided before signature verification) and per
 // access key (after it). 0 = that limit off. Over the limit answers 503 SlowDown
 struct RateLimitConfig {
@@ -180,7 +180,7 @@ struct RateLimitConfig {
 
 struct Credential {
     std::string access_key;
-    // wiped on destruction (docs/archive/gaps.md §4)
+    // wiped on destruction
     util::SecretString secret_key;
 };
 
@@ -196,7 +196,7 @@ struct AuthConfig {
     int credentials_file_reload_sec = 30;
     // multi-instance: periodic incremental reload of .sys; 0 = disabled
     int sync_interval_sec = 0;
-    // mTLS identity mapping (backlog-sequence ⑥, docs/usage/tls.md §2.1): which field of a
+    // mTLS identity mapping (docs/usage/tls.md §2.1): which field of a
     // verified client certificate names the identity looked up in
     // .sys/tls-identities/. off = certificates stay transport admission only.
     // Needs http.tls_client_auth optional|require
@@ -221,7 +221,7 @@ struct BucketRule {
 // Static website hosting (docs/usage/static-website.md): buckets listed here accept
 // anonymous GET/HEAD object reads. Exact names only, no globs — a pattern typo
 // must not silently make extra buckets public.
-// RoutingRules entry (roadmap §2.3, AWS WebsiteConfiguration shape). Both condition
+// RoutingRules entry (AWS WebsiteConfiguration shape). Both condition
 // fields optional (both empty = matches everything); redirect fields empty = keep the
 // request's value. Managed via the ?website XML API; not exposed in YAML (static
 // sites needing rules can be created dynamically)
@@ -251,13 +251,13 @@ struct WebsiteBucket {
     // Object served as the body of anonymous 4xx/5xx responses, keeping the original
     // status code; empty = built-in minimal HTML page
     std::string error_key{};
-    // RedirectAllRequestsTo (roadmap §2.3): every anonymous request answers 301 to
+    // RedirectAllRequestsTo: every anonymous request answers 301 to
     // <protocol>://<host><path>; exclusive with index/error/rules (AWS shape).
     // Non-empty host enables it; empty protocol follows the request scheme
     std::string redirect_all_host{};
     std::string redirect_all_protocol{};
     std::vector<WebsiteRoutingRule> routing_rules{};
-    // Anonymous request rate limit, requests/second (roadmap §2.3: anonymous GET has
+    // Anonymous request rate limit, requests/second (anonymous GET has
     // no signature cost — a public bucket is otherwise a free bandwidth amplifier).
     // 0 = unlimited. YAML/JSON only; the AWS XML shape has no such field
     uint32_t max_rps = 0;
@@ -269,7 +269,7 @@ struct WebsiteConfig {
     std::vector<WebsiteBucket> buckets;
 };
 
-// Lifecycle enforcement (roadmap §2.4): how often the runner walks the rule table.
+// Lifecycle enforcement: how often the runner walks the rule table.
 // 0 = enforcement disabled (the ?lifecycle API still works; rules just never fire)
 struct LifecycleConfig {
     int scan_interval_sec = 3600;
@@ -312,7 +312,7 @@ struct BucketsConfig {
     std::vector<BucketRule> rules;
 };
 
-// Bucket usage accounting (roadmap §3.9 ①): per-bucket object/byte counters kept at
+// Bucket usage accounting: per-bucket object/byte counters kept at
 // L2, updated at every write commit, persisted to .sys/usage/<bucket> and reconciled
 // by a periodic full listing (docs/architecture/multi-tenancy.md §2)
 struct UsageConfig {
@@ -326,7 +326,7 @@ struct UsageConfig {
     bool reconcile = true;
 };
 
-// Audit log (roadmap §3.9 ④): JSON lines to a rotating file; empty path = off
+// Audit log: JSON lines to a rotating file; empty path = off
 // (control-plane events still go to the regular log at INFO)
 struct AuditConfig {
     std::string path;
@@ -338,7 +338,7 @@ struct AuditConfig {
     int max_files = 10;
 };
 
-// Operational log (roadmap §5.2). Every knob but level / slow_request_threshold is
+// Operational log. Every knob but level / slow_request_threshold is
 // fixed at startup (the sink and the formatter are built once; docs/usage/config-reload.md §4)
 struct LogConfig {
     // debug | info | warn | error (hot-reloadable)
@@ -380,7 +380,7 @@ struct Config {
     static Config from_string(const std::string& yaml_text);
 };
 
-// Outcome of a configuration hot reload (roadmap §4.4, docs/usage/config-reload.md):
+// Outcome of a configuration hot reload (docs/usage/config-reload.md):
 // what was applied at runtime, what changed but needs a restart, or why the new
 // file was refused (the old configuration then stays in force, untouched)
 struct ConfigReloadReport {

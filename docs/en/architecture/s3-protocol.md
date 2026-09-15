@@ -119,14 +119,14 @@ timestamps from extending the validity window indefinitely.
 
 ### 3.5 Credential Management and STS Sessions
 
-STS session credentials (roadmap §2.6): `AssumeRole` mints an `L3SA`-prefixed
+STS session credentials: `AssumeRole` mints an `L3SA`-prefixed
 session AK/SK/token (TTL 900–43200 s) inheriting the caller's policy snapshot;
 data-plane requests must carry `x-amz-security-token` (header or presigned
 query) -- a mismatch is `InvalidToken`, expiry `ExpiredToken` (retry signal), a
 token on a permanent AK is refused too. A session is never root and cannot
 assume again.
 
-**Shared across instances** (backlog-sequence ④): the record is written through
+**Shared across instances**: the record is written through
 to `.sys/sts/<session-ak>` on the default backend (SK and token follow the
 credential-SK rule -- AES-256-GCM sealed `version: 2` with a master key,
 plaintext `version: 1` without; plus `expires_unix`, `created_unix`, `parent`,
@@ -228,14 +228,13 @@ and the response leaks no internal information.
 
 ## 7. Observability
 
-Build identity `lights3_build_info{version,commit,build_type}` (constant 1,
-roadmap §6.3, [deployment.md §1](../usage/deployment.md)).
-L1 connection and rate-limit metrics (roadmap §4.2): `lights3_http_connections_total{result}`,
+Build identity `lights3_build_info{version,commit,build_type}` (constant 1, [deployment.md §1](../usage/deployment.md)).
+L1 connection and rate-limit metrics: `lights3_http_connections_total{result}`,
 `lights3_http_connections_active`, `lights3_http_keepalive_closes_total`,
 `lights3_http_timeouts_total{phase=idle|header|body|write}`,
 `lights3_ratelimit_rejections_total{scope=ip|ak}`; see [http-adapter.md §2.2–§2.3](http-adapter.md).
 
-- **Access log** (roadmap §5.2): one line per request through a dedicated
+- **Access log**: one line per request through a dedicated
   `lights3.access` logger sharing the operational log's sink. Text format
   (`log.format: text`): `access <request_id> <AK|-> <method> "<path>" <status>
   <bytes> <total>ms api=<Route name> backend=<backend>:<backend ms>ms
@@ -263,7 +262,7 @@ L1 connection and rate-limit metrics (roadmap §4.2): `lights3_http_connections_
   running at `log.level: warn` still sees the requests worth looking at. auth =
   dispatch entry to verified identity, handler = the whole route handler
   (backend time is a subset).
-- **Distributed trace (lightweight tier, roadmap §5.4, `core/trace.h`)**:
+- **Distributed trace (lightweight tier, `core/trace.h`)**:
   accepts W3C `traceparent` (strict: version 00, lowercase hex, non-zero ids; a
   malformed header counts as absent) and `tracestate` (passed through verbatim);
   without one the gateway starts a trace. Every request owns its span, the
@@ -306,8 +305,8 @@ L1 connection and rate-limit metrics (roadmap §4.2): `lights3_http_connections_
   metrics; among them `lights3_backend_op_seconds{backend,op}` histograms and
   `lights3_backend_errors_total{backend,op}` (5xx / transport exceptions count,
   4xx do not) are produced uniformly for all six backends by the metering
-  decorator (roadmap §5.1).
-  roadmap §5.3 additions: **exact status codes**
+  decorator.
+  Also **exact status codes**
   `lights3_responses_by_status_total{status}` (sparse — a code gets a line once
   it occurred; the 206/304 share is the key website/CDN quantity); the
   **admission gate** `lights3_admission_wait_seconds` histogram (one sample per
@@ -346,7 +345,7 @@ L1 connection and rate-limit metrics (roadmap §4.2): `lights3_http_connections_
    regression gate — `tests/e2e/run_mint.sh` has landed (starts lights3 + a
    `minio/mint` container against each other; explicit SKIP when docker is
    unavailable). mint requires docker daemon privileges and usually cannot run on
-   local dev machines; since roadmap §6.1 it is registered as ctest `mint`
+   local dev machines; it is registered as ctest `mint`
    (Not Run without docker) and prints a per-suite PASS/FAIL baseline
    ([testing.md §6](../development/testing.md)); it is positioned as a gate for CI/privileged
    environments. The full suite includes explicitly unsupported APIs such as

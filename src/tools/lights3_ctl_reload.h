@@ -1,4 +1,4 @@
-// lights3-ctl `reload`: POST /-/admin/config/reload (config hot reload, roadmap §4.4,
+// lights3-ctl `reload`: POST /-/admin/config/reload (config hot reload,
 // docs/usage/config-reload.md). Implementation in lights3_ctl_reload.cc.
 #pragma once
 

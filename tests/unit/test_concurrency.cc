@@ -362,7 +362,7 @@ TEST(semaphore_permit_released_on_exception) {
     CHECK_EQ(sem.available(), 1L);
 }
 
-// ---------- Posting during shutdown and the exception firewall (gaps §2.1/§2.2) ----------
+// ---------- Posting during shutdown and the exception firewall ----------
 
 TEST(post_after_join_runs_inline_without_throwing) {
     ThreadPool pool(2);
@@ -383,7 +383,7 @@ TEST(pool_task_exception_does_not_kill_worker) {
     CHECK(done.get_future().wait_for(5s) == std::future_status::ready);
 }
 
-// ---------- Cancellation-system wiring (gaps §3.1/§3.2/§3.9) ----------
+// ---------- Cancellation-system wiring ----------
 
 TEST(semaphore_acquire_is_cancellable) {
     AsyncSemaphore sem(1);

@@ -1,5 +1,5 @@
 // lights3-ctl `fsck` — online integrity verification through the data plane
-// (roadmap §3.1): ListObjectsV2 pages, then for every key a streaming GET with
+//: ListObjectsV2 pages, then for every key a streaming GET with
 // the MD5 recomputed client-side and compared against the ETag. Multipart
 // composites ("-N" ETags) are verified per part via GET ?partNumber=i and
 // storage::combined_etag over the per-part digests; objects the server cannot
@@ -191,7 +191,7 @@ int run_fsck(SignedClient& cli, const std::string& bucket, const std::string& pr
 
 namespace lights3_ctl {
 
-// --offline: the server-side scrub (backlog-sequence ③) through the admin plane,
+// --offline: the server-side scrub through the admin plane,
 // on the shared job driver (lights3_ctl_jobs.h): POST starts one round (409
 // while one runs), GET polls; the final document is printed as JSON and
 // findings > 0 make the exit code 1 like `lights3 fsck`

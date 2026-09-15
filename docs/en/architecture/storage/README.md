@@ -19,10 +19,8 @@ Chinese originals one to one.
 | [duostore-meta-tikv-design.md](duostore-meta-tikv-design.md) | [duostore-meta-tikv-design.md](../../../architecture/storage/duostore-meta-tikv-design.md) / [duostore-meta-tikv.md](../../../architecture/storage/duostore-meta-tikv.md) | TiKV IMetaStore: integration route survey, the 2PC sidecar prerequisite, data model and transaction invariants |
 | [duostore-data-rados-design.md](duostore-data-rados-design.md) | [duostore-data-rados-design.md](../../../architecture/storage/duostore-data-rados-design.md) / [duostore-data-rados.md](../../../architecture/storage/duostore-data-rados.md) | RADOS IDataStore: integration route, object mapping, write / read paths, consistency and multi-gateway GC |
 
-Archived design document (moved to `docs/archive/` once every step was done, Chinese
-only, no longer updated): [multi-gateway-multipart-design.md](../../../archive/multi-gateway-multipart-design.md)
-— multipart across gateways on shared storage (support matrix, the duostore
+Multipart across gateways on shared storage (support matrix, the duostore
 premise audit, the write lease, the two-instance tests, the misconfiguration
-guard; closed 2026-09-09; the lasting conclusions live in
+guard) closed on 2026-09-09; the lasting conclusions live in
 [deployment.md §5](../../usage/deployment.md), duostore-core.md §9.1 and
-[duostore-data-rados-design.md §8.3](duostore-data-rados-design.md)).
+[duostore-data-rados-design.md §8.3](duostore-data-rados-design.md).

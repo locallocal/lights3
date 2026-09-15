@@ -21,13 +21,12 @@ class StorageRegistry {
 public:
     static void register_backend(const std::string& type, BackendFactory factory);
     // Registered type names, sorted (`lights3 --check-config` validates backends[].type
-    // against it without opening anything, roadmap §6.2)
+    // against it without opening anything)
     static std::vector<std::string> registered_types();
 
     // Construct all backends per config; returns name → instance. metrics may be null
-    // (unit-test assembly path skips the registry). existing (backend hot add,
-    // backlog-sequence ⑦): instances already running that a new tiered entry may
-    // name as local / cloud; they are looked up, never returned or rebuilt
+    // (unit-test assembly path skips the registry). existing (backend hot add): instances already running that a new
+    // tiered entry may name as local / cloud; they are looked up, never returned or rebuilt
     static std::map<std::string, std::shared_ptr<IStorageBackend>> build(
         const std::vector<BackendConfig>& configs, std::shared_ptr<ThreadPool> pool,
         std::shared_ptr<MetricsRegistry> metrics = nullptr,

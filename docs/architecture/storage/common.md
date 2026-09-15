@@ -18,7 +18,7 @@
 | `src/storage/validate.cc` | bucket/key 命名校验实现（声明在 `backend.h`，无独立头文件） |
 | `src/storage/listing.h/.cc` | ListObjects / ListParts / ListMultipartUploads 的共享分页与 delimiter 算法；`resolve_range` 的实现也在此 |
 | `src/storage/multipart.h/.cc` | upload_id 生成、合并 ETag、parts 预校验等后端无关的分片辅助 |
-| `src/storage/meta_cache.h` | `MetaCache<V>`：后端级对象元数据缓存（分片 LRU + TTL + 回填令牌 + 失效守卫），localfs/xlocalfs 与 duostore 各自实例化（roadmap §3.8；[localfs.md](localfs.md) §5.1、[duostore-core.md](duostore-core.md) §7.1） |
+| `src/storage/meta_cache.h` | `MetaCache<V>`：后端级对象元数据缓存（分片 LRU + TTL + 回填令牌 + 失效守卫），localfs/xlocalfs 与 duostore 各自实例化（[localfs.md](localfs.md) §5.1、[duostore-core.md](duostore-core.md) §7.1） |
 | `src/storage/metered_backend.h/.cc` | `MeteredBackend`：装饰器，`app.cc: meter_backends` 把路由表后的每个后端都包一层——按 `{backend,op}` 计时/计错（§8），并维护在途租约计数（`wait_idle(timeout)` 供后端热摘除排空；`get_object` 的租约随 body 走到流释放）。其 `close()` 有意不转发，原始后端由应用自行关闭 |
 | `src/storage/request_stats.h` | `RequestBackendStats{nanos, calls, errors, trace}`：挂在 CancelToken 上的请求级后端耗时累计，访问日志据此打印后端占比 |
 | `src/storage/scrub_throttle.h` | `ScrubThrottle::pace(n)`：scrub/fsck 读循环的字节速率节流（`bytes_per_sec=0` 关闭；按 500ms 片睡眠，片间探测 abort），localfs §11 与 duostore §8.4 共用 |
@@ -90,7 +90,7 @@ key/size/etag 由实现从源填充——字节未变，etag 恒等于源。
 | 方法 | 契约 |
 |---|---|
 | `create_multipart` | 返回 upload_id；`meta` 携带期望的 content_type/user_meta，在 complete 时生效 |
-| `upload_part(bucket, key, upload_id, part_no, body, checksum)` | `part_no ∈ [1,10000]`；同号重传 last-write-wins；返回该片 ETag（内容 MD5）。`checksum` 为 `optional<PartChecksum>`（roadmap §2.2）：`nullopt` = 未声明；实现须在**读尽 body 之后**把 `checksum->resolved()` 与片记录一起持久化（trailer 形式的值此时才存在）。不带 `checksum` 的五参重载是基类非虚转发（协程，保证参数活过挂起点），覆写时须 `using IStorageBackend::upload_part;` 重新导出 |
+| `upload_part(bucket, key, upload_id, part_no, body, checksum)` | `part_no ∈ [1,10000]`；同号重传 last-write-wins；返回该片 ETag（内容 MD5）。`checksum` 为 `optional<PartChecksum>`：`nullopt` = 未声明；实现须在**读尽 body 之后**把 `checksum->resolved()` 与片记录一起持久化（trailer 形式的值此时才存在）。不带 `checksum` 的五参重载是基类非虚转发（协程，保证参数活过挂起点），覆写时须 `using IStorageBackend::upload_part;` 重新导出 |
 | `complete_multipart` | `parts` 号必须严格递增、ETag 与已上传片一致；总 ETag = `md5(各片二进制 md5 拼接)-N`（与 S3 同规则，实现见 §6.3 `combined_etag`）；同时记录 `meta.part_sizes` 并经 §6.3 `apply_composite_checksum` 由各片已验证校验和算出 COMPOSITE 对象校验和，回填 `PutResult` |
 | `abort_multipart` | 丢弃全部已传片 |
 | `list_parts` | 按 part_no 升序、如实上报 is_truncated；upload 不存在抛 `NoSuchUpload`。**分页语义由 `storage/listing.h: apply_parts_page` 一处定义**：实现可先把 marker 下推到引擎再交给它收尾，但不得自造截断规则 |
@@ -128,7 +128,7 @@ key/size/etag 由实现从源填充——字节未变，etag 恒等于源。
 | `last_modified` | 系统时钟时间点 |
 | `user_meta` | `x-amz-meta-*` 键值对，**前缀已剥掉** |
 | `cache_control` 等 7 个 | 一等 S3 元数据（见下），空串 = 未设置、不回传该头 |
-| `checksum_algorithm` / `checksum_value` / `checksum_type` | 校验和闭环（roadmap §2.2）：大写算法名（CRC32/CRC32C/CRC64NVME/SHA1/SHA256）、base64 值（COMPOSITE 带 `-N` 后缀）、`FULL_OBJECT`/`COMPOSITE`；全空 = 未记录。GET/HEAD 按 `x-amz-checksum-mode` 回显 |
+| `checksum_algorithm` / `checksum_value` / `checksum_type` | 校验和闭环：大写算法名（CRC32/CRC32C/CRC64NVME/SHA1/SHA256）、base64 值（COMPOSITE 带 `-N` 后缀）、`FULL_OBJECT`/`COMPOSITE`；全空 = 未记录。GET/HEAD 按 `x-amz-checksum-mode` 回显 |
 | `checksum_pending` | trailer 形式上传的捕获槽：L2 装饰器在 body 触到 EOF 时填入（put 契约保证早于后端提交）。序列化器经 `resolved_checksum_value(m)` 读取，**本身从不持久化**；`finalize_checksum(m)` 是原地变体（memory 用） |
 | `part_sizes` | complete 时记录的各片大小（`part_sizes[i]` = 第 i+1 片），GET `?partNumber` 据此定位；空 = 单片或旧对象。文本序列化统一走 `join_part_sizes` / `parse_part_sizes`（逗号分隔十进制） |
 
@@ -173,7 +173,7 @@ STANDARD，存储层回显客户端报的 GLACIER 就是在撒谎，非 STANDARD
 - `ListUploadsResult`：uploads 按 (key, upload_id) 升序，带
   `next_key_marker` / `next_upload_id_marker`。
 
-分片列举分页结构的存在理由（`backend.h` 注释，对应 gaps §5.1）：早期版本
+分片列举分页结构的存在理由（`backend.h` 注释，对应）：早期版本
 返回裸 vector 且 IsTruncated 恒 false，客户端把它当"已到末尾"，5000 个活跃
 上传永远只看得见第一页，且单次请求在内存里构建全表。
 
@@ -272,7 +272,7 @@ map），参数解释权在各后端。注册表本体是 `registry.cc` 匿名�
 bucket 名 ≤63B（由 `validate_bucket_name` 保证），用 64B 栈缓冲拷出 NUL
 结尾串，避免每请求一次堆分配。
 
-**热更新**（roadmap §4.4、backlog ⑦）：路由器的所有副本（S3Service、生命周期、
+**热更新**（backlog ⑦）：路由器的所有副本（S3Service、生命周期、
 用量统计）共享同一 `Shared`，`update(cfg)` 先 `compile` 校验（同 §5.2）再原子
 换表，在途请求继续用它取到的旧快照；`update(cfg, backends)` 把规则与后端集
 一起换（后端热添加/摘除），规则先对新集校验、新集必须含同一实例的默认后端。

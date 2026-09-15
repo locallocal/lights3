@@ -17,7 +17,7 @@ bool is_valid_upload_id(std::string_view id);
 // S3 multipart combined-ETag rule: hex of md5(concatenation of each part's binary md5) + "-N"
 std::string combined_etag(const std::vector<std::string>& part_md5_hex);
 
-// Composite object checksum (roadmap §2.2): base64(H(concatenation of each part's raw
+// Composite object checksum: base64(H(concatenation of each part's raw
 // digest)) + "-N", H selected by the uppercase wire name (CRC32/CRC32C/SHA1/SHA256).
 // nullopt when the algorithm is unknown/unsupported for composites (CRC64NVME is
 // full-object only) or any part value fails to base64-decode — callers then record no
@@ -45,7 +45,7 @@ void validate_part_order(std::span<const PartInfo> parts);
 // part_no ∈ [1,kMaxParts], otherwise throws InvalidArgument
 void validate_part_number(int part_no);
 
-// AWS hard limits (docs/archive/gaps.md §5.7). The minimum part size is only judged at complete,
+// AWS hard limits. The minimum part size is only judged at complete,
 // and it is an S3 protocol rule rather than a storage rule -- so the check lives at L2
 // (handlers/multipart.cc) and the storage layer imposes no limit: callers using the
 // backend API directly (including each backend's consistency suite) are not bound by 5MiB

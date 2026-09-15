@@ -1,7 +1,7 @@
 # 性能基线：驱动 × TLS × put/get 矩阵
 
-roadmap §4.3 末项"性能基线缺失"的兑现：仓内首份存档的 benchmark 数据，同时是
-§4.3 数据面优化（[http-adapter.md §2.4](../architecture/http-adapter.md)）的前后对照。数字只对
+补上此前缺失的性能基线：仓内首份存档的 benchmark 数据，同时是数据面优化
+（[http-adapter.md §2.4](../architecture/http-adapter.md)）的前后对照。数字只对
 本机有意义，**用于相对比较与回归对照，不是产品指标**；换机器请用 §3 的命令
 重新生成并替换本文表格。
 
@@ -77,8 +77,8 @@ roadmap §4.3 末项"性能基线缺失"的兑现：仓内首份存档的 benchm
   capacity − size)` 让每次 socket 读只取 **512 字节**，4 MiB 请求体 = 8192 次
   `recvmsg` + 8198 次 `timerfd_settime` + 7.7 万次 futex（`strace -c` 实测），单次
   4 MiB PUT 40 ms 对 builtin 6 ms。修复是一行 `buffer.reserve(io_chunk_size)`
-  （[http-adapter.md §2.4](../architecture/http-adapter.md) ⑨）。这印证了 roadmap 的判断——
-  "beast 是性能路径"此前只是断言。
+  （[http-adapter.md §2.4](../architecture/http-adapter.md) ⑨）。这印证了此前的判断——
+  "beast 是性能路径"在此之前只是断言。
 - **小对象**：ops/s 由请求开销主导，§4.3 的改动对它基本中性（±5%），beast GET +14%
   来自 `ResumeOn` 快路径省掉的 `asio::post`；beast PUT 的 3.5× 同样来自读粒度修复。
 - **PUT 其他驱动持平**：请求体路径本轮未动。表中 httplib TLS PUT 的 −18% 是单次

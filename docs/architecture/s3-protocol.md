@@ -108,13 +108,13 @@ valid yet"），防未来时间戳把有效期无限外推。
 
 ### 3.5 凭证管理与 STS 会话
 
-STS 会话凭证（roadmap §2.6）：`AssumeRole` 铸造 `L3SA` 前缀的会话
+STS 会话凭证：`AssumeRole` 铸造 `L3SA` 前缀的会话
 AK/SK/token（TTL 900–43200s），policy 继承调用者快照；数据面请求需带
 `x-amz-security-token`（header 或 presigned query）——token 不符
 `InvalidToken`、过期 `ExpiredToken`（重试信号）、永久 AK 携带 token 同样
 拒绝。session 不能是 root、不能再 AssumeRole。
 
-**多实例共享**（backlog-sequence ④）：会话记录写穿到默认后端的
+**多实例共享**：会话记录写穿到默认后端的
 `.sys/sts/<session-ak>`（SK 与 token 与凭证 SK 同规则——有主密钥则 AES-256-GCM
 封存 `version: 2`，否则明文 `version: 1`；另含 `expires_unix`、`created_unix`、
 `parent`、继承的 `policy`/`tenant`），本实例内存表只是缓存：
@@ -198,14 +198,14 @@ struct S3Error : std::exception {   // L2/L3 统一抛这个
 
 ## 7. 可观测性
 
-构建身份 `lights3_build_info{version,commit,build_type}`（恒 1，roadmap §6.3，
+构建身份 `lights3_build_info{version,commit,build_type}`（恒 1，
 [deployment.md §1](../usage/deployment.md)）。
-L1 连接与限流指标（roadmap §4.2）：`lights3_http_connections_total{result}`、
+L1 连接与限流指标：`lights3_http_connections_total{result}`、
 `lights3_http_connections_active`、`lights3_http_keepalive_closes_total`、
 `lights3_http_timeouts_total{phase=idle|header|body|write}`、
 `lights3_ratelimit_rejections_total{scope=ip|ak}`，见 [http-adapter.md §2.2–§2.3](http-adapter.md)。
 
-- **访问日志**（roadmap §5.2）：每请求一行，经独立的 `lights3.access` logger
+- **访问日志**：每请求一行，经独立的 `lights3.access` logger
   与运行日志共用 sink。文本格式（`log.format: text`）：
   `access <request_id> <AK|-> <method> "<path>" <status> <bytes> <总耗时>ms
   api=<路由名> backend=<后端名>:<后端耗时>ms remote=<客户端地址> bucket=<bucket|->
@@ -225,7 +225,7 @@ L1 连接与限流指标（roadmap §4.2）：`lights3_http_connections_total{re
   handler=<ms> backend_calls=<n>`；JSON：`"slow":true` + 上述字段），生产
   `log.level: warn` 时仍能看到值得看的请求。auth = 从进入 dispatch 到身份验证
   完成，handler = 路由处理器整段（后端耗时是其子集）。
-- **分布式 trace（轻量层，roadmap §5.4，`core/trace.h`）**：接受 W3C
+- **分布式 trace（轻量层，`core/trace.h`）**：接受 W3C
   `traceparent`（严格校验：版本 00、小写 hex、非零 id；畸形即视为无）与
   `tracestate`（原样透传）；缺失时网关自起一条 trace。每个请求持有自己的 span，
   来访的 span 记为 parent。落点：访问行文本槽 `trace=<trace_id>/<span_id>
@@ -257,8 +257,8 @@ L1 连接与限流指标（roadmap §4.2）：`lights3_http_connections_total{re
   （backend=<name> 标签）追加在 L2 请求指标之后输出，其中
   `lights3_backend_op_seconds{backend,op}` 直方图与
   `lights3_backend_errors_total{backend,op}`（5xx/传输异常计错误，4xx 不计）
-  由计时装饰器对六个后端统一产出（roadmap §5.1）。
-  roadmap §5.3 补口：**精确状态码** `lights3_responses_by_status_total{status}`
+  由计时装饰器对六个后端统一产出。
+  另有**精确状态码** `lights3_responses_by_status_total{status}`
   （稀疏输出，出现过的码才有一行；206/304 比例是网站/CDN 场景的关键量）；
   **准入闸门** `lights3_admission_wait_seconds` 直方图（每个请求一样本，直接
   拿到许可的落在首桶）、`lights3_admission_queued_total`（排过队的请求数）、
@@ -292,5 +292,5 @@ L1 连接与限流指标（roadmap §4.2）：`lights3_http_connections_total{re
    `tests/e2e/run_mint.sh`（起 lights3 + `minio/mint` 容器对打，docker 不可用
    时显式 SKIP）。mint 依赖 docker daemon 权限，本地开发机通常跑不了；全集含
    versioning/tagging 等明确不支持的 API，以 `s3cmd`、`awscli` 子集起步——
-   自 roadmap §6.1 起挂为 ctest `mint`（无 docker 显示 Not Run），跑完打印
+   现已挂为 ctest `mint`（无 docker 显示 Not Run），跑完打印
    每套件 PASS/FAIL 基线（[testing.md §6](../development/testing.md)）。

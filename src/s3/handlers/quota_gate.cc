@@ -1,6 +1,5 @@
-// L2: usage / quota / tenancy helpers shared by the write handlers (roadmap §3.9,
-// docs/architecture/multi-tenancy.md §2–§4). Kept out of the individual handler files so the
-// accounting rules live in one place:
+// L2: usage / quota / tenancy helpers shared by the write handlers (docs/architecture/multi-tenancy.md §2–§4). Kept out
+// of the individual handler files so the accounting rules live in one place:
 //   - existing_size: the HEAD before a write that tells us what a PUT replaces or a
 //     DELETE removes (skipped entirely when accounting is off);
 //   - check_quota: bucket limit first, then the owner tenant's aggregate limit —

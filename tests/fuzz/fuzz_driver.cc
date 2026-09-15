@@ -1,4 +1,4 @@
-// Standalone entry for the fuzz harnesses (roadmap §6.1): without libFuzzer
+// Standalone entry for the fuzz harnesses: without libFuzzer
 // (GCC builds, the default), each harness links this main and replays every file
 // under the directories given on the command line — the checked-in seed corpus
 // becomes a crash-regression test (ctest fuzz_regression). With

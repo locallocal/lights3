@@ -1,4 +1,4 @@
-# LightS3 compose (roadmap §6.3, docs/usage/deployment.md §4). Run from this directory
+# LightS3 compose (docs/usage/deployment.md §4). Run from this directory
 # (or `docker compose -f docker/docker-compose.yml ...` from the repository root);
 # images build with the repository root as context and docker/Dockerfile.
 #
@@ -8,7 +8,7 @@
 #   docker compose --profile rados up -d       # + duostore with RADOS data on :9003 (image lights3:full, ceph demo)
 #   docker compose --profile e2e run --rm e2e  # the redis / tikv / rados e2e paths that SKIP on a dev box
 #   docker compose --profile multi up -d       # two gateways on one redis meta + one RADOS pool behind nginx on :9004
-#   docker compose --profile multi run --rm e2e-multi  # a multipart spread over both gateways (multi-gateway-multipart §4 ②)
+#   docker compose --profile multi run --rm e2e-multi  # a multipart spread over both gateways
 #
 # Environment: LIGHTS3_SECRET_1 (root secret, demo default below),
 # LIGHTS3_GIT_COMMIT (stamped into --version: LIGHTS3_GIT_COMMIT=$(git rev-parse --short=12 HEAD) docker compose build),

@@ -1,4 +1,4 @@
-// L3: multi-in-flight IO streams over UringEngine (roadmap §3.4 ①②③).
+// L3: multi-in-flight IO streams over UringEngine.
 //
 // The engine's original discipline was "at most one in-flight op per coroutine frame",
 // which made destruction trivially safe but left queue_depth unused within a single
@@ -13,7 +13,7 @@
 // already waits for them.
 //
 // Blocks come from the ring's registered fixed-buffer pool when available
-// (READ_FIXED/WRITE_FIXED, roadmap §3.4 ②) and silently fall back to heap blocks with
+// (READ_FIXED/WRITE_FIXED) and silently fall back to heap blocks with
 // plain READ/WRITE when the pool is exhausted or registration failed. Streams whose
 // expected size crosses kFixedFileMinBytes also register their fd in the ring's fixed
 // file table for the duration of the stream.
@@ -32,7 +32,7 @@ namespace uring_detail {
 struct StreamState;
 }
 
-// Read-ahead streaming reader (roadmap §3.4 ①): keeps up to read_depth block reads in
+// Read-ahead streaming reader: keeps up to read_depth block reads in
 // flight past the consumer's position, so a serial consumer (HTTP response pump) overlaps
 // disk latency instead of paying one full CQE round trip per block. read() copies from the
 // completed block into the caller's buffer (a 64KiB memcpy is noise next to the saved
@@ -68,7 +68,7 @@ private:
 // (typically by reading the request body straight into it) and commit()s; the write SQE
 // for block k is pushed when block k+1 is committed ("hold-back"), so the final block is
 // still un-submitted when finish() runs and can be chained WRITE -> linked FSYNC in a
-// single submission (roadmap §3.4 ③) -- the common small object costs one submission and
+// single submission -- the common small object costs one submission and
 // one wakeup for write+persist. Blocks already pushed overlap with receiving the next body
 // block, up to write_depth in flight.
 // finish() is the only place results are fully settled; a stream destroyed without

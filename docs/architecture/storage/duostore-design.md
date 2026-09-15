@@ -25,7 +25,7 @@
 - pack 写入的 group-commit 聚合（每 record 一次 fdatasync，见 §6.3）；
 - 多进程/多网关共享同一 root（单进程独占，与 localfs 同一前提）；
 - meta 的 TransactionDB / 分布式事务（复合不变量用 store 内互斥，§4.5）；
-- ~~作 tiered 的 local 侧~~——已实现（roadmap §3.6 ⑥，`DuoStoreTierLocal`，§13.1）；
+- ~~作 tiered 的 local 侧~~——已实现（`DuoStoreTierLocal`，§13.1）；
 - RocksDB 压缩（元数据体量小，换零外部依赖，§13.3）。
 
 ## 2. 架构与路线决策
@@ -220,8 +220,8 @@ u8 ver | u64 size | u64 mtime_ms | u64 version | str etag | str content_type
 | u16 n_meta | (str k, str v)* | u32 n_runs | run*        （str = u16 len + bytes）
 ```
 
-v2 在 n_meta 段后追加一等元数据段 `u16 n_std | (str k, str v)*`；v3（roadmap
-§3.6 ⑥）再追加 `u8 tier | str remote_etag | str remote_at`——duostore 作 tiered
+v2 在 n_meta 段后追加一等元数据段 `u16 n_std | (str k, str v)*`；v3 再追加
+`u8 tier | str remote_etag | str remote_at`——duostore 作 tiered
 热层时的对象状态（stub = tier=remote 且无 run），见
 [storage/tiered.md §11](tiered.md)。读端兼容 v1–v3，写端恒 v3。
 
@@ -519,7 +519,7 @@ cloudproxy），`parse_size` / `parse_duration_sec` 可直接用。
 | meta_path | `<root>/meta` | RocksDB 目录 |
 | meta / data | rocksdb / fs | 引擎选择：`meta: rocksdb\|redis\|sqlite\|tikv`，`data: fs\|rados`（§12） |
 | chunk_size | 8MiB | 大对象切片粒度 |
-| fs_uring | false | data=fs 的 io_uring 数据面（roadmap §3.4 ⑤，[storage/duostore-data-fs.md](duostore-data-fs.md) §9）；引擎建失败回退同步路径并置常驻 gauge `lights3_duostore_uring_fallback=1` |
+| fs_uring | false | data=fs 的 io_uring 数据面（[storage/duostore-data-fs.md](duostore-data-fs.md) §9）；引擎建失败回退同步路径并置常驻 gauge `lights3_duostore_uring_fallback=1` |
 | fs_uring_queue_depth | 256 | 每 ring SQ 深度（[8,65536]） |
 | fs_uring_sqpoll | false | 内核 SQ 轮询线程 |
 | fs_uring_rings | 1 | ring 分片数（[0,64]，0 = auto） |
@@ -531,8 +531,8 @@ cloudproxy），`parse_size` / `parse_duration_sec` 可直接用。
 | gc_enabled | true | 后台 GC worker + 孤儿扫描排程总开关；多网关部署非指定实例置 false（单实例执行约束，duostore-data-rados-design.md §8.3），手动钩子不受门控 |
 | gc_interval / gc_grace | 5m / 5m | 回收周期 / 延迟删除宽限 |
 | gc_compact_max_packs / gc_compact_max_bytes | 16 / 1GiB | 单轮压实预算（高收益 pack 先行，余下下轮）；0 = 不限 |
-| read_lease | 5s | 多网关读写租约发布周期（roadmap §3.7，[storage/duostore-core.md](duostore-core.md) §8.5）：每网关向共享 meta（redis/tikv）发布最老在途读、最老在途写的开始时间，GC 只回收所有对端在途读都晚于其入队的项，孤儿扫描只删早于所有对端在途写的无 refs chunk；0 = 关（须自行保证 `gc_grace` ≥ 最长 GET / 上传时长）；本地引擎（rocksdb/sqlite）自动停摆无开销 |
-| meta_cache_entries | 64K（rocksdb/sqlite）/ 0（redis/tikv） | 对象元数据缓存预算（roadmap §3.8，[storage/duostore-core.md](duostore-core.md) §7.1）：命中的 GET/HEAD 零 meta RTT；0 = 关。本地引擎精确失效；共享引擎开启须配 `meta_cache_ttl` |
+| read_lease | 5s | 多网关读写租约发布周期（[storage/duostore-core.md](duostore-core.md) §8.5）：每网关向共享 meta（redis/tikv）发布最老在途读、最老在途写的开始时间，GC 只回收所有对端在途读都晚于其入队的项，孤儿扫描只删早于所有对端在途写的无 refs chunk；0 = 关（须自行保证 `gc_grace` ≥ 最长 GET / 上传时长）；本地引擎（rocksdb/sqlite）自动停摆无开销 |
+| meta_cache_entries | 64K（rocksdb/sqlite）/ 0（redis/tikv） | 对象元数据缓存预算（[storage/duostore-core.md](duostore-core.md) §7.1）：命中的 GET/HEAD 零 meta RTT；0 = 关。本地引擎精确失效；共享引擎开启须配 `meta_cache_ttl` |
 | meta_cache_ttl | 0（不过期） | 缓存记录过期时间；共享引擎（redis/tikv）必须 `0 < ttl < gc_grace`（对端网关的写在 TTL 内不可见；read-lease 发布值回拨一个 TTL） |
 | meta_cache_feed | true | 引擎有失效推送（redis pub/sub）时订阅之；false = 仅 TTL 有界陈旧 |
 | orphan_scan_interval | 1d | chunk 孤儿对账周期 |
@@ -564,7 +564,7 @@ RocksDB+Ceph（本地索引 + 远端数据）均为合法组合。注意：跨�
 
 ### 13.1 组件关系
 
-- **可作 tiered 的 local 侧**（roadmap §3.6 ⑥）：tiered 的 local 侧已抽象为
+- **可作 tiered 的 local 侧**：tiered 的 local 侧已抽象为
   `ITierLocal`，`DuoStoreTierLocal` 把 tier 状态放进对象记录、stub = 无 extent
   的记录、提交 = CAS 元数据事务（[tiered-design.md](tiered-design.md) §2，
   [tiered.md](tiered.md) §11；`e2e_tiered_duolocal` 验收）；

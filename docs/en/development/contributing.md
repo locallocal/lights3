@@ -90,9 +90,9 @@ make package                      # Release + CPack (deb / rpm / tgz)
   `#endif  // GUARD`.
 - Referencing design documents: comments say `docs/<group>/<name>.md §N` (for
   example `docs/architecture/storage/duostore-design.md §5.2`); section numbers
-  are identical in both languages, so the reference works for either. `roadmap
-  §N` / `backlog §N` / `backlog-sequence ①…⑩` / `gaps` / `issues T<n>` refer to
-  the read-only ledgers under [../../archive/](../../archive/) (Chinese only).
+  are identical in both languages, so the reference works for either. `backlog
+  §N` refers to the read-only ledger under [../../archive/](../../archive/)
+  (Chinese only).
 - Coroutines: no `co_await` inside a `catch` block; waiting inside a coroutine
   goes through the `drive` path of `sync_wait` / `Started::wait` or it deadlocks;
   GCC 15 ICEs on `co_await` of a member pointer, so store it in a local first;

@@ -35,7 +35,7 @@ DuoStoreBackend 主体见 [./duostore-core.md](duostore-core.md)；姊妹实现�
 | `o:<b>` | HASH | `objects_key` | field=对象 key，value=`codec::encode_object`；点查 `HGET` |
 | `oz:<b>` | ZSET | `zindex_key` | 全员 score=0 的字典序索引，member=对象 key；list 走 `ZRANGEBYLEX`（§5） |
 | `up:<b>` | HASH | `uploads_key` | field=`<key>\0<id>`，value=`codec::encode_upload` |
-| `uz:<b>` | ZSET（score 恒 0） | `uploads_zkey` | member=`<key>\0<id>`，`up:<b>` 的词序索引（roadmap §3.5），与 `oz:<b>` 同构；create/complete/abort 与 HASH 同脚本同批维护，delete_bucket 一并 DEL |
+| `uz:<b>` | ZSET（score 恒 0） | `uploads_zkey` | member=`<key>\0<id>`，`up:<b>` 的词序索引，与 `oz:<b>` 同构；create/complete/abort 与 HASH 同脚本同批维护，delete_bucket 一并 DEL |
 | `pt:<b>\0<key>\0<id>` | HASH | `parts_key`（内部拼 `codec::upload_key`） | field=十进制 part_no，value=`codec::encode_part`；complete/abort 整键 `DEL` |
 | `refs` | HASH | `refs_key` | field=十进制 file_id，value=owner 简述；`chunk_referenced` = `HEXISTS` |
 | `gcq` | ZSET | `gcq_key` | score=seq，member=`be64(seq) ‖ encode_reclaim`（be64 前缀保 member 唯一且自含 seq） |
@@ -183,7 +183,7 @@ C++ 侧 `list_objects` 解包四元组返回值，value 经 `codec::decode_objec
 ### 5.2 其余列举
 
 - `list_buckets`：`HGETALL buckets` + 客户端按名排序（桶数小）；
-- `list_uploads`（roadmap §3.5）：先 `ZCARD uz:<b>` 与 `HLEN up:<b>` 对账。相等
+- `list_uploads`：先 `ZCARD uz:<b>` 与 `HLEN up:<b>` 对账。相等
   → 索引路径：`ZRANGEBYLEX uz:<b> <min> + LIMIT 0 <page>` 从游标起按 (key,
   upload_id) 序分页取 member，再 `HMGET up:<b>` 取值；`<min>` 取"marker 之后"
   与"prefix 起点"二者较大者（复合 marker 用 `(key\0id`；仅 key-marker 用
@@ -281,7 +281,7 @@ false = 无推送，缓存只靠 TTL 失效）的：
 
 ## 10. 备份与 PITR 恢复点
 
-总体约定见[主文档 §11.1](duostore-core.md#111-备份链与-pitrmeta_backuph--meta_backupccbacklog-sequence-)。
+总体约定见[主文档 §11.1](duostore-core.md#111-备份链与-pitrmeta_backuph--meta_backupcc)。
 redis 没有网关侧的增量机制——增量副本是 **AOF 归档**，归集群运维；网关只做两件事：
 
 - `supports_physical_backup()=false`：`backup` 落成逻辑 dump（`NNNNNN-full.dump`，

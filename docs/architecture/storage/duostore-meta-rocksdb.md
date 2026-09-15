@@ -123,7 +123,7 @@ DB 句柄与 LOCK 文件泄漏）。
 纯读不加 `mu_`（get 幂等安全；迭代器/快照自带一致视图）：
 
 - **`get_object` / `head_object`**：`objects` CF 点查（`get_raw`），后者用
-  `decode_object_meta` 免物化 manifest（docs/archive/gaps.md §3.9）。
+  `decode_object_meta` 免物化 manifest。
 - **`list_objects`**（`rocks_meta_store.cc:RocksMetaStore::list_objects`，主文档 §4.4）：
   固定 `GetSnapshot()`（RAII `SnapshotGuard` 释放）+ `iterate_upper_bound` =
   `<bucket>\x01`（bucket 名无 NUL，`'\0'+1` 即桶域上界）。起点
@@ -134,20 +134,20 @@ DB 句柄与 LOCK 文件泄漏）。
   时 `last_emitted` 保持旧值但循环必然不再走截断分支，旧值不会被读到。多收一条判
   `is_truncated`，`next_token` = 最后发出的 key。`max_keys<=0` 直接返回空且不截断
   （S3 语义）。
-- **`list_uploads`**：游标下推（docs/archive/gaps.md §5.1）——key 编码已按 (key, upload_id)
+- **`list_uploads`**：游标下推——key 编码已按 (key, upload_id)
   有序，`id_marker` 非空时 seek 点 = `<bucket>\0<key_marker>\0<id_marker>\0`（尾 `\0`
   使落点恰在该 (key,id) 之后）；只有 `key_marker` 时语义是 `key > key_marker`，seek 点
   = `<bucket>\0<key_marker>\x01`（key 无 NUL，`\x01` 即最小的更大 key）。`prefix`
-  下推（roadmap §3.5）：`<bucket>\0<prefix>` 大于上述 seek 点时取代之作为起点，扫描中
+  下推：`<bucket>\0<prefix>` 大于上述 seek 点时取代之作为起点，扫描中
   一旦 key 越出 prefix 即断。一条被跳过的记录都不读；`limit>0` 时收满即断。
 - **`list_parts` / `scan_parts`**：`codec.cc:parts_prefix` 前缀扫，be16 尾缀保证
   升序，无需排序。
 - **`peek_reclaims`**：`gcq` CF 从 `be64_key(min_seq)` 起顺扫，双上限——条数 `max`
-  与累计 extent 数 `max_extents`（docs/archive/gaps.md §2.11：防按条数取批时 GB 级驻留），
+  与累计 extent 数 `max_extents`（防按条数取批时 GB 级驻留），
   至少返回 1 条（拆分前遗留的超大单条仍可消费）。
 - **`scan_refs`**：`refs` CF 全扫回调 file_id，不取 `mu_`——孤儿扫描按接口契约容忍
   弱一致快照。
-- **`snapshot()`**（在线 dump，roadmap §3.7）：返回
+- **`snapshot()`**（在线 dump）：返回
   `rocks_meta_store.cc:RocksMetaStore::SnapshotView`（实现 `meta_store.h:IMetaReadView`），
   构造时 `GetSnapshot()` 钉住一个 RocksDB 快照并持有到析构；`list_buckets` /
   `get_object` / `list_objects` / `pack_stats` 全部转发到带快照参数的 `*_snap` 私有
@@ -171,7 +171,7 @@ DB 句柄与 LOCK 文件泄漏）。
 | helper | 作用 |
 | --- | --- |
 | `rocks_meta_store.cc:RocksMetaStore::batch_refs` | chunk/rados extent 逐个写/删 `refs`（kPack 跳过——pack 走存活账） |
-| `rocks_meta_store.cc:RocksMetaStore::batch_pack_delta` | 同 pack extent 先聚合再对 `p…b`/`p…r` 各一次 Merge；字节数按 payload+record 头开销计（`codec.h:pack_rec_overhead*`，与 file_size 同口径，docs/archive/gaps.md §2.3a） |
+| `rocks_meta_store.cc:RocksMetaStore::batch_pack_delta` | 同 pack extent 先聚合再对 `p…b`/`p…r` 各一次 Merge；字节数按 payload+record 头开销计（`codec.h:pack_rec_overhead*`，与 file_size 同口径） |
 | `rocks_meta_store.cc:RocksMetaStore::enqueue_reclaim_locked` | 旧 DataRef 入 `gcq`；超过 `meta_util.h:kReclaimMaxExtents`（4096）按段拆成多条（每条独立 ack，unlink 幂等故拆分不改崩溃语义） |
 
 逐方法同批内容：
@@ -192,7 +192,7 @@ DB 句柄与 LOCK 文件泄漏）。
 `expect_version` 与 from.extents（不符返回 false 不碰批），符合则 version+1、
 DataRef=to，refs 按 **`meta_util.h:refs_delta` 差集**操作（to/from 共享未迁移
 chunk，全量先加后删在 last-wins 下净效果是删，会抹掉存活数据的 refs），pack 账
-±object 口径。`swap_extents` 单项单批；`swap_extents_batch`（gaps §2.13 批量压实）
+±object 口径。`swap_extents` 单项单批；`swap_extents_batch`（批量压实）
 整批一个 WriteBatch 一次提交，逐项 CAS 独立——失败项不进批、不影响其余，全败则
 不提交。
 
@@ -243,7 +243,7 @@ NotImplemented，四个引擎都覆写。本实现落在 `tc` CF：value 原样�
 
 ## 9. 备份链与 PITR
 
-总体约定见[主文档 §11.1](duostore-core.md#111-备份链与-pitrmeta_backuph--meta_backupccbacklog-sequence-)。
+总体约定见[主文档 §11.1](duostore-core.md#111-备份链与-pitrmeta_backuph--meta_backupcc)。
 rocksdb 的载荷是 `rocksdb::BackupEngine`，根在 `<dir>/rocksdb`：
 
 - **每条都是 `CreateNewBackupWithMetadata`**（`flush_before_backup=true`，memtable

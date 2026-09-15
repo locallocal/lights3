@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install-tree smoke test (roadmap §6.3, docs/usage/deployment.md §2): `cmake --install`
+# Install-tree smoke test (docs/usage/deployment.md §2): `cmake --install`
 # into a scratch prefix, then assert the layout, the relocated unit file, the
 # preserve-existing-config rule and the --version output of the installed
 # binaries. Runs as ctest `install_tree`; no root, no packaging tools needed.

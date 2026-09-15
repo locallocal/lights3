@@ -80,7 +80,7 @@ private:
 };
 
 // Mutex-protected idle-deque connection pool; httplib::Client is not thread-safe, so
-// leases are exclusive (docs/architecture/storage/cloudproxy-design.md §8.1). Hygiene (roadmap §3.3): idle
+// leases are exclusive (docs/architecture/storage/cloudproxy-design.md §8.1). Hygiene: idle
 // entries carry timestamps — a connection idle beyond pool_idle_timeout is never reused
 // (a NAT/remote that silently dropped it would surface as first-request retry spikes)
 // and a light TimerQueue reaper closes them during quiet periods; pool_max_lifetime
@@ -115,7 +115,7 @@ public:
     // Blocking acquire for the pump threads (private per-transfer threads); throws
     // SlowDown if the wait exceeds request_timeout
     Lease acquire();
-    // Coroutine acquire for control-plane paths (roadmap §3.3): a pool thread is never
+    // Coroutine acquire for control-plane paths: a pool thread is never
     // parked in cv_.wait — at capacity the awaiter queues and release() hands the
     // connection over directly; a TimerQueue timer enforces the same request_timeout /
     // SlowDown contract. Resumes via the executor set below (or inline on the
@@ -192,7 +192,7 @@ struct RemoteContext {
           pool(cfg, ep, metrics.pool_wait),
           auth(s3::SigV4Authenticator::build(AuthConfig{.credentials = {}, .region = cfg.region, .service = "s3"})),
           cred{cfg.access_key, cfg.secret_key} {
-        // Credential chain (roadmap §3.3): only when no static keys are configured —
+        // Credential chain: only when no static keys are configured —
         // env → container endpoint → EC2 IMDSv2, resolved lazily on first signing
         if (cfg.access_key.empty() || cfg.secret_key.empty())
             cred_chain = std::make_unique<CredentialProvider>(cfg.endpoint, cfg.imds_endpoint);
@@ -230,7 +230,7 @@ struct RemoteContext {
         return e == httplib::Error::Connection || e == httplib::Error::ConnectionTimeout ||
                e == httplib::Error::SSLConnection;
     }
-    // ---- Backoff and Retry-After (roadmap §3.3) ----
+    // ---- Backoff and Retry-After ----
     // 429/503 responses may carry Retry-After (integer seconds or HTTP-date); the hint,
     // clamped to [0, 60s], replaces the exponential formula for that wait
     static std::optional<int64_t> retry_after_hint(const httplib::Result& r);
@@ -240,7 +240,7 @@ struct RemoteContext {
     // must use CloudProxyBackend::async_backoff instead — never sleep on a pool thread)
     void backoff(int attempt, std::optional<int64_t> retry_after_ms = {}) const;
 
-    // ---- Circuit breaker (roadmap §3.3) ----
+    // ---- Circuit breaker ----
     // False = open (fail fast); true may hand this caller the single half-open probe.
     // Every definitive attempt outcome must be reported back via breaker_observe —
     // transport error / 5xx count as failures, <500 as success, 429 is neutral
@@ -250,7 +250,7 @@ struct RemoteContext {
     // Convenience gate: throws SlowDown (and counts code "breaker_open") when open
     void breaker_gate();
 
-    // ---- Per-op deadline (roadmap §3.3) ----
+    // ---- Per-op deadline ----
     // Steady deadline for one operation's whole retry loop; max() when disabled
     std::chrono::steady_clock::time_point op_deadline() const {
         return cfg.op_deadline_ms > 0 ? std::chrono::steady_clock::now() + std::chrono::milliseconds(cfg.op_deadline_ms)

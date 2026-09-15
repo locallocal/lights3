@@ -1,5 +1,5 @@
 // lights3-ctl `object` command group: `object inspect <bucket> <key>` prints the
-// object's internal layout via GET /-/admin/objects (roadmap §6.2).
+// object's internal layout via GET /-/admin/objects.
 // Implementation in lights3_ctl_object.cc.
 #pragma once
 

@@ -170,12 +170,12 @@ public:
     // Usage: auto permit = co_await sem.acquire();
     // On cancellation (request timeout / disconnect / process shutdown), a queued
     // acquire surfaces as OperationCancelled — the max_inflight_requests queue is
-    // exactly where a request is most likely to hang for a long time (docs/archive/gaps.md §3.1)
+    // exactly where a request is most likely to hang for a long time
     AcquireAwaiter acquire(CancelToken token = {}) { return {*this, std::move(token), {}, false}; }
 
     // Wake all waiters with cancellation semantics and reject subsequent acquires.
     // Calling this before destruction lets the owner satisfy the "no waiters at
-    // destruction" contract (docs/archive/gaps.md §2.13 leftover)
+    // destruction" contract (leftover)
     void close() {
         std::deque<std::shared_ptr<Waiter>> ws;
         {
@@ -199,7 +199,7 @@ public:
     }
 
     // Configured capacity (runtime.max_inflight_requests); set_capacity resizes it
-    // live (config hot reload, roadmap §4.4): growing wakes queued waiters, shrinking
+    // live (config hot reload): growing wakes queued waiters, shrinking
     // lets the extra permits drain as in-flight requests finish (available() may go
     // negative meanwhile — nothing new is admitted until it recovers)
     long capacity() const {
@@ -240,7 +240,7 @@ public:
         }
     }
 
-    // Shutdown drain (roadmap §4.5): block until every permit is back (available ==
+    // Shutdown drain: block until every permit is back (available ==
     // capacity) or the deadline passes; true = fully drained. Replaces the old
     // 20ms polling loop; release_one signals when the last permit returns
     bool wait_drained(std::chrono::milliseconds timeout) {

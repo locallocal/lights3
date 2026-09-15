@@ -29,7 +29,7 @@ Goals:
 Non-goals (first phase):
 
 - ~~No automatic acquisition of IAM Role / IMDS / STS temporary credentials~~
-  **implemented (roadmap §3.3, 2026-08-28)**: with no static AK/SK configured
+  **implemented (2026-08-28)**: with no static AK/SK configured
   the credential chain runs (environment → container endpoint → EC2 IMDSv2,
   §7); static AK/SK (`${ENV}` expansion) remains the explicit-config shape;
 - No multi-endpoint load balancing/failover; one backend instance maps to one
@@ -126,7 +126,7 @@ points:
 - Authenticator instance: one per backend,
   `SigV4Authenticator::build(AuthConfig{cloud credentials, remote region, "s3"})`,
   with region independent from the region used by local L2 verification;
-- **Trace propagation** (roadmap §5.4): every op entry does
+- **Trace propagation**: every op entry does
   `co_await trace_extra(extra)` — it reads the request payload off the awaiting
   chain's cancellation token (`RequestBackendStats::trace` in
   `storage/request_stats.h`) and appends `traceparent` (the gateway's own span,
@@ -196,8 +196,8 @@ get_object(bucket, key, range):
                hand the exception back via the promise
      - ContentReceiver: loop queue->push(data, n) (httplib hands over one
        16 KiB slice of its own buffer per callback; the queue appends
-       consecutive slices to one tail block of up to 256 KiB, backlog-sequence ⑩,
-       so the consumer pops a block, not a slice); if push returns false,
+       consecutive slices to one tail block of up to 256 KiB, so the
+       consumer pops a block, not a slice); if push returns false,
        return false to abort the transfer
      - Finish: queue->close(ok)
 ③ Once ① has the meta: co_return ObjectStream{meta,
@@ -232,7 +232,7 @@ put_object(bucket, key, meta, body):
 ② The calling coroutine (staying in the shared pool) loops:
      co_await body.read(64KiB buffer) → HashStream(Md5) incremental update
        → queue->push(std::move(chunk)) (a fresh 64 KiB string per read, moved
-         in whole: no copy under the lock, backlog-sequence ⑩); after EOF,
+         in whole: no copy under the lock); after EOF,
          queue->close(ok=true)
      body.read() throws (client disconnected) → queue->close(ok=false) →
        Provider returns false to abort the upload
@@ -261,7 +261,7 @@ is recommended only for intranet/testing**; production should use HTTPS.
   `Transfer-Encoding: chunked` (it requires fixed length or aws-chunked).
   `STREAMING-UNSIGNED-PAYLOAD-TRAILER` outbound framing is not implemented (a
   rare path whose benefit does not justify the complexity); the implemented
-  alternative (gaps §6.2) spools the body to a local temp file first
+  alternative spools the body to a local temp file first
   (`spool_dir`, default: the system temp directory) to learn its length, then
   uploads with a fixed length; exceeding `spool_max_bytes` (default 5GiB)
   throws `EntityTooLarge`; `spool_max_bytes: 0` disables spooling and falls
@@ -379,8 +379,8 @@ Remote response → local `s3::S3Error` (single-point implementation in
   `retry_max` / `retry_base_ms` configurable with range validation at load
   time; a single backoff is clamped to 60s); **a `Retry-After` header on
   429/503 (integer seconds or HTTP-date) overrides the formula, clamped to
-  [0, 60s] (roadmap §3.3)**;
-- **Backoff never sleeps on a pool thread** (roadmap §3.3 rework): the
+  [0, 60s]**;
+- **Backoff never sleeps on a pool thread** (rework): the
   control-plane retry loop is driven at coroutine level (`retry_io`) with
   awaitable TimerQueue sleeps between attempts, and connection leases are
   asynchronous too (`ClientPool::acquire_async` — at capacity a waiter
@@ -455,7 +455,7 @@ backends:
     verify_etag: true                # §6; turn off when the remote uses SSE-KMS
     spool_max_bytes: 5GiB            # cap for spooling a length-less body to disk (§3.2); 0 = off (back to NotImplemented)
     spool_dir: ""                    # spool directory, empty = system temp directory
-    # Leave BOTH access_key/secret_key empty to use the AWS credential chain (roadmap §3.3):
+    # Leave BOTH access_key/secret_key empty to use the AWS credential chain:
     # environment → container endpoint (ECS/EKS) → EC2 IMDSv2, with session credentials
     # refreshed ahead of expiry; imds_endpoint: http://169.254.169.254 is overridable for tests
 ```
@@ -496,7 +496,7 @@ via RAII guard. Per-thread clients rejected: pumps run on private threads and
 the control plane on arbitrary pool threads, so thread_local would make the
 connection count uncontrollable.
 
-Connection hygiene (roadmap §3.3): idle entries carry timestamps — anything
+Connection hygiene: idle entries carry timestamps — anything
 idle beyond `pool_idle_timeout` is never reused and a light reaper closes it (a
 remote/NAT silently dropping idle sockets no longer shows up as periodic
 first-request retry spikes); `pool_max_lifetime` retires connections by age at

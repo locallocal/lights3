@@ -31,7 +31,7 @@
 | `POST /-/admin/credentials` | 生成一对 AK/SK，可带 `?comment=` 备注 | `201` + JSON（唯一一次完整返回 SK） |
 | `GET /-/admin/credentials` | 列出全部凭证（含静态凭证，SK 掩码） | `200` + JSON 列表 |
 | `GET /-/admin/credentials/{ak}` | 查询单个凭证元数据；`?show-secret=true` 时返回明文 SK（**仅动态/文件凭证**，静态凭证恒掩码，见 §10.5） | `200` + JSON |
-| `PUT /-/admin/credentials/{ak}` | 就地修改动态凭证的 policy/comment（roadmap §2.5）：body 出现的字段被替换，`"policy": null` 清除；落盘 `rev` 计数 +1，多实例经 sync 的 ETag/rev 对比传播编辑 | `200` + JSON（SK 掩码） |
+| `PUT /-/admin/credentials/{ak}` | 就地修改动态凭证的 policy/comment：body 出现的字段被替换，`"policy": null` 清除；落盘 `rev` 计数 +1，多实例经 sync 的 ETag/rev 对比传播编辑 | `200` + JSON（SK 掩码） |
 | `DELETE /-/admin/credentials/{ak}` | 吊销（仅限动态凭证，静态凭证归配置文件管） | `204` |
 
 配套运维 CLI：`lights3-ctl`（`src/tools/lights3_ctl.cc`，构建产物与 `lights3` 同目录，
@@ -336,14 +336,14 @@ Iceberg REST catalog 的凭证下发（[s3-tables-design.md §8.4](s3-tables-des
   SK 本身仍不可变；
 - 定时器模式与 duostore GC 相同（`BackgroundTaskGroup` + `TimerQueue`，
   完成后重臂不重叠），tick 先 `pool_->schedule()` 挪到池线程再做 IO；
-- 同一轮也同步 STS 会话（`.sys/sts/`，backlog-sequence ④）：拉取别处铸造的会话、
+- 同一轮也同步 STS 会话（`.sys/sts/`）：拉取别处铸造的会话、
   删除已过期的对象；会话另有验签前的按需回源，不依赖本周期
   （[s3-protocol.md §3.5](s3-protocol.md)）。
 
 ### 10.4 per-credential policy
 
 刻意保持在"够用"档，不引入 IAM 的 statement/effect/condition 语法，但具备
-bucket / key 前缀 / 动作三个维度（docs/archive/gaps.md §5.10）：
+bucket / key 前缀 / 动作三个维度：
 
 ```json
 { "policy": { "buckets": ["logs-*", "backup"], "prefixes": ["tenant-a/"],
@@ -376,7 +376,7 @@ bucket / key 前缀 / 动作三个维度（docs/archive/gaps.md §5.10）：
   桶名混淆问题更是如此），受限凭证不该看到白名单外的桶存在；
 - 已知取舍：吊销/policy 均不影响已通过验签的在途请求（§7 语义）。
 
-### 10.4a 租户字段（roadmap §3.9）
+### 10.4a 租户字段
 
 凭证对象与 credentials_file 条目可带 `"tenant": "<id>"` 与 `"role":
 "user"|"admin"`：租户凭证只能访问其租户所有的桶（在 policy 之上再加一层
@@ -387,8 +387,7 @@ bucket / key 前缀 / 动作三个维度（docs/archive/gaps.md §5.10）：
 
 ### 10.5 静态凭证的 SK 不经 admin API 回传
 
-`?show-secret=true` 只对动态与文件凭证生效，静态（root）凭证恒返回掩码
-（docs/archive/gaps.md §5.10）。理由是信任边界：静态 SK 来自配置文件/环境变量，能取回它
+`?show-secret=true` 只对动态与文件凭证生效，静态（root）凭证恒返回掩码。理由是信任边界：静态 SK 来自配置文件/环境变量，能取回它
 等于把"能读配置文件"降级成"能发一次 HTTP GET"；而 root SK 又恰恰**无法**经
 admin API 吊销（`DELETE` 拒绝静态凭证），一旦泄露只能改配置重启。
 掩码也从"前 4 + 后 4"收紧为只留前 4 位——运维手挑的 SK 熵未必够，泄露两端毫无

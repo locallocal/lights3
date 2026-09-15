@@ -1,10 +1,11 @@
-# Configuration Hot Reload (roadmap §4.4)
+# Configuration Hot Reload
 
 > Status: landed (2026-09-05). Code: `Application::reload_config`
 > (`src/app/app.cc`), `storage::BucketRouter::update`,
 > `AsyncSemaphore::set_capacity`, `POST /-/admin/config/reload`
 > (`src/s3/handlers/admin_tenants.cc`), `lights3-ctl reload`. Unit tests in
-> `tests/unit/test_reload.cc`, e2e in the "roadmap §4.4" section of `run_e2e.sh`.
+> `tests/unit/test_reload.cc`, e2e in the "config hot reload" section of
+> `run_e2e.sh`.
 
 ## 1. Triggers
 
@@ -54,7 +55,7 @@ Report shape (admin API / `lights3-ctl reload` output):
 | `runtime.max_inflight_requests` | `AsyncSemaphore::set_capacity`: growing wakes queued requests at once; shrinking waits for in-flight permits to return (`available` may go negative briefly, nothing new is admitted meanwhile) |
 | `ratelimit.per_ip_* / per_ak_*` | limiters are rebuilt and swapped atomically; in-flight requests hold the old instance until they finish, so nothing dangles (`max_tracked` excepted: restart only) |
 | `buckets.rules` | `BucketRouter::update` swaps the rule table atomically; the router copies held by `S3Service`, the lifecycle runner and the usage tracker share one table; a request in flight keeps the table it resolved against |
-| `backends[]` **new entries** | backlog-sequence ⑦: built per config by `StorageRegistry::build` (a new tiered entry may name running backends), wrapped by `meter_backends`, swapped into the router in the **same snapshot** as the rules (rules may point at the new backend at once); the maintenance job table (fsck and the duostore / tier rounds, [cli.md §3.12](cli.md)) and the `backend=` metric label follow. A construction failure (e.g. localfs without root) refuses the reload as a whole and the instances built so far are closed again |
+| `backends[]` **new entries** | Built per config by `StorageRegistry::build` (a new tiered entry may name running backends), wrapped by `meter_backends`, swapped into the router in the **same snapshot** as the rules (rules may point at the new backend at once); the maintenance job table (fsck and the duostore / tier rounds, [cli.md §3.12](cli.md)) and the `backend=` metric label follow. A construction failure (e.g. localfs without root) refuses the reload as a whole and the instances built so far are closed again |
 | `backends[]` **removed entries** | Conditions: not the `default_backend`, no tiered entry in the file still references it, no maintenance job (fsck / duostore / tier round) running on it (the last two refuse the whole reload, the first defers into requires_restart). The backend leaves the routing table first (new requests follow the remaining rules immediately); a **retiring thread** then waits for its in-flight leases to reach zero (`MeteredBackend::wait_idle` — every call and every open get_object stream holds one) before `close()`, and finally drops its metric series; log line `backend <name> removed: closed after in-flight requests drained`. The wait is unbounded (a line every 10 s while waiting); process shutdown cuts it short and closes |
 | `backends[]` parameter change of an existing entry | **Not applied**: instances carry state, rebuilding equals a restart; reported per entry in requires_restart (`backends (<name>: type/parameters changed …)`), the running instance keeps its startup configuration. Reordering entries is not a change (matched by name) |
 | TLS certificate material | every reload forces `Holder::reload_now()` (no waiting for the `tls_reload_interval` poll); seastar's reloadable credentials watch the files themselves |
@@ -77,7 +78,7 @@ Report shape (admin API / `lights3-ctl reload` output):
   `lifecycle.scan_interval`, `usage.*`, `audit.*`, `ratelimit.max_tracked`,
   shutdown/backpressure boundaries;
 - `log.format / file / max_size / max_files / async*` — sink and formatter are
-  built once in `Logger::init` (roadmap §5.2).
+  built once in `Logger::init`.
 
 ## 5. Deferred
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generates deploy/grafana/lights3.json (roadmap §5.5, docs/usage/monitoring.md §4).
+"""Generates deploy/grafana/lights3.json (docs/usage/monitoring.md §4).
 
 The dashboard is kept as generated JSON so it imports into Grafana directly;
 this script is the source of truth for its panels. Regenerate after editing:
@@ -133,19 +133,19 @@ timeseries("Request latency (time-to-headers)",
            description="Histogram closes when the response headers are ready (the access log's ttfb); streaming transfer time is not included")
 timeseries("Exact status codes",
            [(f'sum by (status) (rate(lights3_responses_by_status_total{{{INST}}}[$__rate_interval]))', "{{status}}")],
-           unit="reqps", stack=True, description="206/304 share is the website / CDN signal (roadmap §5.3)")
+           unit="reqps", stack=True, description="206/304 share is the website / CDN signal")
 timeseries("S3 error codes", [(f'sum by (code) (rate(lights3_s3_errors_total{{{INST}}}[$__rate_interval]))', "{{code}}")], unit="reqps")
 timeseries("Bytes in / out", [(f'sum by (direction) (rate(lights3_bytes_total{{{INST}}}[$__rate_interval]))', "{{direction}}")], unit="Bps")
 
 # ---------------- APIs ----------------
-row("APIs (api × backend, roadmap §5.1)")
+row("APIs (api × backend)")
 timeseries("Request rate by API", [(f'sum by (api) (rate(lights3_api_requests_total{{{INST},{BK}}}[$__rate_interval]))', "{{api}}")], unit="reqps")
 timeseries("5xx by API", [(f'sum by (api, backend) (rate(lights3_api_requests_total{{{INST},{BK},class="5xx"}}[$__rate_interval]))', "{{api}} @ {{backend}}")], unit="reqps")
 timeseries("P99 by API", [(q("lights3_api_request_duration_seconds", by=", api", sel=f'{INST},{BK}'), "{{api}}")], unit="s")
 timeseries("P99 by backend (all APIs)", [(q("lights3_api_request_duration_seconds", by=", backend", sel=f'{INST},{BK}'), "{{backend}}")], unit="s")
 
 # ---------------- HTTP / L1 ----------------
-row("HTTP layer (L1, roadmap §4.2 / §5.3)")
+row("HTTP layer (L1)")
 timeseries("Connections", [(f'sum(lights3_http_connections_active{{{INST}}})', "active"),
                            (f'sum(rate(lights3_http_connections_total{{{INST},result="accepted"}}[$__rate_interval]))', "accepted/s"),
                            (f'sum(rate(lights3_http_connections_total{{{INST},result="rejected_limit"}}[$__rate_interval]))', "rejected (limit)/s")])
@@ -179,7 +179,7 @@ timeseries("Timer thread", [(f'max(lights3_timer_lag_seconds{{{INST}}})', "lag (
                             (f'sum(rate(lights3_timer_slow_callbacks_total{{{INST}}}[$__rate_interval]))', "slow callbacks/s")])
 
 # ---------------- Backends ----------------
-row("Storage backends (metering decorator, roadmap §5.1)")
+row("Storage backends (metering decorator)")
 timeseries("Backend op P99", [(q("lights3_backend_op_seconds", by=", backend, op", sel=f'{INST},{BK}'), "{{backend}} {{op}}")], unit="s")
 timeseries("Backend errors (5xx / transport)", [(f'sum by (backend, op) (rate(lights3_backend_errors_total{{{INST},{BK}}}[$__rate_interval]))', "{{backend}} {{op}}")], unit="reqps")
 timeseries("Backend op rate", [(f'sum by (backend) (rate(lights3_backend_op_seconds_count{{{INST},{BK}}}[$__rate_interval]))', "{{backend}}")], unit="reqps")

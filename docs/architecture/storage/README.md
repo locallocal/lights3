@@ -20,11 +20,11 @@
 | [duostore-meta-tikv-design.md](duostore-meta-tikv-design.md) | [duostore-meta-tikv.md](duostore-meta-tikv.md) | TiKV IMetaStore：接入路线调研、2PC 侧车前置工程、数据模型与事务不变量 |
 | [duostore-data-rados-design.md](duostore-data-rados-design.md) | [duostore-data-rados.md](duostore-data-rados.md) | RADOS IDataStore：接入路线、对象映射、写读路径、一致性与多网关 GC |
 
-已归档的设计文档（步骤全部完成后移入 [../archive/](../../archive/)，内容不再更新）：
-[multi-gateway-multipart-design.md](../../archive/multi-gateway-multipart-design.md)——多网关
-共享存储下的 multipart（支持矩阵、duostore 逐前提核对、写侧租约、双实例测试、
-误配防线；2026-09-09 收口，长期结论已并入 [../deployment.md §5](../../usage/deployment.md)、
-[duostore-core.md §9.1](duostore-core.md) 与 [duostore-data-rados-design.md §8.3](duostore-data-rados-design.md)）。
+多网关共享存储下的 multipart（支持矩阵、duostore 逐前提核对、写侧租约、双实例
+测试、误配防线）于 2026-09-09 收口，长期结论已并入
+[../deployment.md §5](../../usage/deployment.md)、
+[duostore-core.md §9.1](duostore-core.md) 与
+[duostore-data-rados-design.md §8.3](duostore-data-rados-design.md)。
 
 ## 实现文档
 

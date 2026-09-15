@@ -617,7 +617,7 @@ TEST(tiered_quota_watermark_eviction) {
     CHECK_EQ(f.cloud->puts.load(), puts_before);
 }
 
-// Local-tier capacity gauges (backlog-sequence ①): what the space watermark sees,
+// Local-tier capacity gauges: what the space watermark sees,
 // exported per backend and readable after the backend is gone
 TEST(tiered_local_capacity_gauges) {
     TmpDir tmp;
@@ -698,7 +698,7 @@ TEST(tiered_registry_two_phase_build) {
     CHECK(tiered->config().space_high_watermark > 0.84 && tiered->config().space_high_watermark < 0.86);
     sync_wait(tiered->close());
 
-    // Watermark parsing (gaps §3.9): "1%" means 1% -- the old implementation dropped the "%" and then 1.0 skipped the
+    // Watermark parsing: "1%" means 1% -- the old implementation dropped the "%" and then 1.0 skipped the
     // /100, parsing as 100%; (used-low) went negative, wrapped around, and demoted the entire bucket
     std::vector<BackendConfig> pct = cfgs;
     pct[2].params["space_high_watermark"] = "5%";
@@ -797,7 +797,7 @@ TEST(registry_per_backend_thread_pool) {
     }
 }
 
-// Incremental quota maintenance (docs/archive/gaps.md §6.3): PUT accumulates the estimate in place and kicks an early
+// Incremental quota maintenance: PUT accumulates the estimate in place and kicks an early
 // scan round when over the watermark -- previously a quota breach between two scans (default 1 hour) was completely
 // invisible
 TEST(tiered_quota_incremental_kicks_early_scan) {
@@ -832,8 +832,6 @@ TEST(tiered_quota_incremental_kicks_early_scan) {
     }
     CHECK(converged);
 }
-
-// ---------- roadmap §3.6 ----------
 
 namespace {
 
@@ -1262,7 +1260,7 @@ TEST(tiered_duostore_local_side) {
 }
 #endif
 
-// bucket_router build-time validation (docs/archive/gaps.md §6.3): bad globs / unreachable rules error at startup,
+// bucket_router build-time validation: bad globs / unreachable rules error at startup,
 // negation rules take effect
 TEST(bucket_router_validation_and_negation) {
     auto mem1 = std::make_shared<MemoryBackend>();

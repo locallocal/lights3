@@ -12,7 +12,7 @@ namespace lights3::http {
 
 using Handler = std::function<Task<HttpResponse>(HttpRequest)>;
 
-// L1 connection counters (roadmap §4.2), rendered on /-/metrics. Every driver
+// L1 connection counters, rendered on /-/metrics. Every driver
 // fills what its model can observe; httplib (upstream accept loop) reports only
 // what its socket hook sees. Timeouts are attributed to the phase that expired
 struct ConnStats {
@@ -32,7 +32,7 @@ struct ConnStats {
     uint64_t timeouts_body = 0;
     // response write (write_timeout)
     uint64_t timeouts_write = 0;
-    // roadmap §5.3: requests parsed at L1 (requests / accepted = keep-alive reuse
+    // requests parsed at L1 (requests / accepted = keep-alive reuse
     // factor), TLS handshake outcomes, and request-line / header / framing
     // parse failures (answered 400 or closed without a response)
     uint64_t requests = 0;
@@ -52,7 +52,7 @@ struct IHttpServer {
     virtual uint16_t bound_port() const = 0;
     // Thread-safe snapshot of the counters
     virtual ConnStats stats() const { return {}; }
-    // Re-read the TLS certificate material now (config hot reload, roadmap §4.4);
+    // Re-read the TLS certificate material now (config hot reload);
     // false = no TLS listener, or the driver reloads on its own (seastar)
     virtual bool reload_tls() { return false; }
     virtual ~IHttpServer() = default;

@@ -21,7 +21,7 @@ namespace lights3::http {
 // Case-insensitive, order-preserving header table. Storage stays a vector
 // (a request carries a few dozen headers, insertion order matters to the
 // drivers); every lookup is a linear scan filtered by an 8-bit tag of the
-// lowercased name kept next to each item (backlog-sequence ⑩) -- the
+// lowercased name kept next to each item -- the
 // case-folding compare runs only on the rare tag collision. A 256-bit set of
 // the tags present answers the miss (an optional header L2 probes for and the
 // request does not carry: the common case) without scanning at all
@@ -163,7 +163,7 @@ private:
     std::array<uint64_t, 4> present_{};
 };
 
-// Zero-copy exit for file-backed bodies (roadmap §4.3 ④, docs/architecture/http-adapter.md §1):
+// Zero-copy exit for file-backed bodies (docs/architecture/http-adapter.md §1):
 // the reader's *remaining* bytes are exactly this contiguous range of fd
 struct FileSpan {
     int fd;
@@ -236,11 +236,11 @@ struct HttpRequest {
     // Defaults to "never cancelled"
     CancelToken cancel;
     // Which listener accepted the request when a separate admin port is configured
-    // (http.admin_port, backlog-sequence ②): the application's admin-listener
+    // (http.admin_port): the application's admin-listener
     // handler sets it, the service gates the /-/ face on it. Meaningless (false)
     // without the split
     bool admin_face = false;
-    // Verified client certificate of the connection (mTLS, backlog-sequence ⑥,
+    // Verified client certificate of the connection (mTLS,
     // docs/usage/tls.md §2.1): set by the driver after a handshake in which the peer
     // presented a certificate that verified against http.tls_client_ca; absent on
     // plaintext, without a client certificate, or when client auth is off. L1

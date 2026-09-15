@@ -1,4 +1,4 @@
-// L4: fault injection points (roadmap §6.1). Named points sit on the IO paths a
+// L4: fault injection points. Named points sit on the IO paths a
 // deployment can actually lose — disk write / rename / fsync (EIO, ENOSPC), the
 // pack append and its fdatasync, the Redis connection, the RADOS submit — and are
 // armed from the environment at startup or programmatically by tests:

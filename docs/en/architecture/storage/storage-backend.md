@@ -154,8 +154,7 @@ Key decisions:
     degrades to pure-sidecar semantics (commit order: data first, then sidecar) —
     the degradation is exposed as the resident gauge
     `lights3_localfs_xattr_fallback` (probed at construction), and
-    `require_xattr: true` turns it into a startup/write failure instead
-    (roadmap §3.5).
+    `require_xattr: true` turns it into a startup/write failure instead.
   - **Sidecar write policy** (`sidecar: sync|async|lazy`, default sync): sync
     costs 4 fsyncs + 2 renames per PUT; async moves the sidecar to a background
     task (written after the response); lazy skips the sidecar entirely while the
@@ -185,7 +184,7 @@ Key decisions:
   `pread` through the pool on every `read()` (with offset, naturally supporting
   Range); the fd is held by RAII and closed automatically on
   cancellation/disconnect.
-- **Metadata cache** (roadmap §3.8): HEAD/GET consult a (bucket, key)-sharded
+- **Metadata cache**: HEAD/GET consult a (bucket, key)-sharded
   LRU first (`meta_cache.h`); each record carries an inode stamp
   (dev/ino/size/mtime/ctime). A HEAD hit re-checks the stamp with one stat by
   default (`meta_cache_validate=false` makes it syscall-free), a GET hit checks
@@ -200,7 +199,7 @@ Key decisions:
   locates the start directory directly); with delimiter=`/` a directory *is* the
   common prefix and never needs expanding, which is naturally efficient. The
   page token is the last returned key (directory order is lexicographic order,
-  so the walk must be a sorted walk). No index, but (roadmap §3.5): a page's
+  so the walk must be a sorted walk). No index, but: a page's
   stat+getxattr calls are striped across pool workers
   (`list_meta_concurrency`); each directory's sorted entry table is cached
   keyed by the directory's inode + mtime/ctime (`list_cache_entries`, validated
@@ -298,7 +297,7 @@ Both the meta and data sides already have optional replacement implementations
   TiKV ([duostore-meta-tikv-design.md](duostore-meta-tikv-design.md));
 - data: Ceph/RADOS ([duostore-data-rados-design.md](duostore-data-rados-design.md)).
 
-Object metadata cache (roadmap §3.8): a GET/HEAD hit serves the whole
+Object metadata cache: a GET/HEAD hit serves the whole
 `ObjectRec` (manifest included) from an in-process LRU, with no meta-engine round
 trip. On by default with exact invalidation for rocksdb/sqlite; off by default
 for redis/tikv, where enabling it requires `0 < meta_cache_ttl < gc_grace` (a
@@ -309,7 +308,7 @@ lease is backdated accordingly). See
 Note: duostore cannot serve as tiered's local side (tiered is bound to the
 localfs disk layout); it can serve as its cloud side or stand alone.
 
-### 5.x Metering Decorator (roadmap §5.1)
+### 5.x Metering Decorator
 
 `Application` wraps the backends the router uses in `storage::MeteredBackend`
 (`src/storage/metered_backend.h`): every `IStorageBackend` virtual is timed

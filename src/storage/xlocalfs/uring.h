@@ -1,9 +1,9 @@
 // L3: minimal io_uring wrapper over raw syscalls (no liburing dependency; dependency policy
-// in docs/architecture/overview.md §6). One or more independent rings (roadmap §3.4 ④): each ring
+// in docs/architecture/overview.md §6). One or more independent rings: each ring
 // has its own SQ/CQ, submit-side mutex, in-flight registry and reaper thread; single ops
 // are spread round-robin, multi-op streams (uring_stream.h) pin themselves to one ring
 // because fixed buffer / fixed file indices are ring-scoped. Per ring, io_uring_enter is
-// batched on behalf of everyone by the "on-duty flusher" (docs/archive/gaps.md §6.3); the
+// batched on behalf of everyone by the "on-duty flusher"; the
 // reaper waits for CQEs and hands each one to its Op's completion sink -- a plain co_await
 // resumes the coroutine on the thread pool, a stream slot records the result and wakes its
 // consumer if one is parked on it.
@@ -30,21 +30,21 @@ namespace lights3::storage {
 struct UringOptions {
     // SQ depth per ring
     unsigned entries = 256;
-    // SQPOLL (docs/archive/gaps.md §6.3): the kernel polls the SQ, so in the common case submission
+    // SQPOLL: the kernel polls the SQ, so in the common case submission
     // never enters the kernel (only a wakeup enter after the poll thread has gone to sleep).
     // The cost is a resident kernel thread, and before 5.11 it needs CAP_SYS_ADMIN -- on
     // setup failure it automatically falls back to normal mode rather than preventing the
     // process from starting
     bool sqpoll = false;
     int sqpoll_idle_ms = 100;
-    // Ring sharding (roadmap §3.4 ④): a single ring means one submit mutex and one reaper
+    // Ring sharding: a single ring means one submit mutex and one reaper
     // for the whole process, a single point on high core counts. 0 = auto
     // (hardware threads / 8, clamped to [1, 8])
     unsigned rings = 1;
     // Stream block size: the unit of read-ahead / pipelined writes, and the size of each
     // registered fixed buffer. Must be a multiple of 4096
     unsigned block_size = 64 * 1024;
-    // Registered buffers per ring (IORING_REGISTER_BUFFERS, roadmap §3.4 ②): streams take
+    // Registered buffers per ring (IORING_REGISTER_BUFFERS): streams take
     // their blocks from this pool and use READ_FIXED/WRITE_FIXED (no per-IO page pinning);
     // when the pool is empty a stream silently falls back to heap blocks + READ/WRITE.
     // 0 = disabled. Memory: rings × fixed_buffers × block_size, resident and pinned
@@ -52,16 +52,16 @@ struct UringOptions {
     // Registered file slots per ring (sparse IORING_REGISTER_FILES + FILES_UPDATE): large
     // streams register their fd once and skip the per-IO fget/fput. 0 = disabled
     unsigned fixed_files = 256;
-    // Blocks a read stream keeps in flight ahead of the consumer (roadmap §3.4 ①)
+    // Blocks a read stream keeps in flight ahead of the consumer
     unsigned read_depth = 4;
     // Writes a write stream keeps in flight while the next body block is being received
     unsigned write_depth = 4;
     // Route open/statx/rename/unlink through the ring when the kernel has the opcodes
-    // (roadmap §3.4 ③); false = always the blocking syscall on the pool thread
+    //; false = always the blocking syscall on the pool thread
     bool meta_ops = true;
 };
 
-// Kernel capability probe results (docs/archive/gaps.md §6.3): the previous implementation used
+// Kernel capability probe results: the previous implementation used
 // IORING_OP_READ/WRITE unconditionally, but those opcodes only exist since 5.6 -- on
 // 5.1-5.5 kernels every IO would get -EINVAL, presenting as "io_uring sets up fine but all
 // reads/writes fail". After probing, old kernels fall back to READV/WRITEV (single iovec)
@@ -109,7 +109,7 @@ public:
     // Per ring: first reject new submissions and wait for in-flight CQEs to drain (with a
     // timeout warning) before posting the sentinel -- CQE ordering does not guarantee the
     // sentinel comes after the existing reads/writes, and munmap-ing without draining would
-    // let the kernel keep writing into freed user buffers (docs/archive/gaps.md §2.9)
+    // let the kernel keep writing into freed user buffers
     void shutdown();
 
     const UringFeatures& features() const { return feat_; }
@@ -183,7 +183,7 @@ public:
     // needs data durability); fsync() is the full variant for directory fds
     Awaitable fdatasync(int fd);
     Awaitable fsync(int fd);
-    // Metadata opcodes (roadmap §3.4 ③). Path memory must stay valid until the CQE arrives
+    // Metadata opcodes. Path memory must stay valid until the CQE arrives
     // (under SQPOLL the kernel copies it only when the poll thread picks the SQE up), so
     // callers keep the std::string / fs::path alive across the co_await. Results follow
     // the syscall: openat returns the fd, the rest 0 / -errno. Callers check the matching

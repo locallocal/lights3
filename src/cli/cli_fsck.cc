@@ -15,7 +15,7 @@ namespace lights3_cli {
 
 namespace {
 
-// Offline integrity scrub (roadmap §3.1): backends built, no server listening —
+// Offline integrity scrub: backends built, no server listening —
 // same shape as duostore dump/load. Dispatches on the backend's concrete type:
 // duostore gets the deep manifest/crc/refs scrub, localfs/xlocalfs the ETag
 // full-verify. Findings set exit code 1 (fsck convention); warning-grade

@@ -1,14 +1,14 @@
-# 用量统计、配额与多租户（roadmap §3.9）
+# 用量统计、配额与多租户
 
 > 状态：四项全部落地（2026-09-04）。代码：`src/s3/usage.{h,cc}`、
 > `src/s3/quota.{h,cc}`、`src/s3/tenant.{h,cc}`、`src/s3/audit.{h,cc}`、
 > `src/s3/handlers/{quota_gate,bucket_quota,admin_tenants}.cc`；CLI
 > `src/tools/lights3_ctl_{usage,quota,tenant}.cc`。单测 `tests/unit/test_tenancy.cc`，
-> e2e `tests/e2e/run_e2e.sh` 的 "roadmap §3.9" 一节。
+> e2e `tests/e2e/run_e2e.sh` 的"用量统计 / 配额 / 租户"一节。
 
 ## 1. 目标与边界
 
-roadmap §3.9 把四件事定义为一条依赖链：**用量统计 → 配额 → 租户实体化 →
+本模块把四件事定义为一条依赖链：**用量统计 → 配额 → 租户实体化 →
 审计日志**。本文按链条顺序描述各层的设计与契约。一个统一的原则贯穿全部：
 **全部实现在 L2（S3 服务层），存储层与 meta schema 零改动**——
 
@@ -21,7 +21,7 @@ roadmap §3.9 把四件事定义为一条依赖链：**用量统计 → 配额 �
   不变。
 
 代价是：计数器的精度是"两次全量校准之间近似"（§2.4），而不是 meta 事务内
-的强一致——这是 roadmap 给出的两条路线里的"离线聚合"路线，理由见 §2.5。
+的强一致——这是两条候选路线里的"离线聚合"路线，理由见 §2.5。
 
 ## 2. 用量统计
 
@@ -88,7 +88,7 @@ PutObject/UploadPart 的实际写入字节由 `ByteCountingReader` 在 body 上�
 
 ### 2.5 为什么不做 meta 侧计数器
 
-roadmap 列了两条路：meta 事务内计数器（四个 IMetaStore 各写一份，tikv 还得
+当初摆在面前的是两条路：meta 事务内计数器（四个 IMetaStore 各写一份，tikv 还得
 用 §3.7 那种追加式 delta 行避免热点冲突）或离线聚合扫描。选后者的理由：
 (1) 六个后端里 localfs/xlocalfs/cloudproxy/tiered 根本没有事务性 meta，
 meta 侧方案只覆盖 duostore；(2) 配额场景对"近似 + 周期校准"的容忍度很高
@@ -151,7 +151,7 @@ DELETE /bucket?quota   root 专属，幂等 204
 
 ### 3.4 MPU 半途语义
 
-roadmap 要求"定 MPU 半途语义"。契约：
+MPU 半途语义的契约：
 
 1. **分片占用配额**。UploadPart 时按分片大小判定并计入 `mpu_bytes`——
    分片实实在在占着磁盘，不计入等于给了绕过配额的通道；
@@ -205,8 +205,7 @@ mTLS 客户端证书（auth.tls_identity 开启）  按 .sys/tls-identities 绑�
                                          （root 豁免），详见 tls.md §2.1
 ```
 
-`tenant`/`role` 随 policy 一起在验签时刻快照（`VerifiedIdentity`，
-docs/archive/gaps.md §3.7 的同一理由），在途请求不受并发改动影响。
+`tenant`/`role` 随 policy 一起在验签时刻快照（`VerifiedIdentity`，与 policy 快照同一理由），在途请求不受并发改动影响。
 `role` 只认 `user`/`admin`，其它值 `InvalidRequest`（文件里的拼错是启动错误，
 不会静默降级）。
 
@@ -274,10 +273,10 @@ JSON 对象，字段缺省时**省略而非空串**：
 | `usage.rescan` | 按需扫描 | `bucket`，`detail`=结果 |
 | `config.reload` | `POST /-/admin/config/reload`（[config-reload.md](../usage/config-reload.md)） | `detail`=applied / requires_restart 计数或错误 |
 | `tables.metrics` | Iceberg REST `reportMetrics`（[s3-protocol.md §1](s3-protocol.md) Tables 行） | `bucket`，`key`=`<ns>/<table>`，`detail`=filter / projection / 计数器 |
-| `access` | **仅 `audit.data_plane=true`**：每个请求一条 | `method`/`path`/`status`/`bytes`/`bucket`/`key`/`tenant`/`trace_id`（roadmap §5.4） |
+| `access` | **仅 `audit.data_plane=true`**：每个请求一条 | `method`/`path`/`status`/`bytes`/`bucket`/`key`/`tenant`/`trace_id` |
 
 控制面事件逐条 flush（少而关键），`access` 记录不逐条 flush（高 QPS 下由
-sink 缓冲）。`access` 是 roadmap §5.2 "结构化访问日志"的审计侧版本；§5.2 的
+sink 缓冲）。`access` 是"结构化访问日志"的审计侧版本；运行日志的
 运行日志异步化与慢日志仍是独立事项。
 
 ## 6. 管理 API 参考

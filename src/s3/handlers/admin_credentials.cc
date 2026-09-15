@@ -22,7 +22,7 @@ http::HttpResponse json_response(int status, const json& j) {
     return resp;
 }
 
-// SK masking (docs/archive/gaps.md §5.10): keep only the first 4 characters. The previous "first 4 + last 4" leaked
+// SK masking: keep only the first 4 characters. The previous "first 4 + last 4" leaked
 // 8 of 40 characters, and static-credential SKs are hand-picked by operators with possibly insufficient entropy --
 // leaking both ends is entirely unnecessary
 std::string mask(const std::string& sk) {
@@ -45,7 +45,7 @@ const char* source_name(CredSource s) {
 json to_json(const CredentialInfo& c, bool with_secret) {
     json j;
     j["access_key"] = c.access_key;
-    // The plaintext SK of static (root) credentials is never returned via the admin API (docs/archive/gaps.md §5.10):
+    // The plaintext SK of static (root) credentials is never returned via the admin API:
     // it comes from a config file/environment variable, and retrieving it would downgrade the "can read config"
     // trust boundary to a single HTTP GET -- and the root SK is exactly the one that cannot be revoked via the
     // admin API; if leaked, the only remedy is changing config and restarting
@@ -56,7 +56,7 @@ json to_json(const CredentialInfo& c, bool with_secret) {
     j["source"] = source_name(c.source);
     if (c.source == CredSource::kDynamic) {
         j["created_at"] = util::iso8601(c.created);
-        // edit counter (roadmap §2.5)
+        // edit counter
         j["rev"] = c.rev;
     }
     if (!c.is_static()) {
@@ -209,7 +209,7 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req, st
             co_return json_response(200, to_json(c, show));
         }
         if (req.method == "PUT" && !rest.empty()) {
-            // Update a dynamic credential in place (roadmap §2.5): fields present in the
+            // Update a dynamic credential in place: fields present in the
             // body are replaced — "policy": null clears the policy, an absent field is
             // kept. Multi-instance propagation via the sync rev/ETag comparison
             std::string text;

@@ -118,10 +118,10 @@ struct HttpServerFactory {
   its own execution environment
   (how: see [concurrency.md](concurrency.md)).
 
-### 2.1 TLS and Shutdown/Backpressure Knobs (docs/archive/gaps.md §7)
+### 2.1 TLS and Shutdown/Backpressure Knobs
 
 - **TLS**: `http.tls_cert` + `http.tls_key` (PEM; both required to enable).
-  **All four drivers** support it (roadmap §4.1, [tls.md](../usage/tls.md)):
+  **All four drivers** support it ([tls.md](../usage/tls.md)):
   builtin/beast/httplib share the OpenSSL certificate-callback layer in
   `src/http/tls.h` (SNI multi-certificate, mTLS, minimum version, ciphers and
   certificate hot reload all live there), seastar goes through `seastar::tls`
@@ -133,11 +133,11 @@ struct HttpServerFactory {
   before erroring), `trailer_max_size` (16KiB), `io_chunk_size` (64KiB streaming
   chunk), `body_queue_cap` (256KiB, httplib-only push-to-pull backpressure
   watermark), `shutdown_grace` (10s; also the drain deadline for admission
-  permits at shutdown, roadmap §4.5), `shutdown_force_wait` (5s), `sendfile`
+  permits at shutdown), `shutdown_force_wait` (5s), `sendfile`
   (true; builtin's zero-copy exit for file bodies, §2.4 ④). Shutdown
   failures (backend close / pool join) surface as exit code `3`, see
   [cli.md §2.1](../usage/cli.md).
-- **Separate admin port** (backlog-sequence ②): `http.admin_port` (absent = no
+- **Separate admin port**: `http.admin_port` (absent = no
   admin listener; `0` = kernel-picked, like `port`) plus `http.admin_bind` (empty
   = same as `bind`). When set, a second `IHttpServer` of the **same driver**
   (builtin when the data plane runs seastar, whose engine is a process
@@ -159,7 +159,7 @@ struct HttpServerFactory {
   scrapes the admin port ([monitoring.md](../usage/monitoring.md)).
 - `http.io_threads` semantics drift per driver; see the matrix in §2.2.
 
-### 2.2 Timeout Family and Connection Governance (roadmap §4.2)
+### 2.2 Timeout Family and Connection Governance
 
 One `idle_timeout` used to carry four meanings, so "reclaim idle connections
 after 5s" and "allow a slow uploader 300s" could not be configured apart. It is
@@ -190,7 +190,7 @@ connections. Only httplib had it before (hard-coded 1024).
 `lights3_http_connections_total{result=accepted|rejected_limit}`,
 `lights3_http_connections_active`, `lights3_http_keepalive_closes_total`,
 `lights3_http_timeouts_total{phase}`. httplib runs upstream's accept loop and
-reports zeros for all four (documented limitation). roadmap §5.3 adds
+reports zeros for all four (documented limitation). There is also
 `lights3_http_requests_total` (requests parsed at L1; ÷ accepted = keep-alive
 reuse factor), `lights3_http_tls_handshakes_total{result=ok|failed}` (builtin
 and beast own their handshake and count it; httplib/seastar handshake inside
@@ -209,7 +209,7 @@ means at startup):
 | httplib | request thread-pool size, floor 8 | `io_threads=N -> request thread pool of max(N,8)` |
 | seastar | shard count (the in-process engine starts once, immutable afterwards) | `io_threads=N -> smp=N shard(s)` |
 
-### 2.3 Per-IP / Per-Access-Key Rate Limiting (roadmap §4.2)
+### 2.3 Per-IP / Per-Access-Key Rate Limiting
 
 Per-client gates beside the global `runtime.max_inflight_requests`
 (`src/s3/ratelimit.h`):
@@ -239,10 +239,10 @@ ratelimit:
   the gateway sees the proxy's address (`X-Forwarded-For` is not trusted).
 
 **A dedicated client-disconnect cancel source** remains a deliberate trade-off
-(last row of roadmap §4.2): long handlers rely on `request_timeout`, drivers
+(last row of): long handlers rely on `request_timeout`, drivers
 notice the disconnect at their next socket operation.
 
-### 2.4 Data-plane performance (roadmap §4.3)
+### 2.4 Data-plane performance
 
 Four changes on the response path (①②④⑤), all inside L1 and all keeping
 `BodyReader`'s serial single-consumer contract; ⑨–⑬ at the end of the table
@@ -257,7 +257,7 @@ were added for the problems the baseline turned up. Numbers in
 | ⑤ | **builtin streaming write under pumping** | The whole body loop is one coroutine driven by `sync_wait_pumping` (previously a bare `sync_wait` per 64KiB: condvar + two thread hops each, 16384 of them for 1GiB); `co_await resume_on(exec)` before every send brings the continuation back to the connection thread (a slow client never pins a shared pool thread), and `PumpExecutor::running_in_this_thread()` continues inline when already there |
 | ⑥ | **beast `ResumeOn` fast path** | A connection's executor is the plain executor of its io thread's `io_context` (no strands since ⑩); `any_io_executor::target<io_context::executor_type>()` finds it and `running_in_this_thread()` makes `await_ready` true, skipping the `asio::post`. seastar's `ResumeOnShard` already had the same check |
 | ⑦ | **per-bucket metrics without the lock** | `CountingBodyReader` adds only the global atomics per chunk (`add_bytes_*_total`); the bucket dimension accumulates and enters the mutex once per stream or per 16MiB via `add_bucket_bytes` (previously one global lock per 64KiB) |
-| ⑧ | **HeaderMap prefilter / BlockQueue block shaping** (backlog-sequence ⑩, done 2026-09-06) | `HeaderMap` stays an order-preserving vector; each item carries an 8-bit tag (name length + lowercased first / last characters folded together, O(1): hashing the whole name costs as much as the scan it saves, and a full FNV tag measurably slowed hits) plus a 256-bit set of the tags present: a miss (most of the optional headers L2 probes for are absent) returns without scanning, a hit compares the tag before the case-folding compare. Microbenchmark (25 headers, -O2): miss 15 → 1.8 ns, hit 8.3 → 8.0 ns. `BlockQueue`: pushes from a borrowed buffer (httplib's 16 KiB slices) are appended to one tail block (≤ 256 KiB) so the consumer pops per block, not per slice (16384 → about 4.6K pops per 256 MiB); `push(std::string&&)` takes a block over whole (cloudproxy's outbound upload reads each round into a freshly allocated 64 KiB string and moves it in: no copy under the lock). Empty pushes are dropped (a zero-length block would read as EOF on pop). The absolute cost is still small, as the backlog predicted |
+| ⑧ | **HeaderMap prefilter / BlockQueue block shaping** (done 2026-09-06) | `HeaderMap` stays an order-preserving vector; each item carries an 8-bit tag (name length + lowercased first / last characters folded together, O(1): hashing the whole name costs as much as the scan it saves, and a full FNV tag measurably slowed hits) plus a 256-bit set of the tags present: a miss (most of the optional headers L2 probes for are absent) returns without scanning, a hit compares the tag before the case-folding compare. Microbenchmark (25 headers, -O2): miss 15 → 1.8 ns, hit 8.3 → 8.0 ns. `BlockQueue`: pushes from a borrowed buffer (httplib's 16 KiB slices) are appended to one tail block (≤ 256 KiB) so the consumer pops per block, not per slice (16384 → about 4.6K pops per 256 MiB); `push(std::string&&)` takes a block over whole (cloudproxy's outbound upload reads each round into a freshly allocated 64 KiB string and moves it in: no copy under the lock). Empty pushes are dropped (a zero-length block would read as EOF on pop). The absolute cost is still small, as the backlog predicted |
 | ⑨ | **beast request-body read granularity** (found by the baseline) | Without a reserved capacity on the session's `flat_buffer`, beast's `read_size = max(512, capacity − size)` requests 512 bytes per socket read: a 4 MiB body was 8192 `recvmsg` + as many `timerfd_settime` (one `expires_after` each) + 77k futex calls, 40 ms per PUT against 6 ms on builtin. Fix: `buffer.reserve(io_chunk_size)`; PUT 4 MiB 91 → 914 ops/s |
 | ⑩ | **beast: one `io_context` per io thread** (todo entry "beast's TLS GET clearly lags", done and removed 2026-09-13) | N io threads used to share one `io_context`, so every socket completion went through the global queue and woke another thread: `strace -c` measured ~655 futex calls per 4 MiB TLS GET (about 2.5 wake/wait pairs per 16 KiB TLS record). Now each io thread owns an `io_context` (concurrency hint 1); a connection is pinned round-robin at accept, needs no strand, and all of its completions are same-thread continuations. The control plane (acceptor / stop eventfd / grace and force timers) stays on a strand over `io_[0]`; force-stop and `finish()` walk every context. A pool thread's `ResumeOn` back to the io thread is still a cross-thread post -- once per chunk, not per record. TLS GET 1560 → 2406 ops/s, plaintext GET +21%, PUT +13–19% |
 | ⑪ | **beast: a per-session watchdog replaces per-operation expiries** | Once an expiry is set, `beast::basic_stream` does `timer.async_wait` plus `cancel` around every `async_read_some` / `async_write_some` -- under TLS two timer operations per record (263 `timerfd_settime` per 4 MiB GET measured). Body reads, draining and every response write now run with `expires_never()` and are bounded by one `steady_timer` on `Session`: `wd_begin()` only records the in-flight operation's start and phase, the timer is armed once per session, and on expiry an overdue operation has its phase counted and the socket `close()`d (the operation fails), an on-time one re-arms for the remainder, no operation leaves it dormant until the next `wd_begin()`. Header reads and the handshake keep the stream expiry (single operations, and they must tell header from idle timeouts). Throughput within noise, TLS GET p99 14.4 → 8.1 ms |

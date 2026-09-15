@@ -25,10 +25,10 @@
 
 - 水位用 `parse_pct` 解析，`"85%"`、`"85"`、`"0.85"` 三种写法等价——`%` 后缀
   必须参与判定（历史 bug：`1%` 被解析成 100%，低水位反超使用率后无符号回绕，
-  整桶全量下沉，docs/archive/gaps.md §3.9）；
+  整桶全量下沉）；
 - `gc_retry_base >= 1s && <= gc_retry_cap`、`low <= high` 在构造期校验，
   违反直接抛异常拒绝启动；
-- roadmap §3.6 新增键：`full_scan_interval`、`evict_size_weight` /
+- 增量扫描与淘汰相关键：`full_scan_interval`、`evict_size_weight` /
   `evict_frequency_weight`（≥ 0）、`access_buffer_max`、`range_cache` /
   `range_cache_block`（[64KiB, 1GiB]）、`rules`——YAML 里的 `rules:` 列表由
   `config.cc` 拍平成 `rules.N.match` / `rules.N.cold_after` 标量参数（通用规则：
@@ -127,7 +127,7 @@ tiered 自己**不新增任何索引文件**，对象状态完全寄生在 local
 删除，即使目标槽就是它也必须重新追加），再若 `enrolled` 不等于
 `wheel_slot_for(atime, cold_after)` → `persist_access` 重新登记（计 `enrolled`）。
 候选经 `ScanCtx::pick` 去重后攒 `kScanBatch = 128` 个 `demote_quiet` 一批
-`when_all`（协程帧数量有上界，docs/archive/gaps.md §2.13）。
+`when_all`（协程帧数量有上界）。
 
 **水位判定**：`ITierLocal::disk_usage()`（statvfs）使用率 > `space_high_watermark`
 → `need = (used - low) × 总量`；可选 `quota_bytes`：账本（全量轮用本轮实测，
@@ -228,14 +228,13 @@ HEAD 完全本地完成（stub 的 sidecar 信息完备），只额外 `touch`�
 
 `tiered_backend.cc:TieredBackend::commit_cache_fill` 是两条回填路径共用的唯一
 提交汇合点：per-key 锁内（锁后切回池线程——此函数被 TeeCacheReader 在客户端读
-EOF 时 co_await，不切线程的话 rename + 两次 fsync 会直接落在 HTTP 响应线程，
-docs/archive/gaps.md §2.4）重读状态复核：对象已删 / etag 变了 / tier 已非 remote /
+EOF 时 co_await，不切线程的话 rename + 两次 fsync 会直接落在 HTTP 响应线程）重读状态复核：对象已删 / etag 变了 / tier 已非 remote /
 `remote.etag` 与开流时的期望不符 → 丢弃回填（用户写胜出）；复核通过才
 `ICacheFill::commit`（localfs = `commit_cached` 并顺手丢弃块缓存；duostore =
 泵入数据面 + CAS 元数据提交）+ `touch` + `m_promoted_->inc()`（计数器放在提交点
 而非 promote 出口：只统计"数据真正回到本地"）。
 
-### 5.4 Range 块缓存：`RangeTeeReader`（roadmap §3.6 ⑦）
+### 5.4 Range 块缓存：`RangeTeeReader`
 
 `range_cache: true` 且 `local_->supports_range_cache()`（目前仅 localfs 适配器）
 时，remote 对象的 Range GET：`resolve_range` 得 `[f, l]` → `open_range_cache`
@@ -350,7 +349,7 @@ close 等待归零）管理，三个 `TimerQueue` 定时器：
 
 `tiered_backend.cc:TieredBackend::run_reconcile_once` 逐 bucket 做本地/云端
 key 集合的**双游标有序归并**（两侧都按 key 字典序分页 list，O(页) 内存，
-不物化全量 key 集，docs/archive/gaps.md §2.13），开始前先快照 GC 队列成
+不物化全量 key 集），开始前先快照 GC 队列成
 `"ikey\tetag"` 集合。三种归并结果：
 
 - **两侧都有**：本地 tier != local 时校验 `remote.etag == 云端 etag`，不符则
@@ -374,7 +373,7 @@ in-flight（下沉中间态不裁决），再 HEAD 现点复核；确认缺失�
 **数据丢失信号**，计 `refs_missing`，**绝不删 stub**（留给人工介入）；
 cached 引用失效只 WARN（数据仍在本地，下轮判冷会重新上传）。
 
-**隔离区账本**（roadmap §3.6 ④）：`refs_missing` 与 `foreign`（无冗余头的云端孤儿）
+**隔离区账本**：`refs_missing` 与 `foreign`（无冗余头的云端孤儿）
 两类发现经 `quarantine_note(kind, bucket, key, etag, seen, st)` 记入
 `<state>/quarantine/<md5(kind\0bucket\0key)>`（TSV：kind/bucket/key/etag/
 first_seen/last_seen/count）：新条目返回 true → 调用方按旧级别 LOG_ERROR/WARN 并
@@ -418,7 +417,7 @@ Prometheus 里读作"无数据"而非 0）。只在 tiered 自身有分层逻辑
 GET 来源计数在**成功之后**才 +1：StubRace 重试改走云端时不会留下半截 local
 计数。
 
-## 11. local 侧接口：`tier::ITierLocal`（roadmap §3.6 ⑥）
+## 11. local 侧接口：`tier::ITierLocal`
 
 `tier_local.h` 是 tiered 与热层之间唯一的契约，方法按职责分五组：
 
@@ -426,7 +425,7 @@ GET 来源计数在**成功之后**才 +1：StubRace 重试改走云端时不会
 | --- | --- | --- | --- |
 | 状态 | `read` → `LocalObject{meta, tier, local_bytes, mtime}`；`read_tier_only` | stat + xattr/sidecar（`load_object_meta_stat`）；tier-only 在数据文件缺失时仍读 sidecar（孤儿 stub 也要把云副本送进 GC） | `DuoStoreBackend::tier_read`（记录 v3 的 `TierState`；`local_bytes = data.total()`） |
 | 访问记录 | `load_access / store_access / erase_access / flush_access / access_resident` | xattr `user.lights3.access`；无 xattr 退回适配器私有 `unordered_map` 常驻表 + `atime.tsv`（不用 `AccessTable`） | 常驻 `tier_access_table.h:AccessTable` + `<root>/tier/atime.tsv` |
-| 数据面 | `open_snapshot`；`commit_stub`；`begin_cache_fill → ICacheFill{write, commit}` | fd 快照 `FdStreamReader`；`fsutil::commit_stub`（先建父目录，供对账重建）；staging tmp + `fsutil::commit_cached`（成功后丢弃块缓存）；两者提交后调 `LocalFsBackend::invalidate_object_meta` 失效元数据缓存（roadmap §3.8） | 普通 GET 流（extent 被 pin，覆盖只会让旧 extent 进 gcq 等宽限）；`tier_commit_stub` = 空 extent + tier=remote 的记录经 `PutCondition{if_match_etag}` CAS 写入（旧 extent 同事务进 gcq——这就是本地空间回收）；`DuoCacheFill` 暂存到 `<root>/tier/tmp`，commit 时 `tier_commit_cached` 泵入 chunk/pack 再 CAS 提交 |
+| 数据面 | `open_snapshot`；`commit_stub`；`begin_cache_fill → ICacheFill{write, commit}` | fd 快照 `FdStreamReader`；`fsutil::commit_stub`（先建父目录，供对账重建）；staging tmp + `fsutil::commit_cached`（成功后丢弃块缓存）；两者提交后调 `LocalFsBackend::invalidate_object_meta` 失效元数据缓存 | 普通 GET 流（extent 被 pin，覆盖只会让旧 extent 进 gcq 等宽限）；`tier_commit_stub` = 空 extent + tier=remote 的记录经 `PutCondition{if_match_etag}` CAS 写入（旧 extent 同事务进 gcq——这就是本地空间回收）；`DuoCacheFill` 暂存到 `<root>/tier/tmp`，commit 时 `tier_commit_cached` 泵入 chunk/pack 再 CAS 提交 |
 | 空间 | `cache_space_ok`、`disk_usage` | statvfs(root) | statvfs(root) |
 | 枚举 | `walk() → IWalker::next()` 批量 `WalkEntry` | `recursive_directory_iterator`，标记文件还原为 `dir/` key | `list_buckets` + 分页 `list_objects` + 每键 `tier_read`（列举只带元数据，tier/extent 视图要点读；全量轮低频，可接受） |
 | 块缓存 | `supports_range_cache / open_range_cache / drop_range_cache / range_cache_bytes / sweep_range_cache` | `FsRangeCache`（§5.4） | 不支持（配置 `range_cache: true` 时启动 WARN 并透传） |

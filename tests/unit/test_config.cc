@@ -35,8 +35,7 @@ buckets:
   default_backend: localdata
   rules:
     - match: "cache-*"
-      backend: mem
-)";
+      backend: mem)";
 }  // namespace
 
 TEST(config_parses_sample) {
@@ -73,8 +72,7 @@ backends:
   - name: a
     type: memory
 buckets:
-  default_backend: nonexistent
-)";
+  default_backend: nonexistent)";
     bool thrown = false;
     try {
         Config::from_string(bad);
@@ -185,7 +183,7 @@ TEST(config_rejects_out_of_range_values) {
     CHECK(throws([&] { Config::from_string(std::string("http:\n  io_threads: 0\n") + backends); }));
 }
 
-// ---------- Validation gaps (gaps §3.9) ----------
+// ---------- Validation gaps ----------
 
 TEST(config_rejects_absurd_thread_counts) {
     const char* backends = "backends:\n  - name: m\n    type: memory\n";
@@ -211,7 +209,7 @@ TEST(config_int_errors_name_the_key_and_value) {
     CHECK(throws([&] { Config::from_string(std::string("runtime:\n  io_threads: 8x\n") + backends); }));
 }
 
-// ---------- Validation gaps, second round (docs/archive/roadmap.md §1.2) ----------
+// ---------- Validation gaps, second round ----------
 
 TEST(config_port_rejects_trailing_garbage) {
     const char* backends = "backends:\n  - name: m\n    type: memory\n";
@@ -227,7 +225,7 @@ TEST(config_port_rejects_trailing_garbage) {
     CHECK(msg.find("nine") != std::string::npos);
 }
 
-// Separate admin listener (backlog-sequence ②): off by default (-1), 0 = kernel-picked
+// Separate admin listener: off by default (-1), 0 = kernel-picked
 // like http.port, and it cannot share the data-plane address:port
 TEST(config_admin_port_parsed_and_distinct) {
     const char* backends = "backends:\n  - name: m\n    type: memory\n";
@@ -382,15 +380,14 @@ TEST(config_undefined_env_is_an_error_unless_defaulted) {
 }
 
 TEST(config_tls_requires_both_cert_and_key) {
-    // Providing only one half is necessarily a misconfiguration (docs/archive/gaps.md §7): silently ignoring it would
+    // Providing only one half is necessarily a misconfiguration: silently ignoring it would
     // let an instance that "thinks TLS is on" run in plaintext
     auto one_sided = R"(
 http:
   tls_cert: /etc/lights3/server.crt
 backends:
   - name: d
-    type: memory
-)";
+    type: memory)";
     bool threw = false;
     try {
         Config::from_string(one_sided);
@@ -405,20 +402,18 @@ http:
   tls_key: /etc/lights3/server.key
 backends:
   - name: d
-    type: memory
-)";
+    type: memory)";
     auto cfg = Config::from_string(both);
     CHECK_EQ(cfg.http.tls_cert, "/etc/lights3/server.crt");
     CHECK_EQ(cfg.http.tls_key, "/etc/lights3/server.key");
 }
 
 TEST(config_shutdown_backpressure_knobs) {
-    // Shutdown/backpressure boundaries (docs/archive/gaps.md §7): defaults + explicit overrides + range validation
+    // Shutdown/backpressure boundaries: defaults + explicit overrides + range validation
     auto cfg = Config::from_string(R"(
 backends:
   - name: d
-    type: memory
-)");
+    type: memory)");
     CHECK_EQ(cfg.http.drain_limit, 4u * 1024 * 1024);
     CHECK_EQ(cfg.http.trailer_max_size, size_t(16 * 1024));
     CHECK_EQ(cfg.http.io_chunk_size, size_t(64 * 1024));
@@ -438,8 +433,7 @@ http:
   shutdown_force_wait: 1s
 backends:
   - name: d
-    type: memory
-)");
+    type: memory)");
     CHECK_EQ(tuned.http.drain_limit, 1u * 1024 * 1024);
     CHECK_EQ(tuned.http.trailer_max_size, size_t(8 * 1024));
     CHECK_EQ(tuned.http.io_chunk_size, size_t(128 * 1024));
@@ -457,15 +451,14 @@ http:
   io_chunk_size: 1KiB
 backends:
   - name: d
-    type: memory
-)");
+    type: memory)");
     } catch (const std::exception& e) {
         threw = std::string(e.what()).find("io_chunk_size") != std::string::npos;
     }
     CHECK(threw);
 }
 
-// roadmap §2.3: website redirect_all + max_rps knobs
+// website redirect_all + max_rps knobs
 TEST(config_website_redirect_and_rate) {
     auto cfg = Config::from_string(
         "backends:\n  - name: m\n    type: memory\nwebsite:\n"
@@ -510,8 +503,7 @@ backends:
 buckets:
   default_backend: local
 tables:
-  enabled: true
-)";
+  enabled: true)";
     auto cfg = Config::from_string(base);
     // no signal → nothing
     CHECK(!tables_deployment_warning(cfg).has_value());

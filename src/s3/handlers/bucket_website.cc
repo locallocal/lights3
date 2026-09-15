@@ -15,7 +15,7 @@ namespace lights3::s3 {
 namespace {
 
 // AWS XML shape: <WebsiteConfiguration> with either <RedirectAllRequestsTo> alone, or
-// <IndexDocument> [+ <ErrorDocument>] [+ <RoutingRules>] (roadmap §2.3)
+// <IndexDocument> [+ <ErrorDocument>] [+ <RoutingRules>]
 std::string website_xml(const WebsiteBucket& w) {
     XmlWriter x;
     x.open("WebsiteConfiguration", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");

@@ -1,9 +1,9 @@
-// Behavioral tests for the ingress admission-control assembly (docs/architecture/concurrency.md §6 ·
-// docs/archive/issues.md T11): queueing when over the limit, the Permit tied into the streaming response body (returned
-// only when fully read or dropped on disconnect), and a cancelled queued request returning 503. The unit under test is
-// http/admission.h -- the same code main.cc assembles; previously this lifetime-sensitive path had no unit-test
-// coverage at all, so Permit-leak regressions (quota exhaustion hanging the whole site) were undetectable.
-// Also covers the transfer stall guard's (stall_guard.h) decision behavior.
+// Behavioral tests for the ingress admission-control assembly (docs/architecture/concurrency.md §6): queueing when over
+// the limit, the Permit tied into the streaming response body (returned only when fully read or dropped on disconnect),
+// and a cancelled queued request returning 503. The unit under test is http/admission.h -- the same code main.cc
+// assembles; previously this lifetime-sensitive path had no unit-test coverage at all, so Permit-leak regressions
+// (quota exhaustion hanging the whole site) were undetectable. Also covers the transfer stall guard's (stall_guard.h)
+// decision behavior.
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -212,7 +212,7 @@ TEST(admission_dispatch_exception_releases_permit) {
     CHECK_EQ(env.inflight->available(), 1L);
 }
 
-// ---------- Transfer stall guard (stall_guard.h, the transfer_stall contract of docs/archive/issues.md T10) ----------
+// ---------- Transfer stall guard (stall_guard.h, the transfer_stall contract of) ----------
 
 namespace {
 
@@ -253,7 +253,7 @@ TEST(stall_guard_progress_resets_window) {
 }
 
 TEST(stall_guard_min_progress_follows_chunk_size) {
-    // roadmap §1.4: with io_chunk_size at its 4KiB lower bound a single read can never
+    // with io_chunk_size at its 4KiB lower bound a single read can never
     // reach the 64KiB default, so every window would misjudge a healthy connection.
     // Under the default threshold, 4KiB reads are killed once the window passes...
     auto strict = guard_stalls(std::make_unique<ZeroReader>(64 * 1024), 1s);
@@ -280,7 +280,7 @@ TEST(stall_guard_eof_and_disabled_passthrough) {
     CHECK(guard_stalls(nullptr, 1s) == nullptr);
 }
 
-// ---------- roadmap §5.3: admission-gate counters ----------
+// ---------- admission-gate counters ----------
 
 // Immediate permits land in the first wait bucket without counting as queued; a
 // request that had to wait is counted once with its wait time; a cancellation

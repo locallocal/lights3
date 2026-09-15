@@ -28,8 +28,11 @@ scrape_configs:
         labels:
           cluster: lab
     # Backend-level series carry backend=<name> and are appended after the L2
-    # request series; nothing to configure here. A large bucket count inflates
-    # lights3_bucket_* (capped at 512 tracked buckets + "_other" in the gateway).
+    # request series; nothing to configure here. lights3_bucket_* is capped at 512
+    # tracked buckets: past that the least-recently-touched bucket is evicted and its
+    # counters fold into bucket="_other", so with more than 512 active buckets expect
+    # series to come and go (and counter resets when one returns) while the totals stay
+    # complete. Requests naming a bucket that does not exist open no series at all.
     # tls_config:
     #   ca_file: /etc/lights3/ca.pem
     #   insecure_skip_verify: false

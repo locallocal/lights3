@@ -651,6 +651,8 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     bool vhost = false;
     // actor's tenant for the audit record (empty = none)
     std::string tenant_for_log;
+    // the request named a bucket that does not exist (see the catch below)
+    bool bucket_unknown = false;
     // API x backend dimension: the route name becomes the api label,
     // the routed backend the backend label; the accumulator travels on the
     // request's cancellation token and collects the backend share of the latency
@@ -1064,6 +1066,11 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                               ctx, head);
     } catch (const S3Error& e) {
         metrics_.s3_error(e.code);
+        // A name that turned out not to be a bucket must not open a per-bucket metrics
+        // series: the table is capped, so any credentialed client hitting random names
+        // could otherwise push the real buckets out of it. The name still goes to the
+        // access log and the audit record -- those are per-request, not per-series
+        bucket_unknown = e.code == S3ErrorCode::NoSuchBucket;
         if (anon_site)
             website_err = public_error(e, ctx.request_id, req);
         else
@@ -1158,12 +1165,13 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     // per-bucket request distribution and outbound bytes. Streaming response bytes are pulled
     // by the driver after dispatch returns and counted via the decorator (which then also emits the access line with
     // the bytes actually sent and the full wall time); small responses have a known length by now
-    metrics_.record_bucket_request(bucket);
+    std::string_view metrics_bucket = bucket_unknown ? std::string_view{} : std::string_view(bucket);
+    metrics_.record_bucket_request(metrics_bucket);
     if (resp.stream_body) {
         resp.stream_body = std::make_unique<CountingBodyReader>(std::move(resp.stream_body), &metrics_, bucket,
                                                                 /*inbound=*/false, std::move(access));
     } else {
-        metrics_.add_bytes_out(bucket, resp.small_body.size());
+        metrics_.add_bytes_out(metrics_bucket, resp.small_body.size());
         emit_access(*access, bytes, /*truncated=*/false);
     }
     // Data-plane audit record: structured twin of the access line

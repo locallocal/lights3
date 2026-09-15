@@ -24,10 +24,30 @@ void Metrics::request_end(std::string_view method, int status, double seconds) {
     latency_count_.fetch_add(1, std::memory_order_relaxed);
 }
 
+// Least-recently-touched first, its counters folded into other_ ("_other"): the series
+// goes away, the totals stay. Caller holds bucket_m_
+void Metrics::evict_bucket_locked() {
+    if (bucket_lru_.empty()) return;
+    auto it = by_bucket_.find(bucket_lru_.back());
+    if (it != by_bucket_.end()) {
+        other_.requests += it->second.requests;
+        other_.bytes_in += it->second.bytes_in;
+        other_.bytes_out += it->second.bytes_out;
+        by_bucket_.erase(it);
+    }
+    bucket_lru_.pop_back();
+}
+
 Metrics::BucketStats& Metrics::bucket_slot_locked(std::string_view bucket) {
-    if (auto it = by_bucket_.find(bucket); it != by_bucket_.end()) return it->second;
-    if (by_bucket_.size() >= kMaxTrackedBuckets) return by_bucket_["_other"];
-    return by_bucket_[std::string(bucket)];
+    if (auto it = by_bucket_.find(bucket); it != by_bucket_.end()) {
+        if (it->second.lru != bucket_lru_.begin()) bucket_lru_.splice(bucket_lru_.begin(), bucket_lru_, it->second.lru);
+        return it->second;
+    }
+    if (by_bucket_.size() >= kMaxTrackedBuckets) evict_bucket_locked();
+    bucket_lru_.emplace_front(bucket);
+    auto [it, inserted] = by_bucket_.emplace(std::string(bucket), BucketStats{});
+    it->second.lru = bucket_lru_.begin();
+    return it->second;
 }
 
 void Metrics::add_bytes_in(std::string_view bucket, uint64_t n) {
@@ -184,15 +204,23 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
     os << "lights3_bytes_total{direction=\"out\"} " << bytes_out_.load(std::memory_order_relaxed) << "\n";
     {
         std::lock_guard lk(bucket_m_);
-        if (!by_bucket_.empty()) {
+        // "_other" carries what eviction folded away; rendered alongside the live
+        // buckets, and omitted entirely while nothing has been evicted
+        bool has_other = other_.requests || other_.bytes_in || other_.bytes_out;
+        if (!by_bucket_.empty() || has_other) {
             os << "# TYPE lights3_bucket_requests_total counter\n";
             for (auto& [name, st] : by_bucket_)
                 os << "lights3_bucket_requests_total{bucket=\"" << name << "\"} " << st.requests << "\n";
+            if (has_other) os << "lights3_bucket_requests_total{bucket=\"_other\"} " << other_.requests << "\n";
             os << "# TYPE lights3_bucket_bytes_total counter\n";
             for (auto& [name, st] : by_bucket_) {
                 os << "lights3_bucket_bytes_total{bucket=\"" << name << "\",direction=\"in\"} " << st.bytes_in << "\n";
                 os << "lights3_bucket_bytes_total{bucket=\"" << name << "\",direction=\"out\"} " << st.bytes_out
                    << "\n";
+            }
+            if (has_other) {
+                os << "lights3_bucket_bytes_total{bucket=\"_other\",direction=\"in\"} " << other_.bytes_in << "\n";
+                os << "lights3_bucket_bytes_total{bucket=\"_other\",direction=\"out\"} " << other_.bytes_out << "\n";
             }
         }
     }

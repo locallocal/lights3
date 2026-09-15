@@ -23,7 +23,9 @@ R4（请求尾部的进程级锁与默认同步日志，`log.async` 已默认开
 R5（分块解帧改直读，实测见同文 §4.3，解帧开销 +18% → 持平；回归用例
 `sigv4_chunked_direct_read_*` 与 `sigv4_chunked_zero_length_read_is_not_a_truncation`）、
 R6（路由只解析一次；**性能上是阴性结果**，见同文 §4.4，保留是为了把授权与执行取同一条
-路由变成结构保证，由 `service_website_*` 三条用例守着）。
+路由变成结构保证，由 `service_website_*` 三条用例守着）、R7（桶维度指标表改 LRU 淘汰 +
+不存在的桶不开系列，回归用例 `s3_metrics_bucket_table_evicts_coldest` 与
+`service_unknown_bucket_opens_no_metric_series`）。
 
 等级：高＝可能损坏数据或绕过约束；中＝可被外部输入放大，或明显偏离 AWS 语义；
 低＝加固/一致性问题。
@@ -32,7 +34,6 @@ R6（路由只解析一次；**性能上是阴性结果**，见同文 §4.4，�
 
 | 编号 | 位置 | 等级 | 一句话 |
 | --- | --- | --- | --- |
-| R7 | `s3/metrics.cc:27` | 中 | 桶维度指标表满了不淘汰，随机桶名可把真实桶挤进 `_other` |
 | R8 | `http/drivers/httplib/httplib_server.cc:343` | 低中 | 每个带 body 的请求 create+join 一个 `std::thread` |
 | R9 | `core/thread_pool.cc:52` | 低 | `backlog_` 无界，"有界队列 + 背压"的实际语义需要写清 |
 | R10 | `http/drivers/builtin/builtin_server.cc:493` | 低 | obs-fold 折行头未按 RFC 9112 §5.2 拒绝 |
@@ -42,17 +43,6 @@ R6（路由只解析一次；**性能上是阴性结果**，见同文 §4.4，�
 | O1–O6 | 见 §4 | — | 纯性能项（SigV4 规范化、header 访问、id 生成、fsync、beast 每请求系统调用） |
 
 ## 3. 风险项
-
-### R7（中）桶维度指标表满了不淘汰
-
-`Metrics::bucket_slot_locked`（`s3/metrics.cc:27-31`）到 `kMaxTrackedBuckets`
-之后一律折进 `_other`，**没有淘汰**。而 dispatch 末尾对所有请求（含
-NoSuchBucket 的 404）无条件 `record_bucket_request(bucket)`（`service.cc:1154`）。
-于是外部只要用随机桶名刷一遍，表就被垃圾占满，此后真实桶的请求/字节全部进
-`_other` —— 不是内存问题（有上限），是**可观测性被一次性打瞎**且不会自愈。
-
-建议：只对"路由到存在的桶"的请求计数（或把 4xx 里的 NoSuchBucket 排除），并给桶表
-加 LRU（可以直接复用 `RateLimiter::evict_locked` 的思路）。
 
 ### R8（低中）httplib 驱动每请求一个 pump 线程
 
@@ -155,9 +145,8 @@ R2 的 `stoull` 语义用一个三行程序即可确认（`-1` → 1844674407370
 
 ## 6. 建议的推进顺序
 
-1. **R7**（可观测性自愈）；
-2. 其余按等级顺延。O1–O6 是纯性能项，先照 §4.4 的办法做
-   交错 A/B，别预设它们一定测得出来。
+1. 按等级顺延（R8 起）。O1–O6 是纯性能项，先照 §4.4 的办法做交错 A/B，别预设它们一定
+   测得出来。
 
 ## 6.5 顺带发现（不在原清单里）
 

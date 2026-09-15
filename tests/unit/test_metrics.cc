@@ -341,3 +341,53 @@ TEST(s3_metrics_renders_admission_counters_and_l1_extras) {
     CHECK(bare.find("lights3_admission_capacity 1") != std::string::npos);
     CHECK(bare.find("lights3_admission_wait_seconds") == std::string::npos);
 }
+
+// The per-bucket table is capped, and the cap used to be a one-way door: the first 512
+// names seen owned their series forever, everything later was folded into "_other". A
+// deployment with more buckets than the cap could therefore never see its active ones,
+// and the table never recovered. It evicts the coldest bucket now, folding its counters
+// into "_other" so the series goes away but the totals do not
+TEST(s3_metrics_bucket_table_evicts_coldest) {
+    s3::Metrics m;
+    auto count = [](const std::string& out, const std::string& bucket) {
+        return out.find("lights3_bucket_requests_total{bucket=\"" + bucket + "\"}") != std::string::npos;
+    };
+    // One bucket kept hot, then far more cold ones than the table can hold
+    m.record_bucket_request("hot");
+    for (int i = 0; i < 2000; ++i) {
+        m.record_bucket_request("cold-" + std::to_string(i));
+        // touching it keeps it at the head of the LRU
+        m.record_bucket_request("hot");
+    }
+    auto out = m.render({});
+    CHECK(count(out, "hot"));
+    CHECK(count(out, "_other"));
+    // the earliest cold buckets are gone, the last few are still there
+    CHECK(!count(out, "cold-0"));
+    CHECK(!count(out, "cold-100"));
+    CHECK(count(out, "cold-1999"));
+    // Cardinality stays bounded: 512 live buckets + "_other"
+    size_t series = 0;
+    for (size_t pos = 0; (pos = out.find("lights3_bucket_requests_total{", pos)) != std::string::npos; ++pos) ++series;
+    CHECK(series <= size_t(513));
+
+    // Nothing is lost: hot was touched 2001 times, each cold bucket once, and every
+    // evicted count landed in "_other"
+    uint64_t total = 0;
+    for (size_t pos = 0; (pos = out.find("lights3_bucket_requests_total{", pos)) != std::string::npos; ++pos) {
+        size_t brace = out.find("} ", pos);
+        total += std::stoull(out.substr(brace + 2, out.find('\n', brace) - brace - 2));
+    }
+    CHECK_EQ(total, uint64_t(2001 + 2000));
+}
+
+TEST(s3_metrics_bucket_other_absent_until_eviction) {
+    s3::Metrics m;
+    m.record_bucket_request("a");
+    m.add_bucket_bytes("b", 10, 20);
+    auto out = m.render({});
+    CHECK(contains(out, "lights3_bucket_requests_total{bucket=\"a\"} 1\n"));
+    CHECK(contains(out, "lights3_bucket_bytes_total{bucket=\"b\",direction=\"out\"} 20\n"));
+    // no eviction has happened, so the catch-all series is not emitted at all
+    CHECK(!contains(out, "bucket=\"_other\""));
+}

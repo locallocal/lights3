@@ -195,7 +195,7 @@ not optimized symmetrically) are done; implementation in
 - No follow-up remains: the "found by the performance baseline" section of the
   todo list was deleted with this.
 
-## 4. 2026-09-15: the fixed cost on the request tail (access log and process-wide locks)
+## 4. 2026-09-15: closing out the review's performance items
 
 Review item R4. Four costs paid by every request: the process-wide mutex in
 `Logger::access()`, the access log being **synchronous** by default, the rate limiter's
@@ -238,6 +238,33 @@ default so that code is never entered, and the other two are a few hundred nanos
 against a ~6 µs request. They went in anyway -- they cost nothing, and the contention they
 remove grows with core count and concurrency.
 
+### 4.3 R5: the staging buffer in aws-chunked de-framing
+
+`ChunkedSigV4BodyReader` used to read the **whole** body into its own 16KiB stack buffer
+and memcpy it out, so a single `read()` could never return more than 16KiB -- while the
+drivers ask for 64KiB (`io_chunk_size`), making a MiB of body take four times the coroutine
+round trips it needed, with a memcpy and an `erase(0,n)` memmove per byte on top. Chunk
+data is now read straight into the caller's span; only the framing (chunk headers, the
+trailer section) still goes through the staging buffer.
+
+Method: same machine, memory backend + builtin + auth disabled, the same 128MiB body sent
+6 times as a plain body and 6 times aws-chunked (64KiB chunks). What is compared is the
+ratio **within one run**, which is immune to machine drift.
+
+| | Plain body (median) | aws-chunked (median) | chunked/plain |
+| --- | --- | --- | --- |
+| Before | 0.198 s | 0.234 s | **1.185** |
+| After | 0.204 s | 0.196 s | **0.96** (parity, inside the noise) |
+
+Throughput on the chunked path 575 → 686 MB/s (**+19%**); the de-framing overhead went
+from +18% to unmeasurable.
+
+The other half of the suggestion -- a read cursor in `buf_` instead of `erase` -- was **not
+done**: with the direct read, `buf_` only ever holds the tail of the fill that parsed a
+chunk header (≤16KiB), the next read usually drains it in one go, and `erase(0, all)` is
+O(1) anyway. The table above shows what is left is already inside the noise, so a cursor
+would buy complexity and nothing else.
+
 ## 5. Reproducing
 
 ```bash
@@ -259,4 +286,4 @@ mode, size, concurrency, duration_s, result}`, where `result` is the
 | --- | --- | --- |
 | 2026-09-05 | §4.3 data-plane work (prefetch, buffer pool, sendfile, pumping, ResumeOn fast path, per-bucket metrics without the lock, beast read-buffer reserve) | large-object GET +14 to +52%, beast PUT 3.5 to 10× |
 | 2026-09-13 | beast per-thread io_context, session watchdog, memory-BIO TlsStream; PipelinedMd5 request-body hashing (http-adapter.md §2.4 ⑩–⑬) | beast TLS GET 4 MiB +93% (level with the other drivers), 4 MiB PUT +12 to +55% on all drivers, p50 7.2 → 6.2 ms |
-| 2026-09-15 | Request-tail lock removal + `log.async` on by default (§4) | 64 concurrent, 16 KiB: PUT +8.1%, GET +19.2%, GET p99 1.01 → 0.87 ms |
+| 2026-09-15 | Request-tail lock removal + `log.async` on by default (§4.0-4.2); direct-read aws-chunked de-framing (§4.3) | 64 concurrent, 16 KiB: PUT +8.1%, GET +19.2%, GET p99 1.01 → 0.87 ms; 128 MiB chunked PUT +19%, at parity with a plain body |

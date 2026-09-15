@@ -673,6 +673,130 @@ TEST(sigv4_decoded_content_length_parsed_strictly) {
     CHECK_EQ(read_all_body(*ok.body), "");
 }
 
+// ---------- De-framing reads payload straight into the caller's buffer ----------
+
+namespace {
+
+// A body reader that hands out at most `piece` bytes per read, the way a socket does.
+// The de-framer used to funnel everything through its own 16KiB staging buffer, which hid
+// both short reads and the caller's span size; it now reads chunk data directly into the
+// caller's buffer, so those two shapes are the ones that matter
+class TrickleReader final : public http::BodyReader {
+public:
+    TrickleReader(std::string data, size_t piece) : data_(std::move(data)), piece_(piece) {}
+    Task<size_t> read(std::span<std::byte> buf) override {
+        size_t n = std::min({buf.size(), piece_, data_.size() - pos_});
+        if (n > 0) {
+            std::memcpy(buf.data(), data_.data() + pos_, n);
+            pos_ += n;
+        }
+        co_return n;
+    }
+    std::optional<uint64_t> length() const override { return std::nullopt; }
+
+private:
+    std::string data_;
+    size_t piece_;
+    size_t pos_ = 0;
+};
+
+// Reads through a fixed-size window, so the caller's span is exercised too
+std::string read_all_in(http::BodyReader& r, size_t window) {
+    std::string out;
+    std::vector<std::byte> buf(window);
+    for (;;) {
+        size_t n = sync_wait(r.read(std::span(buf)));
+        if (n == 0) break;
+        CHECK(n <= window);
+        out.append(reinterpret_cast<const char*>(buf.data()), n);
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST(sigv4_chunked_direct_read_handles_every_split) {
+    AuthConfig cfg;
+    cfg.credentials = {{"TESTAK", "test-secret-key"}};
+    auto auth = SigV4Authenticator::build(cfg);
+    // Long enough to span many chunks and to make the window sizes below meaningful
+    std::string payload;
+    for (int i = 0; i < 4096; ++i) payload += static_cast<char>('a' + (i % 26));
+
+    // chunk sizes deliberately coprime-ish with the windows and the trickle sizes, so the
+    // chunk boundary lands mid-window, mid-piece and exactly on both
+    for (size_t chunk : {size_t(1), size_t(7), size_t(64), size_t(1000), payload.size()}) {
+        for (size_t piece : {size_t(1), size_t(13), size_t(4096), size_t(1) << 20}) {
+            for (size_t window : {size_t(1), size_t(5), size_t(512), size_t(1) << 20}) {
+                std::string body;
+                for (size_t off = 0; off < payload.size(); off += chunk) {
+                    std::string part = payload.substr(off, chunk);
+                    body += hex_size(part.size()) + "\r\n" + part + "\r\n";
+                }
+                body += "0\r\n\r\n";
+
+                http::HttpRequest req;
+                req.method = "PUT";
+                req.raw_path = "/bkt/big";
+                req.path = "/bkt/big";
+                req.headers.add("Host", "localhost");
+                req.headers.add("x-amz-decoded-content-length", std::to_string(payload.size()));
+                auth.sign(req, cfg.credentials[0], "STREAMING-UNSIGNED-PAYLOAD-TRAILER");
+                req.body = std::make_unique<TrickleReader>(std::move(body), piece);
+                auth.verify(req);
+                std::string got = read_all_in(*req.body, window);
+                if (got != payload)
+                    throw mini_test::Failure("chunk=" + std::to_string(chunk) + " piece=" + std::to_string(piece) +
+                                             " window=" + std::to_string(window) + ": got " +
+                                             std::to_string(got.size()) + " bytes");
+            }
+        }
+    }
+}
+
+TEST(sigv4_chunked_direct_read_keeps_the_signature_chain) {
+    // The signed variants hash the delivered bytes for the per-chunk signature; reading
+    // them into the caller's buffer instead of the staging one must hash exactly the same
+    // bytes, whatever the split
+    AuthConfig cfg;
+    cfg.credentials = {{"TESTAK", "test-secret-key"}};
+    auto auth = SigV4Authenticator::build(cfg);
+    for (size_t piece : {size_t(1), size_t(4), size_t(4096)}) {
+        for (size_t window : {size_t(1), size_t(3), size_t(65536)}) {
+            auto req = make_chunked_request(auth, cfg.credentials[0], /*tamper=*/false);
+            // re-wrap the already-built body so it trickles
+            std::string body = read_all_body(*req.body);
+            req.body = std::make_unique<TrickleReader>(std::move(body), piece);
+            auth.verify(req);
+            CHECK_EQ(read_all_in(*req.body, window), "hello world");
+        }
+    }
+    // and a tampered chunk is still caught when the data arrives in pieces
+    auto bad = make_chunked_request(auth, cfg.credentials[0], /*tamper=*/true);
+    std::string body = read_all_body(*bad.body);
+    bad.body = std::make_unique<TrickleReader>(std::move(body), 3);
+    auth.verify(bad);
+    bool thrown = false;
+    try {
+        read_all_in(*bad.body, 5);
+    } catch (const S3Error& e) {
+        thrown = true;
+        CHECK_EQ(wire_code(e.code), wire_code(S3ErrorCode::SignatureDoesNotMatch));
+    }
+    CHECK(thrown);
+}
+
+TEST(sigv4_chunked_zero_length_read_is_not_a_truncation) {
+    AuthConfig cfg;
+    cfg.credentials = {{"TESTAK", "test-secret-key"}};
+    auto auth = SigV4Authenticator::build(cfg);
+    auto req = make_chunked_request(auth, cfg.credentials[0], false);
+    auth.verify(req);
+    // An empty destination reads as "nothing moved", not as a truncated chunk
+    CHECK_EQ(sync_wait(req.body->read(std::span<std::byte>{})), size_t(0));
+    CHECK_EQ(read_all_body(*req.body), "hello world");
+}
+
 // ---------- Auth disabled: the transport framing still comes off ----------
 //
 // aws-chunked is the transport encoding named by x-amz-content-sha256, not an

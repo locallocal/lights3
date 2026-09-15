@@ -195,7 +195,50 @@ not optimized symmetrically) are done; implementation in
 - No follow-up remains: the "found by the performance baseline" section of the
   todo list was deleted with this.
 
-## 4. Reproducing
+## 4. 2026-09-15: the fixed cost on the request tail (access log and process-wide locks)
+
+Review item R4. Four costs paid by every request: the process-wide mutex in
+`Logger::access()`, the access log being **synchronous** by default, the rate limiter's
+key copy plus its second lock acquisition, and builtin's two global-lock round trips and
+one `std::set` node allocation per request. The first, third and fourth all sit inside the
+noise at 16 concurrent clients; **the one that matters is synchronous logging.**
+
+### 4.1 Isolating it (builtin + memory backend + 16 KiB, Release)
+
+The same load under three combinations of `log.level` and `log.async`. The `warn` row
+emits no access lines at all and is therefore the ceiling -- what logging would cost if it
+were free:
+
+| Concurrency | Configuration | PUT ops/s | GET ops/s | PUT p99 | GET p99 |
+| --- | --- | --- | --- | --- | --- |
+| 16 | info + sync (old default) | 154.3k | 201.9k | 0.255 ms | 0.239 ms |
+| 16 | info + async | 158.5k | 211.4k | 0.252 ms | 0.238 ms |
+| 64 | info + sync (old default) | 203.0k | 254.4k | 1.02 ms | 1.01 ms |
+| 64 | info + async | 218.5k | 304.4k | 0.99 ms | 0.87 ms |
+| 64 | warn (no access lines, ceiling) | 224.1k | 318.1k | 0.98 ms | 0.80 ms |
+
+At 64 concurrent clients synchronous logging costs **9% of PUT and 20% of GET**
+throughput; async leaves only 2.5% and 4.3% on the table against the ceiling, and p99
+follows (1.01 ms → 0.87 ms). `log.async` therefore defaults to `true` now; the trade is
+the tail of the queue on a hard crash (at most `async_queue` records, and warn/error still
+flush per record).
+
+### 4.2 Before / after (`scripts/bench_gate.sh`, 16 concurrent, 10s, 3 runs)
+
+| | PUT ops/s | GET ops/s | GET p99 |
+| --- | --- | --- | --- |
+| Before | 156.2 / 157.5 / 159.6k | 204.7 / 203.5 / 205.3k | 0.226 ms |
+| After | 157.9 / 160.1 / 160.4k | 215.1 / 214.8 / 215.7k | 0.219 ms |
+
+GET +5.2% and PUT +1.1% (the latter on the edge of the noise) at 16; at 64 the table above
+gives PUT +8.1% and GET +19.2%. The three lock removals (a lock-free read for
+`Logger::access`, heterogeneous lookup plus a lock-free release in the rate limiter, and a
+per-connection atomic in builtin) do not show up on their own: the limiter is off by
+default so that code is never entered, and the other two are a few hundred nanoseconds
+against a ~6 µs request. They went in anyway -- they cost nothing, and the contention they
+remove grows with core count and concurrency.
+
+## 5. Reproducing
 
 ```bash
 ./build.sh -B build-rel -DCMAKE_BUILD_TYPE=Release -DLIGHTS3_DUOSTORE=OFF -DLIGHTS3_CLOUDPROXY=OFF -DLIGHTS3_BUILD_TESTS=OFF
@@ -210,9 +253,10 @@ mode, size, concurrency, duration_s, result}`, where `result` is the
 `lights3-ctl bench --output=json` object. Make sure the machine is idle and no stray
 `lights3` process is around (`pgrep -x lights3`) before running.
 
-## 5. History
+## 6. History
 
 | Date | Change | Summary |
 | --- | --- | --- |
 | 2026-09-05 | §4.3 data-plane work (prefetch, buffer pool, sendfile, pumping, ResumeOn fast path, per-bucket metrics without the lock, beast read-buffer reserve) | large-object GET +14 to +52%, beast PUT 3.5 to 10× |
 | 2026-09-13 | beast per-thread io_context, session watchdog, memory-BIO TlsStream; PipelinedMd5 request-body hashing (http-adapter.md §2.4 ⑩–⑬) | beast TLS GET 4 MiB +93% (level with the other drivers), 4 MiB PUT +12 to +55% on all drivers, p50 7.2 → 6.2 ms |
+| 2026-09-15 | Request-tail lock removal + `log.async` on by default (§4) | 64 concurrent, 16 KiB: PUT +8.1%, GET +19.2%, GET p99 1.01 → 0.87 ms |

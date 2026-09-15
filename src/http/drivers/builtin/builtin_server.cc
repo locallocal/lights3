@@ -15,9 +15,9 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
-#include <set>
 #include <thread>
 #include <vector>
 
@@ -251,6 +251,19 @@ private:
 // leftover connection threads exit (force-kill wait timed out); threads hold
 // this struct via shared_ptr, so it stays safe after the server object is
 // destroyed (otherwise a use-after-free during destruction)
+// Per-connection state the shutdown sweep has to reach. `idle` means "waiting for the
+// next request on a keep-alive connection": those can be cut immediately on shutdown,
+// with the grace period reserved for in-flight requests (without the distinction, idle
+// connections made shutdown wait a pointless 10 seconds). It is a per-connection atomic
+// rather than a shared std::set because the flag is touched once per **request** while
+// the registry is touched once per **connection**: a keep-alive connection serving its
+// 1024-request budget used to take the process-wide lock 2048 times and allocate and free
+// a tree node each round
+struct ConnEntry {
+    int fd = -1;
+    std::atomic<bool> idle{false};
+};
+
 struct ConnShared {
     HttpConfig cfg;
     Handler handler;
@@ -267,11 +280,7 @@ struct ConnShared {
     std::atomic<bool> stopping{false};
     std::mutex m;
     std::condition_variable cv;
-    std::set<int> conns;
-    // Connections in keep-alive waiting for the next request: these can be cut immediately on shutdown, with the grace
-    // period reserved for in-flight requests — previously there was no distinction and idle connections made shutdown
-    // wait a pointless 10 seconds
-    std::set<int> idle;
+    std::map<int, std::shared_ptr<ConnEntry>> conns;
     int active = 0;
 };
 
@@ -415,7 +424,7 @@ bool write_response(Io& io, HttpResponse& resp, bool head_request, bool keep_ali
 }
 
 // Handles one request; false means the connection should be closed
-bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& peer,
+bool serve_one(ConnShared& sh, ConnEntry& conn, Io& io, ConnReader& reader, const std::string& peer,
                const std::optional<TlsIdentity>& tls_identity, bool& keep_alive, int served) {
     const size_t max_line = sh.cfg.max_header_size;
     const int fd = io.fd;
@@ -424,20 +433,22 @@ bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& pe
     // and body then get their own bounds, the response write its own
     io.set_recv_timeout(served == 0 ? sh.cfg.header_timeout_sec : sh.cfg.idle_timeout_sec);
 
-    // Until the request line is read, this connection is "idle keep-alive":
-    // register it in idle so the shutdown sweep cuts it directly; on the
-    // first byte read it becomes in-flight (entitled to the shutdown grace)
+    // Until the request line is read, this connection is "idle keep-alive": flag it so
+    // the shutdown sweep cuts it directly; on the first byte read it becomes in-flight
+    // (entitled to the shutdown grace).
+    // Publishing the flag *before* reading `stopping`, while the sweep sets `stopping`
+    // before reading the flag, is what the removed mutex used to guarantee: with both
+    // sides sequentially consistent, at least one of the two sees the other's write, so a
+    // connection either bails out here or is found by the sweep — it can never settle
+    // into a 60s idle read that shutdown does not know about
+    conn.idle.store(true);
+    if (sh.stopping.load()) {
+        conn.idle.store(false);
+        return false;
+    }
     std::string line;
-    {
-        std::lock_guard lk(sh.m);
-        if (sh.stopping.load()) return false;
-        sh.idle.insert(fd);
-    }
     bool got = reader.read_line(line, max_line);
-    {
-        std::lock_guard lk(sh.m);
-        sh.idle.erase(fd);
-    }
+    conn.idle.store(false);
     if (!got) {
         if (Io::timed_out())
             driver::count_timeout(sh.counters, served == 0 ? driver::Phase::Header : driver::Phase::Idle);
@@ -564,7 +575,8 @@ bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& pe
     return keep_alive;
 }
 
-void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
+void handle_connection(ConnShared& sh, ConnEntry& conn, const std::string& peer) {
+    const int fd = conn.fd;
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
@@ -603,7 +615,7 @@ void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
     bool keep_alive = true;
     int served = 0;
     while (keep_alive && !sh.stopping.load()) {
-        if (!serve_one(sh, io, reader, peer, tls_identity, keep_alive, served)) break;
+        if (!serve_one(sh, conn, io, reader, peer, tls_identity, keep_alive, served)) break;
         ++served;
     }
     if (io.ssl) {
@@ -729,6 +741,7 @@ public:
                 inet_ntop(AF_INET6, &reinterpret_cast<sockaddr_in6*>(&peer)->sin6_addr, ip, sizeof(ip));
             else
                 inet_ntop(AF_INET, &reinterpret_cast<sockaddr_in*>(&peer)->sin_addr, ip, sizeof(ip));
+            std::shared_ptr<ConnEntry> entry;
             {
                 std::lock_guard lk(sh.m);
                 // Hard cap on concurrent connections (cfg.max_connections,
@@ -744,14 +757,15 @@ public:
                 ++sh.active;
                 sh.counters.accepted.fetch_add(1, std::memory_order_relaxed);
                 sh.counters.active.store(static_cast<uint64_t>(sh.active), std::memory_order_relaxed);
-                sh.conns.insert(fd);
+                entry = std::make_shared<ConnEntry>();
+                entry->fd = fd;
+                sh.conns.emplace(fd, entry);
             }
-            bool spawned = spawn_conn_thread([sp = shared_, fd, peer_ip = std::string(ip)] {
-                handle_connection(*sp, fd, peer_ip);
+            bool spawned = spawn_conn_thread([sp = shared_, entry, peer_ip = std::string(ip)] {
+                handle_connection(*sp, *entry, peer_ip);
                 std::lock_guard lk(sp->m);
-                sp->conns.erase(fd);
-                sp->idle.erase(fd);
-                ::close(fd);
+                sp->conns.erase(entry->fd);
+                ::close(entry->fd);
                 if (--sp->active == 0) sp->cv.notify_all();
                 sp->counters.active.store(static_cast<uint64_t>(sp->active), std::memory_order_relaxed);
             });
@@ -774,10 +788,11 @@ public:
         // shared_ptr and finish up on their own after run() returns or even
         // after the server is destroyed — no dangling references
         std::unique_lock lk(sh.m);
-        for (int cfd : sh.idle) ::shutdown(cfd, SHUT_RDWR);
+        for (auto& [cfd, c] : sh.conns)
+            if (c->idle.load()) ::shutdown(cfd, SHUT_RDWR);
         if (!sh.cv.wait_for(lk, std::chrono::seconds(sh.cfg.shutdown_grace_sec), [&] { return sh.active == 0; })) {
             LOG_WARN("forcing {} connection(s) closed on shutdown", sh.active);
-            for (int fd : sh.conns) ::shutdown(fd, SHUT_RDWR);
+            for (auto& [cfd, c] : sh.conns) ::shutdown(cfd, SHUT_RDWR);
             sh.cv.wait_for(lk, std::chrono::seconds(sh.cfg.shutdown_force_wait_sec), [&] { return sh.active == 0; });
         }
         LOG_INFO("builtin http server stopped");

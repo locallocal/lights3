@@ -11,21 +11,24 @@ RateLimiter::RateLimiter(Limits limits, size_t max_tracked)
 
 std::optional<RateLimiter::Token> RateLimiter::admit(std::string_view key, Clock::time_point now) {
     if (!enabled() || key.empty()) return Token{};
-    std::string k(key);
     std::lock_guard lk(mu_);
-    auto it = table_.find(k);
+    // Heterogeneous lookup: the hit path (every request of an already-seen client) does
+    // not materialize the key at all
+    auto it = table_.find(key);
     if (it == table_.end()) {
         // Make room BEFORE inserting: eviction only drops keys with nothing in
         // flight, and the key being admitted is exactly such a key until the slot
         // below is taken — evicting after the insert could free `it` under us
         if (table_.size() >= max_tracked_) evict_locked();
-        lru_.push_front(k);
-        Entry e;
+        lru_.emplace_front(key);
+        // Entry holds an atomic and is therefore neither copyable nor movable: insert it
+        // in place and fill the fields afterwards
+        it = table_.try_emplace(std::string(key)).first;
+        Entry& fresh = it->second;
         // a new key starts with a full bucket
-        e.tokens = limits_.burst;
-        e.last = now;
-        e.lru = lru_.begin();
-        it = table_.emplace(k, e).first;
+        fresh.tokens = limits_.burst;
+        fresh.last = now;
+        fresh.lru = lru_.begin();
     } else {
         lru_.splice(lru_.begin(), lru_, it->second.lru);
     }
@@ -38,16 +41,15 @@ std::optional<RateLimiter::Token> RateLimiter::admit(std::string_view key, Clock
         }
         if (e.tokens < 1.0) return std::nullopt;
     }
-    if (limits_.max_inflight > 0 && e.inflight >= limits_.max_inflight) return std::nullopt;
+    // Reading the counter the Token decrements without the lock: a release that lands
+    // between this load and the increment below only ever makes the limiter admit one
+    // request it could have admitted a moment later — the bucket above is the sustained
+    // bound, this cap is the concurrency one, and neither is exact by construction
+    if (limits_.max_inflight > 0 && e.inflight.load(std::memory_order_acquire) >= limits_.max_inflight)
+        return std::nullopt;
     if (limits_.rps > 0) e.tokens -= 1.0;
-    ++e.inflight;
-    return Token{this, std::move(k)};
-}
-
-void RateLimiter::release(const std::string& key) {
-    std::lock_guard lk(mu_);
-    auto it = table_.find(key);
-    if (it != table_.end() && it->second.inflight > 0) --it->second.inflight;
+    e.inflight.fetch_add(1, std::memory_order_acq_rel);
+    return Token{&e};
 }
 
 size_t RateLimiter::tracked() const {
@@ -64,7 +66,7 @@ void RateLimiter::evict_locked() {
         bool removed = false;
         for (auto it = victim;; --it) {
             auto tit = table_.find(*it);
-            if (tit != table_.end() && tit->second.inflight == 0) {
+            if (tit != table_.end() && tit->second.inflight.load(std::memory_order_acquire) == 0) {
                 table_.erase(tit);
                 lru_.erase(it);
                 removed = true;

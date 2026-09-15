@@ -26,8 +26,25 @@ constexpr const char* kTextPattern = "%Y-%m-%dT%H:%M:%S.%eZ %-5!l %v";
 std::mutex g_mu;
 // the registered access logger (null before init)
 std::shared_ptr<spdlog::logger> g_access;
+// Read-only fast path for g_access: written under g_mu, read without it. The access
+// logger is fetched once per request (S3Service::dispatch's access line), and taking a
+// process-wide mutex there serialized every request tail against every other for nothing
+// but a pointer that stops changing after startup
+std::atomic<spdlog::logger*> g_access_fast{nullptr};
+// Loggers displaced by a re-init or by shutdown() are parked here instead of being
+// destroyed: a request that already loaded the pointer above is still writing through it,
+// and the previous code (which handed out a reference and then dropped the lock) had the
+// same exposure without the parking. Bounded by the number of init calls in a process
+std::vector<std::shared_ptr<spdlog::logger>> g_retired;
 std::atomic<bool> g_json{false};
 bool g_async = false;
+
+// Publishes the access logger; caller holds g_mu
+void set_access_logger(std::shared_ptr<spdlog::logger> l) {
+    if (g_access && g_access != l) g_retired.push_back(std::move(g_access));
+    g_access = std::move(l);
+    g_access_fast.store(g_access.get(), std::memory_order_release);
+}
 
 void append(spdlog::memory_buf_t& dest, std::string_view s) { dest.append(s.data(), s.data() + s.size()); }
 
@@ -157,7 +174,7 @@ void install_sync(std::vector<spdlog::sink_ptr> sinks, bool json, spdlog::level:
     spdlog::drop(std::string(Logger::kAccessLoggerName));
     spdlog::set_default_logger(main);
     spdlog::register_logger(access);
-    g_access = access;
+    set_access_logger(access);
     // joins the old writer (if any)
     spdlog::details::registry::instance().set_tp(nullptr);
     g_async = false;
@@ -212,7 +229,7 @@ void Logger::init(const LogConfig& cfg, std::shared_ptr<spdlog::sinks::sink> sin
     spdlog::drop(std::string(kAccessLoggerName));
     spdlog::set_default_logger(main);
     spdlog::register_logger(access);
-    g_access = access;
+    set_access_logger(access);
     g_async = true;
     for (auto& l : {main, access}) {
         apply_format(*l, json);
@@ -230,7 +247,10 @@ void Logger::shutdown() {
 }
 
 spdlog::logger& Logger::access() {
+    // Once per request: no lock on the hot path
+    if (auto* l = g_access_fast.load(std::memory_order_acquire)) return *l;
     std::lock_guard<std::mutex> lk(g_mu);
+    // Before init (tests, early startup): adopt the default logger's sinks once
     if (!g_access) {
         auto def = spdlog::default_logger();
         auto l = std::make_shared<spdlog::logger>(std::string(kAccessLoggerName), def->sinks().begin(),
@@ -238,7 +258,7 @@ spdlog::logger& Logger::access() {
         l->set_level(def->level());
         spdlog::drop(std::string(kAccessLoggerName));
         spdlog::register_logger(l);
-        g_access = l;
+        set_access_logger(std::move(l));
     }
     return *g_access;
 }

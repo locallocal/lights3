@@ -29,7 +29,9 @@ R6（路由只解析一次；**性能上是阴性结果**，见同文 §4.4，�
 PUT +20%，见同文 §4.5；回归用例 `http_driver_many_concurrent_bodies`）、R9（线程池
 "有界队列"的说法改成实话：有界的是**就绪数**、超出的被推迟而非拒绝，硬上限在准入闸门；
 `enqueue_bounded` 更名 `enqueue_deferrable`，回归用例
-`schedule_overflow_is_deferred_not_rejected`）。
+`schedule_overflow_is_deferred_not_rejected`）、R10（builtin/seastar 以 400 拒绝
+obs-fold；**原来不只是"碰巧安全"** —— 带冒号的续行会让重复 Content-Length 逃过框架
+检查，其后的字节被当作下一个请求应答，回归用例 `http_driver_obs_fold_*` 两条）。
 
 等级：高＝可能损坏数据或绕过约束；中＝可被外部输入放大，或明显偏离 AWS 语义；
 低＝加固/一致性问题。
@@ -38,26 +40,16 @@ PUT +20%，见同文 §4.5；回归用例 `http_driver_many_concurrent_bodies`�
 
 | 编号 | 位置 | 等级 | 一句话 |
 | --- | --- | --- | --- |
-| R10 | `http/drivers/builtin/builtin_server.cc:493` | 低 | obs-fold 折行头未按 RFC 9112 §5.2 拒绝 |
-| R11 | `http/drivers/builtin/builtin_server.cc:768` | 低 | 关连接前未 `shutdown(SHUT_WR)`，极端情况客户端只看到 RST |
+| R11 | `http/drivers/builtin/builtin_server.cc:780` | 低 | 关连接前未 `shutdown(SHUT_WR)`，极端情况客户端只看到 RST |
 | R12 | `s3/auth/sigv4.cc:792` | 低 | presigned 一律按 `UNSIGNED-PAYLOAD` 计签 |
 | R13 | `config/lights3.yaml` | 低 | `/-/metrics` 默认匿名，暴露桶名与后端拓扑 |
 | O1–O6 | 见 §4 | — | 纯性能项（SigV4 规范化、header 访问、id 生成、fsync、beast 每请求系统调用） |
 
 ## 3. 风险项
 
-### R10（低）obs-fold 折行头未按 RFC 拒绝
-
-builtin 的头解析（`builtin_server.cc:482-500`）对以 SP/HTAB 开头的续行没有特判：
-不含冒号的续行会因 `colon == npos` 被判为 malformed（安全），含冒号的会变成一个
-名字带前导空格的普通头。前置代理若按 RFC 9112 §5.2 把续行折进上一个头的值，两边对
-同一请求的理解就不一致 —— 目前会因签名对不上而失败，但这属于"碰巧安全"。
-
-建议：行首为 SP/HTAB 直接 400 + 关连接（与现有 framing 违规同样处理）。
-
 ### R11（低）关连接前未 `shutdown(SHUT_WR)`
 
-builtin 在连接线程结束后直接 `::close(fd)`（`builtin_server.cc:768`），beast 走
+builtin 在连接线程结束后直接 `::close(fd)`（`builtin_server.cc:780`），beast 走
 `shutdown(both)`（`beast_server.cc:707`）。接收缓冲里还有未读数据时，Linux 会发
 RST，客户端可能读不到已经写出去的 4xx。
 
@@ -128,7 +120,7 @@ R2 的 `stoull` 语义用一个三行程序即可确认（`-1` → 1844674407370
 
 ## 6. 建议的推进顺序
 
-1. 按等级顺延（R10 起）。O1–O6 是纯性能项，先照 §4.4 的办法做交错 A/B，别预设它们一定
+1. 按等级顺延（R11 起）。O1–O6 是纯性能项，先照 §4.4 的办法做交错 A/B，别预设它们一定
    测得出来。
 
 ## 6.5 顺带发现（不在原清单里）

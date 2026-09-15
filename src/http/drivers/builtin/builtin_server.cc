@@ -485,6 +485,18 @@ bool serve_one(ConnShared& sh, ConnEntry& conn, Io& io, ConnReader& reader, cons
             return false;
         }
         if (line.empty()) break;
+        // obs-fold (RFC 9112 §5.2): a line starting with SP/HTAB continues the previous
+        // field. This parser does not fold, and a proxy in front of it that does would be
+        // reading a different message than this one -- the classic smuggling
+        // precondition. Without this check a continuation that happens to carry a colon
+        // became a header of its own, named with a leading space. The RFC gives a server
+        // two choices, reject or fold; rejecting is the one that cannot disagree with
+        // anybody, and it prefers the rejection to be answered rather than silently closed
+        if (line.front() == ' ' || line.front() == '\t') {
+            auto bad = driver::bad_request_response("Obsolete line folding is not supported.");
+            write_response(io, bad, req.method == "HEAD", /*keep_alive=*/false);
+            return malformed();
+        }
         header_bytes += line.size();
         if (header_bytes > sh.cfg.max_header_size) return malformed();
         // A bare CR must not remain in the header name/value (read_line only strips the single trailing \r)

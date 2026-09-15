@@ -81,6 +81,17 @@ PutObject/UploadPart 缺 Content-Length/Transfer-Encoding → 411
 | `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` | aws-chunked 编码：在 L2 提供 `ChunkedSigV4BodyReader` 装饰器，逐 chunk 剥壳并验证 chunk 签名链，向下游暴露纯数据流。放在 L2 而非 driver，所有 driver 免费获得支持 |
 | `STREAMING-*-TRAILER` 两变体 | 2025 起 SDK 的默认上传形态：`STREAMING-UNSIGNED-PAYLOAD-TRAILER`（chunk 不签名，靠 trailer 校验和保完整性）与 `STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER`（chunk 签名链 + trailer 签名）。trailer 段按行严格解析并双向对照 `x-amz-trailer` 声明（未声明的 trailer 拒绝、声明了没到的也拒绝），声明的 `x-amz-checksum-*` 对解码后全量 payload 校验（错格式 InvalidDigest / 不匹配 BadDigest）；signed 变体还验 `x-amz-trailer-signature`（`AWS4-HMAC-SHA256-TRAILER` string-to-sign，对规范化 trailer 串哈希，链在末 chunk 签名之后）。trailer 段上限 16KiB |
 
+**解帧与验签是两件事**：aws-chunked 是 body 的传输编码，剥壳（de-framing）与
+chunk 签名链校验虽然由同一个 `ChunkedSigV4BodyReader` 承担，但前者与是否有凭证无关。
+未配置任何凭证（auth 关闭）时，`verify_impl` 在首行就返回，此时仍会调用
+`SigV4Authenticator::strip_transport_framing` 安装**只解帧、不验签**的装饰器：
+chunk 头和 trailer 签名行被解析后丢弃，`x-amz-decoded-content-length` 照旧强制，
+声明的 `x-amz-checksum-*` trailer 照旧校验（它和 Content-MD5 一样不依赖签名）。
+否则分块框架会被当作对象内容写下去——11 字节的 body 存成 21 字节、ETag 算在框架上，
+而且一路 200 没有任何错误信号；2025 年起的 SDK 默认就发这种 payload 类型。
+任何不经过 `verify()` 就放行带 body 请求的路径（目前只有 mTLS 绑定在 auth 关闭时的
+那条早返回）都必须自己调用一次。
+
 ### 3.3 与流式模型的配合（含 trailing checksum）
 
 签名校验装饰器模式：`Sha256VerifyingReader` 包装原始 `BodyReader`，

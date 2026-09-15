@@ -109,7 +109,13 @@ VerifiedIdentity S3Service::verify_identity(http::HttpRequest& req) const {
         return ident;
     }
     // Unsigned request from a verified certificate: the binding is the signature
-    if (!auth_.enabled()) return {};
+    if (!auth_.enabled()) {
+        // The one path that admits a request without reaching verify_impl, so the
+        // credential-independent half of it has to be done here: aws-chunked framing comes
+        // off whether or not anything is verified
+        SigV4Authenticator::strip_transport_framing(req);
+        return {};
+    }
     const TlsBinding* b = tls_store_ ? TlsIdentityStore::find(tls_store_->snapshot(), *subject) : nullptr;
     if (!b)
         throw S3Error(S3ErrorCode::AccessDenied,

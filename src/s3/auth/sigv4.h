@@ -137,6 +137,13 @@ public:
         return verify_impl(req, one, &payload_hash);
     }
 
+    // Credential-independent body preparation: strips the aws-chunked transport framing
+    // named by x-amz-content-sha256, verifying nothing. verify_impl calls it on the
+    // auth-disabled branch; any other path that admits a request **with a body** without
+    // going through verify() must call it too, or the chunk headers end up stored as
+    // object content (see the definition for why this is not an authentication concern)
+    static void strip_transport_framing(http::HttpRequest& req);
+
     // X-Amz-Expires cap for presigned URLs (7 days, matching S3)
     static constexpr long kMaxPresignExpires = 7 * 24 * 3600;
 

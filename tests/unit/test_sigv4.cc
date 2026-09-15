@@ -641,6 +641,105 @@ TEST(sigv4_presigned_url_expiry) {
     auth.verify(skewed);
 }
 
+// ---------- Auth disabled: the transport framing still comes off ----------
+//
+// aws-chunked is the transport encoding named by x-amz-content-sha256, not an
+// authentication artifact. verify() used to return on its first line whenever no
+// credential was configured, before reaching the de-framing step, so the chunk headers
+// were written into the object: an 11-byte body stored as 21 bytes, the ETag computed over
+// the framing, 200 and no error anywhere. Post-2025 SDKs send this payload type by
+// default, which made "start it without credentials to try it out" corrupt every upload.
+
+namespace {
+
+// No credentials configured -> auth disabled. sign() still works: the client signs with a
+// credential this side has never heard of, exactly as a real SDK would
+SigV4Authenticator unauthenticated() {
+    AuthConfig cfg;
+    cfg.region = "us-east-1";
+    return SigV4Authenticator::build(cfg);
+}
+
+const Credential& stranger() {
+    static const Credential c{"UNKNOWNAK", "not-in-any-credential-table"};
+    return c;
+}
+
+}  // namespace
+
+TEST(sigv4_disabled_deframes_unsigned_trailer) {
+    auto auth = unauthenticated();
+    CHECK(!auth.enabled());
+    std::string payload = "hello trailer world";
+
+    auto req = make_unsigned_trailer_request(auth, stranger(), payload, "x-amz-checksum-crc32",
+                                             "x-amz-checksum-crc32:" + crc32_trailer_value(payload));
+    // Admitted without an identity, and de-framed all the same
+    CHECK(auth.verify(req).access_key.empty());
+    CHECK_EQ(*req.body->length(), uint64_t(payload.size()));
+    CHECK_EQ(read_all_body(*req.body), payload);
+}
+
+TEST(sigv4_disabled_deframes_signed_chunks) {
+    auto auth = unauthenticated();
+    // Per-chunk signatures are present and cannot be checked here: parsed past, not rejected
+    auto req = make_chunked_request(auth, stranger(), /*tamper=*/false);
+    auth.verify(req);
+    CHECK_EQ(read_all_body(*req.body), "hello world");
+
+    // x-amz-trailer-signature likewise -- accepted and dropped, never mistaken for an
+    // undeclared trailer. The declared checksum needs no secret, so it stays verified
+    auto tr = make_signed_trailer_request(auth, stranger(), crc32_trailer_value("hello world"), false, false);
+    auth.verify(tr);
+    CHECK_EQ(read_all_body(*tr.body), "hello world");
+
+    auto bad = make_signed_trailer_request(auth, stranger(), crc32_trailer_value("other bytes"), false, false);
+    auth.verify(bad);
+    bool thrown = false;
+    try {
+        read_all_body(*bad.body);
+    } catch (const S3Error& e) {
+        thrown = true;
+        CHECK_EQ(wire_code(e.code), wire_code(S3ErrorCode::BadDigest));
+    }
+    CHECK(thrown);
+}
+
+TEST(sigv4_disabled_keeps_the_streaming_contract) {
+    auto auth = unauthenticated();
+    auto streaming_put = [](const char* payload_type) {
+        http::HttpRequest req;
+        req.method = "PUT";
+        req.raw_path = "/bkt/big";
+        req.path = "/bkt/big";
+        req.headers.add("Host", "localhost");
+        req.headers.add("x-amz-content-sha256", payload_type);
+        req.body = std::make_unique<http::StringBodyReader>("0\r\n\r\n");
+        return req;
+    };
+
+    // The de-framer reports this length downstream, so it stays mandatory
+    auto no_len = streaming_put("STREAMING-UNSIGNED-PAYLOAD-TRAILER");
+    CHECK_THROWS_S3(auth.verify(no_len), S3ErrorCode::InvalidRequest);
+
+    // A payload type this implementation cannot de-frame must refuse loudly rather than
+    // store the framing -- which is the whole point of the fix
+    auto unknown = streaming_put("STREAMING-SOMETHING-FUTURE");
+    unknown.headers.add("x-amz-decoded-content-length", "0");
+    CHECK_THROWS_S3(auth.verify(unknown), S3ErrorCode::NotImplemented);
+
+    // A plain body is handed through untouched (no digest is verified without a signature)
+    http::HttpRequest plain;
+    plain.method = "PUT";
+    plain.raw_path = "/bkt/x";
+    plain.path = "/bkt/x";
+    plain.headers.add("Host", "localhost");
+    plain.headers.add("x-amz-content-sha256", util::sha256_hex("hello world"));
+    plain.body = std::make_unique<http::StringBodyReader>("hello world");
+    auth.verify(plain);
+    CHECK_EQ(read_all_body(*plain.body), "hello world");
+}
+
 // ---------- percent_decode semantic split ----------
 
 TEST(percent_decode_preserves_literal_plus) {

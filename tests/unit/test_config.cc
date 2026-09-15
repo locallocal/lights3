@@ -280,6 +280,38 @@ TEST(config_idle_timeout_rejects_zero) {
     CHECK_EQ(Config::from_string(std::string("http:\n  idle_timeout: 24h\n") + backends).http.idle_timeout_sec, 86400);
 }
 
+// /-/metrics answers any unauthenticated scrape by default and carries bucket names,
+// per-bucket traffic and the backend topology. Startup says so out loud, but only when a
+// scrape could actually come from another host -- the predicate is what decides that, and
+// the admin-listener split moves the address it has to look at
+TEST(config_metrics_exposure_predicate) {
+    auto http = [](const char* bind, const char* access, int admin_port = -1, const char* admin_bind = "") {
+        HttpConfig h;
+        h.bind = bind;
+        h.metrics_access = access;
+        h.admin_port = admin_port;
+        h.admin_bind = admin_bind;
+        return h;
+    };
+    // reachable from outside + anonymous
+    CHECK(metrics_anonymously_exposed(http("0.0.0.0", "anonymous")));
+    CHECK(metrics_anonymously_exposed(http("::", "anonymous")));
+    CHECK(metrics_anonymously_exposed(http("10.0.0.5", "anonymous")));
+    // loopback is private
+    CHECK(!metrics_anonymously_exposed(http("127.0.0.1", "anonymous")));
+    CHECK(!metrics_anonymously_exposed(http("127.0.0.53", "anonymous")));
+    CHECK(!metrics_anonymously_exposed(http("::1", "anonymous")));
+    CHECK(!metrics_anonymously_exposed(http("localhost", "anonymous")));
+    // signed scrapes need no warning
+    CHECK(!metrics_anonymously_exposed(http("0.0.0.0", "root")));
+    // With the split it is the admin address that serves /-/, either way round
+    CHECK(!metrics_anonymously_exposed(http("0.0.0.0", "anonymous", 9100, "127.0.0.1")));
+    CHECK(metrics_anonymously_exposed(http("127.0.0.1", "anonymous", 9100, "0.0.0.0")));
+    // an empty admin_bind inherits bind
+    CHECK(metrics_anonymously_exposed(http("0.0.0.0", "anonymous", 9100, "")));
+    CHECK(!metrics_anonymously_exposed(http("127.0.0.1", "anonymous", 9100, "")));
+}
+
 TEST(config_log_level_rejects_typos) {
     const char* backends = "backends:\n  - name: m\n    type: memory\n";
     // "warning" used to silently downgrade to info — the operator thinks the level took effect

@@ -779,4 +779,12 @@ Config Config::load(const std::string& path) {
     return from_string(buf.str());
 }
 
+bool metrics_anonymously_exposed(const HttpConfig& h) {
+    if (h.metrics_access == "root") return false;
+    const std::string& b = metrics_bind(h);
+    // The wildcard binds ("0.0.0.0", "::") are reachable from outside by definition, so
+    // only the loopback forms count as private
+    return !(b == "::1" || b == "localhost" || b.rfind("127.", 0) == 0);
+}
+
 }  // namespace lights3

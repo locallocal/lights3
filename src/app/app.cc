@@ -81,6 +81,7 @@ void Application::start_server() {
     cred_store_ = sync_wait(s3::CredentialStore::load(router.default_backend(), cfg_.auth));
     auth.set_provider(cred_store_);
     bool auth_enabled = auth.enabled();
+    auth_enabled_ = auth_enabled;
     if (!auth_enabled) LOG_WARN("no credentials configured: authentication is DISABLED");
     // Static website hosting (docs/usage/static-website.md): the store always exists — even
     // with an empty YAML list, PUT ?website can add sites at runtime. Static names get
@@ -449,6 +450,20 @@ void Application::start_server() {
             "port answers 404 for it",
             admin_driver, abind, admin_server_->bound_port());
     }
+
+    // Deployment posture, said out loud once: /-/metrics answers any unauthenticated
+    // scrape by default, and what it answers with is bucket names, per-bucket request and
+    // byte counts, and the backend topology. The two ways out are both already
+    // configurable -- this only makes the default visible to whoever reads the startup log
+    if (metrics_anonymously_exposed(cfg_.http))
+        LOG_WARN(
+            "/-/metrics is served anonymously on {} and carries bucket names, per-bucket traffic and backend topology: "
+            "{}",
+            metrics_bind(cfg_.http),
+            auth_enabled_ ? "set http.metrics_access: root, or move the /-/ face to a private listener with "
+                            "http.admin_bind/http.admin_port"
+                          : "move the /-/ face to a private listener with http.admin_bind/http.admin_port "
+                            "(metrics_access: root has no effect while authentication is disabled)");
 }
 
 uint16_t Application::bound_port() const { return server_ ? server_->bound_port() : 0; }

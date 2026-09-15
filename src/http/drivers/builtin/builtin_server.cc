@@ -636,6 +636,19 @@ void handle_connection(ConnShared& sh, ConnEntry& conn, const std::string& peer)
         SSL_free(io.ssl);
         ERR_clear_error();
     }
+    // Half-close before the fd is closed (beast does the same through
+    // socket::shutdown). close() on a socket whose receive queue still holds unread bytes
+    // makes Linux send an RST rather than a FIN -- the case being a client still uploading
+    // when its request was rejected and drained only up to drain_limit. Measured on this
+    // kernel: with unread data, a bare close ends the connection in ECONNRESET, while
+    // shutdown(SHUT_WR) first ends it in FIN; the response bytes already written arrive
+    // either way, because data queued in the peer's receive buffer is delivered before the
+    // reset is reported. So this is not about losing the response -- it is that a client
+    // which sees a reset has no way to tell an orderly end from a truncated one, and for a
+    // response without a Content-Length the two are the same bytes.
+    // One syscall, no drain loop: half-closing is by itself enough to make the close
+    // orderly, which the same measurement shows
+    ::shutdown(fd, SHUT_WR);
 }
 
 class BuiltinServer final : public IHttpServer {

@@ -234,6 +234,13 @@ ratelimit:
 - 定位：默认驱动与参考实现。手写 HTTP/1.1 解析器（请求行/头/chunked 剥壳全在
   仓内），零第三方依赖；消息边界校验、出站头过滤等安全侧辅助与另三驱动共享
   `drivers/common.h` 同一套实现。
+- 关连接：先 `shutdown(SHUT_WR)` 再 `close()`。接收缓冲里还有未读字节时（客户端还在
+  上传、请求已被拒且只排空到 `drain_limit` 就放弃），裸 `close()` 会让 Linux 发 RST
+  而不是 FIN。已写出的响应字节两种情况下都能到达客户端（对端接收缓冲里的数据会先于
+  reset 交付），所以这不是"响应丢了"；差别在于**收到 reset 的客户端分不清正常结束与
+  被截断**，而没有 Content-Length 的响应这两者就是同一串字节。半关本身就足以让关闭
+  变得有序，不需要 lingering 排空循环 —— 两点都在本机内核上实测过。beast 走
+  `socket::shutdown` 早就是有序的。
 - 模型：thread-per-connection 同步模型。每连接一个 512KiB 栈的分离线程，协程
   经 `sync_wait_pumping` 桥接（body 的阻塞读切回连接线程执行，不占共享池）；
   并发上限即 `http.max_connections`，`http.io_threads` 对它无意义（显式配置时

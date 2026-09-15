@@ -171,6 +171,12 @@ Task<HttpResponse> test_handler(HttpRequest req) {
         resp.small_body = req.body ? "hasbody" : "nobody";
         co_return resp;
     }
+    if (req.path == "/hdrs") {
+        // exactly what L1 parsed, one "name: value" per line: for tests that have to see
+        // the header list itself rather than its effect
+        for (auto& [k, v] : req.headers.items()) resp.small_body += k + ": " + v + "\n";
+        co_return resp;
+    }
     if (req.path == "/sum") co_return co_await consume_and_sum(std::move(req), std::move(resp));
     if (req.path == "/disc") {
         try {
@@ -918,6 +924,55 @@ void check_framing_rejected(const std::string& driver, const std::string& raw) {
     // If the embedded GET /small were answered independently, it would get 200 + "nobody"
     auto r2 = c.read_response();
     CHECK(!(r2.ok && r2.status == 200 && r2.body == "nobody"));
+}
+
+// obs-fold (RFC 9112 §5.2): a header line starting with SP/HTAB continues the previous
+// field. The invariant every driver must hold is that such a line never becomes a header
+// of its own -- that is precisely the disagreement a folding proxy in front would turn
+// into request smuggling. builtin used to break it: a continuation carrying a colon
+// parsed into a header named with a leading space.
+// The RFC gives a server two conformant dispositions and the drivers split between them:
+// the hand-written parsers (builtin, seastar) reject the message with 400, upstream
+// httplib rejects it too, and beast folds the continuation into the previous value. All
+// three are safe; what is asserted here is the invariant, plus the rejection on the two
+// parsers this repo owns
+TEST(http_driver_obs_fold_never_becomes_its_own_header) {
+    for_each_driver([](const std::string& d) {
+        for (const char* continuation : {" X-Injected: yes\r\n", "\tX-Injected: yes\r\n", " continued\r\n"}) {
+            TestServer ts(d);
+            Client c(ts.port);
+            c.send_str("GET /hdrs HTTP/1.1\r\nHost: t\r\nX-Test: a\r\n" + std::string(continuation) + "\r\n");
+            auto r = c.read_response();
+            if (r.ok && r.status == 200) {
+                // folded: the continuation joined the previous value, so no line of the
+                // echoed header list starts with the injected name
+                for (size_t pos = 0; pos < r.body.size();) {
+                    size_t eol = r.body.find('\n', pos);
+                    if (eol == std::string::npos) eol = r.body.size();
+                    CHECK(r.body.compare(pos, 10, "X-Injected") != 0);
+                    pos = eol + 1;
+                }
+            } else {
+                CHECK(!r.ok || r.status >= 400);
+            }
+            // the parsers in this repo reject, with the explanation the RFC asks for
+            if (d == "builtin" || d == "seastar") {
+                CHECK(r.ok);
+                CHECK_EQ(r.status, 400);
+                CHECK(r.body.find("Obsolete line folding") != std::string::npos);
+            }
+        }
+    });
+}
+
+// A folded continuation must not smuggle a whole request either
+TEST(http_driver_obs_fold_does_not_smuggle) {
+    for_each_driver([](const std::string& d) {
+        check_framing_rejected(d,
+                               "POST /sum HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n"
+                               " Content-Length: 44\r\n\r\n"
+                               "GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+    });
 }
 
 TEST(http_driver_rejects_cl_te_conflict) {

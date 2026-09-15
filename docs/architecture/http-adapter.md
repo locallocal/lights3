@@ -339,6 +339,15 @@ ratelimit:
    前置条件）、`http.max_header_size`、连接上限、IPv4/IPv6 双栈在四驱动同
    语义；httplib 的两处上游残留（单行头上限、未注册方法）以 §3.2 已知降级
    显式声明。
+   **obs-fold**（RFC 9112 §5.2：以 SP/HTAB 开头的续行）是这条契约里唯一允许
+   分歧的地方，因为 RFC 本身给了服务端两种合规处置：自写解析器的 builtin 与
+   seastar **以 400 拒绝整条消息**（附"Obsolete line folding is not supported."），
+   httplib 的上游同样拒绝，beast 的上游则把续行**折进前一个头的值**。三者都安全，
+   不变式是统一的：**续行永远不会变成一个独立的头**——正是这一点上前置代理与本
+   跳的分歧才构成走私。builtin 曾经破坏过它（带冒号的续行会解析成一个名字带前导
+   空格的头，于是 `parse_body_framing` 看不见那个重复的 Content-Length，消息按
+   `CL: 0` 定界，其后的字节被当作下一个流水线请求应答），
+   `http_driver_obs_fold_*` 两条用例守着。
 
 契约用一套**驱动一致性测试**（parametrize 所有已编译 driver 跑同一组用例：
 大文件 PUT/GET、range、100-continue、中途断连、并发 shutdown）保证行为一致。

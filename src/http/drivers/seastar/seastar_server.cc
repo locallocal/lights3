@@ -633,6 +633,9 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
             // Headers
             // malformed header block (counted as a parse error)
             bool bad = false;
+            // obs-fold: rejected with an explanatory 400 like a framing violation, not by
+            // closing silently
+            bool folded = false;
             // peer gone / timed out mid-headers (not a parse error)
             bool closed = false;
             size_t header_bytes = 0;
@@ -642,6 +645,13 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
                     break;
                 }
                 if (line.empty()) break;
+                // obs-fold (RFC 9112 §5.2), same reasoning as the builtin parser: a
+                // continuation line is rejected rather than folded, so a folding proxy in
+                // front can never end up reading a different message than this parser does
+                if (line.front() == ' ' || line.front() == '\t') {
+                    folded = true;
+                    break;
+                }
                 header_bytes += line.size();
                 if (header_bytes > core->cfg.max_header_size) {
                     bad = true;
@@ -661,6 +671,13 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
                 req.headers.add(std::move(k), std::move(v));
             }
             if (closed) break;
+            if (folded) {
+                core->counters.parse_error();
+                auto bad_fold = driver::bad_request_response("Obsolete line folding is not supported.");
+                co_await write_response(conn, bad_fold, req.method == "HEAD", /*keep=*/false, core->cfg.io_chunk_size,
+                                        shard);
+                break;
+            }
             if (bad) {
                 core->counters.parse_error();
                 break;

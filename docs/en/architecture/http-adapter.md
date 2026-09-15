@@ -427,6 +427,19 @@ were added for the problems the baseline turned up. Numbers in
    the same semantics on all four drivers; httplib's two upstream residuals
    (single-line header cap, unregistered methods) are declared as known
    degradations in §3.2.
+   **obs-fold** (RFC 9112 §5.2: a continuation line starting with SP/HTAB) is the
+   one place this contract permits a difference, because the RFC itself gives a
+   server two conformant dispositions: the hand-written parsers (builtin,
+   seastar) **reject the whole message with 400** (carrying "Obsolete line
+   folding is not supported."), httplib's upstream rejects it as well, and
+   beast's upstream **folds the continuation into the previous field value**. All
+   three are safe, and the invariant is uniform: **a continuation never becomes a
+   header of its own** — that disagreement between a proxy in front and this hop
+   is exactly what smuggling is made of. builtin used to break it (a continuation
+   carrying a colon parsed into a header named with a leading space, so
+   `parse_body_framing` never saw the duplicate Content-Length, the message framed
+   as `CL: 0`, and the bytes after it were answered as the next pipelined
+   request); the `http_driver_obs_fold_*` cases guard it.
 
 The contract is guaranteed by a **driver conformance test** suite (parameterize
 all compiled drivers over the same set of cases: large-file PUT/GET, range,

@@ -333,7 +333,14 @@ were added for the problems the baseline turned up. Numbers in
 - Body adaptation: httplib's `ContentReader` is a push model; a bounded buffer
   queue (`BlockQueue`, single-producer single-consumer, byte-capped by
   `http.body_queue_cap`, default 256KiB) flips it into the pull-model
-  `BodyReader`.
+  `BodyReader`. The push side needs a thread of its own (the request thread is
+  busy running the handler); those come from the driver's `PumpPool`, sized to
+  the request-thread count `max(io_threads, 8)` so a pump never queues for a
+  worker (a request thread drives at most one pump at a time). It used to be a
+  fresh `std::thread` **per body-carrying request** -- a create and a join on
+  every PUT, plus a default 8MiB of stack address space each; reusing them is
+  worth +20% on 16 KiB PUTs
+  ([performance-baseline.md](../development/performance-baseline.md) §4.5).
 - Positioning: for functional verification, low-concurrency scenarios, and quick
   troubleshooting; not the performance path.
 - **Known degradations** (upstream API limits; the driver conformance tests

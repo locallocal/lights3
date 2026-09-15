@@ -276,7 +276,11 @@ ratelimit:
   `finish()` 结束泵循环。
 - Body 适配：httplib 的 `ContentReader` 是推模型，用一个有界缓冲队列
   （`BlockQueue`，单生产者单消费者，按字节封顶 `http.body_queue_cap`，默认
-  256KiB）翻转成拉模型的 `BodyReader`。
+  256KiB）翻转成拉模型的 `BodyReader`。推那一侧要有自己的线程（请求线程正在跑
+  handler），这些线程来自驱动内的 `PumpPool`，大小取请求线程数 `max(io_threads, 8)`：
+  一个请求线程同时只驱动一个泵，所以泵永远不必排队等 worker。此前是**每个带 body 的
+  请求现起一个 `std::thread`**（每次 PUT 一次创建一次 join，外加默认 8MiB 栈虚存），
+  换成复用后 16 KiB PUT +20%（[performance-baseline.md](../development/performance-baseline.md) §4.5）。
 - 定位：功能验证、低并发场景、快速排查问题时使用；不是性能路径。
 - **已知降级**（上游 API 限制，驱动一致性测试按此放行）：
   - `Expect: 100-continue` 无法延迟应答——上游只有"立即回 100 / 回 417 / 以

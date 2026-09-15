@@ -247,6 +247,24 @@ fill 的尾巴（≤16KiB），下一次 read 通常一次取空，`erase(0, 全
 巧合变成结构，见 [s3-protocol.md §2](../architecture/s3-protocol.md)。**后来者不必再
 测一遍。**
 
+### 4.5 R8：httplib 每个带 body 的请求一个 `std::thread`
+
+httplib 的推转拉需要第二个线程驱动 `ContentReader`（请求线程正在跑 handler）。这个线程
+原本是**每请求现起一个** `std::thread`：一次创建 + 一次 join，外加默认 8MiB 栈虚存。改成
+驱动内的固定 `PumpPool`，大小取请求线程数 `max(io_threads, 8)` —— 一个请求线程同时只驱动
+一个泵，泵永不排队等 worker。
+
+改前/改后两个二进制交错跑，`bench_matrix.sh --drivers httplib`，16 KiB、16 并发、10s、
+4 轮：
+
+| | PUT ops/s（四轮） | 均值延迟 | p99 |
+| --- | --- | --- | --- |
+| 改前 | 38.8 / 37.0 / 38.7 / 38.6k | 0.412–0.431 ms | ~0.50 ms |
+| 改后 | 47.0 / 45.2 / 46.6 / 46.4k | 0.340–0.353 ms | 0.26–0.34 ms |
+
+**PUT +20%**（中位 38.6 → 46.5k），均值延迟 −17%，p99 −40%。GET 无 body、不走泵，作为
+对照未变。注意 httplib 的定位仍是功能验证而非性能路径，这条只是把一处纯粹的浪费去掉。
+
 ## 5. 复现
 
 ```bash
@@ -267,4 +285,4 @@ scripts/bench_matrix.sh build-seastar/lights3 build-rel/lights3-ctl --drivers se
 | --- | --- | --- |
 | 2026-09-05 | §4.3 数据面优化（预取、缓冲池、sendfile、pumping、ResumeOn 快路径、per-bucket 指标去锁、beast 读缓冲预留） | 大对象 GET +14～52%，beast PUT 3.5～10× |
 | 2026-09-13 | beast 每线程 io_context、会话看门狗、内存 BIO TlsStream；PipelinedMd5 请求体 MD5 流水化（http-adapter.md §2.4 ⑩–⑬） | beast TLS GET 4 MiB +93%（与其他驱动持平），4 MiB PUT 四驱动 +12～55%，p50 7.2 → 6.2 ms |
-| 2026-09-15 | 请求尾部去锁 + `log.async` 默认开（§4.0–4.2）；aws-chunked 解帧直读（§4.3）；路由只解析一次（§4.4，性能上是阴性结果） | 64 并发 16 KiB：PUT +8.1%、GET +19.2%，GET p99 1.01 → 0.87 ms；128 MiB 分块 PUT +19%，与普通 body 持平 |
+| 2026-09-15 | 请求尾部去锁 + `log.async` 默认开（§4.0–4.2）；aws-chunked 解帧直读（§4.3）；路由只解析一次（§4.4，性能上是阴性结果）；httplib 泵线程池（§4.5） | 64 并发 16 KiB：PUT +8.1%、GET +19.2%，GET p99 1.01 → 0.87 ms；128 MiB 分块 PUT +19%，与普通 body 持平 |

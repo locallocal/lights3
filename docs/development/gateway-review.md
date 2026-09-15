@@ -25,7 +25,8 @@ R5（分块解帧改直读，实测见同文 §4.3，解帧开销 +18% → 持�
 R6（路由只解析一次；**性能上是阴性结果**，见同文 §4.4，保留是为了把授权与执行取同一条
 路由变成结构保证，由 `service_website_*` 三条用例守着）、R7（桶维度指标表改 LRU 淘汰 +
 不存在的桶不开系列，回归用例 `s3_metrics_bucket_table_evicts_coldest` 与
-`service_unknown_bucket_opens_no_metric_series`）。
+`service_unknown_bucket_opens_no_metric_series`）、R8（httplib 泵线程改固定池，
+PUT +20%，见同文 §4.5；回归用例 `http_driver_many_concurrent_bodies`）。
 
 等级：高＝可能损坏数据或绕过约束；中＝可被外部输入放大，或明显偏离 AWS 语义；
 低＝加固/一致性问题。
@@ -34,7 +35,6 @@ R6（路由只解析一次；**性能上是阴性结果**，见同文 §4.4，�
 
 | 编号 | 位置 | 等级 | 一句话 |
 | --- | --- | --- | --- |
-| R8 | `http/drivers/httplib/httplib_server.cc:343` | 低中 | 每个带 body 的请求 create+join 一个 `std::thread` |
 | R9 | `core/thread_pool.cc:52` | 低 | `backlog_` 无界，"有界队列 + 背压"的实际语义需要写清 |
 | R10 | `http/drivers/builtin/builtin_server.cc:493` | 低 | obs-fold 折行头未按 RFC 9112 §5.2 拒绝 |
 | R11 | `http/drivers/builtin/builtin_server.cc:768` | 低 | 关连接前未 `shutdown(SHUT_WR)`，极端情况客户端只看到 RST |
@@ -43,14 +43,6 @@ R6（路由只解析一次；**性能上是阴性结果**，见同文 §4.4，�
 | O1–O6 | 见 §4 | — | 纯性能项（SigV4 规范化、header 访问、id 生成、fsync、beast 每请求系统调用） |
 
 ## 3. 风险项
-
-### R8（低中）httplib 驱动每请求一个 pump 线程
-
-`httplib_server.cc:339-346`：每个带 body 的请求 `std::thread` create + 末尾
-`join`。默认 8MiB 栈虚存，创建/销毁约几十微秒，全压在 PUT 路径上。
-
-建议：pump 作业 post 到共享 `ThreadPool`（它本来就是为阻塞型工作准备的），或维护一个
-小的 pump 线程池。注意保持 `queue->cancel()` + join 的收尾语义。
 
 ### R9（低）ThreadPool 的 backlog 无界
 
@@ -145,7 +137,7 @@ R2 的 `stoull` 语义用一个三行程序即可确认（`-1` → 1844674407370
 
 ## 6. 建议的推进顺序
 
-1. 按等级顺延（R8 起）。O1–O6 是纯性能项，先照 §4.4 的办法做交错 A/B，别预设它们一定
+1. 按等级顺延（R9 起）。O1–O6 是纯性能项，先照 §4.4 的办法做交错 A/B，别预设它们一定
    测得出来。
 
 ## 6.5 顺带发现（不在原清单里）

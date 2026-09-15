@@ -898,16 +898,22 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // rules close both entrances at once, and reserved names (.sys) are only available to callers with
             // allow_reserved=true -- user requests never get that parameter
             if (!bucket.empty()) storage::validate_bucket_name(bucket);
-            {
-                Scope scope = bucket.empty() ? Scope::Service : key.empty() ? Scope::Bucket : Scope::Object;
-                if (const Route* r = match_route(req, scope)) {
-                    api_name = r->name;
-                    bool copy = req.headers.has("x-amz-copy-source");
-                    if (copy && r->name == "PutObject") api_name = "CopyObject";
-                    if (copy && r->name == "UploadPart") api_name = "UploadPartCopy";
-                }
-                backend_name = bucket.empty() ? std::string() : router_.backend_name(bucket);
+            // The route is resolved **once** here and carried through the gates below
+            // (api label, policy, table guard, tenant ownership) into route() itself.
+            // Each of those used to call match_route for itself -- a linear scan of the
+            // whole table, with a query lookup per candidate flag, five or six times per
+            // request for an answer that cannot change between them. The one place the
+            // key moves underneath it is the anonymous index rewrite, which re-resolves
+            // explicitly
+            Scope scope = scope_of(bucket, key);
+            const Route* route_r = match_route(req, scope);
+            if (route_r) {
+                api_name = route_r->name;
+                bool copy = req.headers.has("x-amz-copy-source");
+                if (copy && route_r->name == "PutObject") api_name = "CopyObject";
+                if (copy && route_r->name == "UploadPart") api_name = "UploadPartCopy";
             }
+            backend_name = bucket.empty() ? std::string() : router_.backend_name(bucket);
             // Set when the anonymous plane answered with a redirect before any object
             // access (RedirectAllRequestsTo / prefix RoutingRules):
             // routing and policy are skipped entirely
@@ -944,8 +950,11 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                     // GET/HEAD object routes (flag == "", Action::Read) qualify -- a query
                     // flag steers to a different operation (?uploadId is ListParts), and
                     // those stay authenticated-only along with all listing
-                    const Route* r = match_route(req, Scope::Object);
-                    if (!r || !r->flag.empty() || r->action != Action::Read)
+                    // The rewrite moved the key (and with it the scope), so this is the
+                    // one place the resolved route has to be taken again
+                    scope = scope_of(bucket, key);
+                    route_r = match_route(req, scope);
+                    if (!route_r || !route_r->flag.empty() || route_r->action != Action::Read)
                         throw S3Error(S3ErrorCode::AccessDenied, "Anonymous access is limited to object reads.");
                     // response-* overrides are refused for anonymous requests (AWS does the
                     // same): on a public bucket a crafted link could otherwise hang an
@@ -974,12 +983,10 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                 tenant_for_log = ident.tenant;
                 if (ident.policy) {
                     auto deny = [] { throw S3Error(S3ErrorCode::AccessDenied, "Access denied by credential policy."); };
-                    Scope scope = bucket.empty() ? Scope::Service : key.empty() ? Scope::Bucket : Scope::Object;
-                    const Route* r = match_route(req, scope);
                     // No matched route means no action to decide on: leave it to route() to return 405;
                     // unsupported methods are not a privilege-escalation surface anyway
-                    if (r) {
-                        if (!ident.policy->allows(bucket, key, r->action)) deny();
+                    if (route_r) {
+                        if (!ident.policy->allows(bucket, key, route_r->action)) deny();
                         // CopyObject / UploadPartCopy carry the source in a header, bypassing the check above:
                         // do a separate read authorization for the source bucket+key, so policy credentials cannot use
                         // copy to read data outside the allowlist
@@ -992,18 +999,18 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
 #ifdef LIGHTS3_TABLES
                 // Table-bucket guard (docs/architecture/s3-tables-design.md §8.1): the reserved catalog
                 // prefix is read-only through the S3 plane
-                if (table_guard_ && !bucket.empty() && !key.empty())
-                    if (const Route* r = match_route(req, Scope::Object)) table_guard_->check(bucket, key, r->name);
+                // (bucket and key both non-empty means scope is Object, which is what this
+                // gate used to re-resolve for itself)
+                if (table_guard_ && route_r && !bucket.empty() && !key.empty())
+                    table_guard_->check(bucket, key, route_r->name);
 #endif
                 // Tenant ownership (docs/architecture/multi-tenancy.md §4.3): a tenant credential is
                 // confined to the buckets its tenant owns, on top of its policy. Service
                 // scope (ListBuckets) filters in the handler instead. Decided on the
                 // verify-time snapshot like the policy; the owner table is a snapshot too
                 if (!ident.tenant.empty() && tenants_ && !bucket.empty()) {
-                    Scope scope = key.empty() ? Scope::Bucket : Scope::Object;
-                    const Route* r = match_route(req, scope);
-                    if (r) {
-                        bool creating = scope == Scope::Bucket && req.method == "PUT" && r->flag.empty();
+                    if (route_r) {
+                        bool creating = scope == Scope::Bucket && req.method == "PUT" && route_r->flag.empty();
                         co_await require_tenant_bucket(bucket, ident.tenant, creating);
                         if (auto src = req.headers.get("x-amz-copy-source")) {
                             co_await require_tenant_bucket(handlers::parse_copy_source(*src).first, ident.tenant,
@@ -1027,9 +1034,9 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                 std::chrono::milliseconds request_timeout(request_timeout_ms_.load(std::memory_order_relaxed));
                 route_start = std::chrono::steady_clock::now();
                 if (request_timeout.count() > 0)
-                    resp = co_await with_timeout(route(req, bucket, key, auth), request_timeout, req_src);
+                    resp = co_await with_timeout(route(req, bucket, key, auth, route_r), request_timeout, req_src);
                 else
-                    resp = co_await std::move(route(req, bucket, key, auth).with_cancel(req_src.token()));
+                    resp = co_await std::move(route(req, bucket, key, auth, route_r).with_cancel(req_src.token()));
                 route_end = std::chrono::steady_clock::now();
                 // Object-level website redirect (docs/usage/static-website.md §5.1): on the
                 // anonymous plane, x-amz-website-redirect-location turns the response into a
@@ -1376,13 +1383,12 @@ std::span<const S3Service::Route> S3Service::route_table() {
 }
 
 Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bucket, std::string key,
-                                          const RequestAuth& auth) {
+                                          const RequestAuth& auth, const Route* r) {
     // The blocklist goes first only to give known subresources a clearer error message; the structural defenses
     // are the per-route query allowlist below (§3.5) and the request-header check (§3.4)
     reject_unsupported_subresource(req);
     reject_unsupported_headers(req);
-    Scope scope = bucket.empty() ? Scope::Service : key.empty() ? Scope::Bucket : Scope::Object;
-    if (const Route* r = match_route(req, scope)) {
+    if (r) {
         // Allowlist (§3.5): a query key outside this route's list -> 501. Under a blocklist model, any omission
         // silently degrades into "read/write the whole object" (?attributes returns the object body, ?partNumber
         // returns the whole object, response-* gets swallowed); 501 is at least honest
@@ -1392,13 +1398,15 @@ Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bu
     // 405 must carry Allow (RFC 9110 §15.5.6): the answer is the other methods in the same
     // scope that would also match this request's query -- the list comes from the dispatch table itself, so it cannot
     // drift from it
+    // Cold path only, so the table scan here stays
+    Scope scope = scope_of(bucket, key);
     std::string allow;
-    for (auto& r : route_table()) {
-        if (r.scope != scope || !flag_matches(req, r.flag)) continue;
+    for (auto& cand : route_table()) {
+        if (cand.scope != scope || !flag_matches(req, cand.flag)) continue;
         // multiple routes per method listed once
-        if (allow.find(r.method) != std::string::npos) continue;
+        if (allow.find(cand.method) != std::string::npos) continue;
         if (!allow.empty()) allow += ", ";
-        allow += r.method;
+        allow += cand.method;
     }
     // Driver/upstream semantics where HEAD is served by GET routes: listing GET lists HEAD along with it
     if (allow.find("GET") != std::string::npos && allow.find("HEAD") == std::string::npos) allow += ", HEAD";

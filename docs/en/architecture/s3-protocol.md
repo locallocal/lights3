@@ -56,6 +56,16 @@ Content-Length/Transfer-Encoding â†’ 411 `MissingContentLength`; `list-type=3` â
 ...
 ```
 
+`dispatch` matches the table **once**: it resolves a `Route*` as soon as (bucket, key) are
+known and hands that same pointer to the api label, the per-credential policy, the table
+guard, tenant ownership and `route()` itself. Each of those gates used to call
+`match_route` for itself, scanning the table five or six times per request -- and, more to
+the point, the authorization decision and the handler that actually ran agreed only by
+coincidence rather than by construction. The one thing that invalidates the resolved route
+is the anonymous website index rewrite (the key moves, and the scope with it), which
+re-resolves explicitly: skip that and `GET /site/` would run the Bucket-scope ListObjects
+route, i.e. anonymous bucket listing (the three `service_website_*` cases guard it).
+
 ## 3. AWS Signature V4 Authentication
 
 Implemented in-house (the protocol is public and stable; avoids pulling in a whole SDK just for signature verification); code lives in `src/s3/auth/`.

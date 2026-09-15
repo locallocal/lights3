@@ -21,7 +21,9 @@ R4（请求尾部的进程级锁与默认同步日志，`log.async` 已默认开
 [performance-baseline.md](performance-baseline.md) §4.0–4.2；回归用例
 `http_driver_shutdown_cuts_idle_keepalive_at_once` 与 `ratelimit_*` 两条）、
 R5（分块解帧改直读，实测见同文 §4.3，解帧开销 +18% → 持平；回归用例
-`sigv4_chunked_direct_read_*` 与 `sigv4_chunked_zero_length_read_is_not_a_truncation`）。
+`sigv4_chunked_direct_read_*` 与 `sigv4_chunked_zero_length_read_is_not_a_truncation`）、
+R6（路由只解析一次；**性能上是阴性结果**，见同文 §4.4，保留是为了把授权与执行取同一条
+路由变成结构保证，由 `service_website_*` 三条用例守着）。
 
 等级：高＝可能损坏数据或绕过约束；中＝可被外部输入放大，或明显偏离 AWS 语义；
 低＝加固/一致性问题。
@@ -30,7 +32,6 @@ R5（分块解帧改直读，实测见同文 §4.3，解帧开销 +18% → 持�
 
 | 编号 | 位置 | 等级 | 一句话 |
 | --- | --- | --- | --- |
-| R6 | `s3/service.cc:903` 等 | 中 | 每请求 4–6 次路由表全扫描 |
 | R7 | `s3/metrics.cc:27` | 中 | 桶维度指标表满了不淘汰，随机桶名可把真实桶挤进 `_other` |
 | R8 | `http/drivers/httplib/httplib_server.cc:343` | 低中 | 每个带 body 的请求 create+join 一个 `std::thread` |
 | R9 | `core/thread_pool.cc:52` | 低 | `backlog_` 无界，"有界队列 + 背压"的实际语义需要写清 |
@@ -41,21 +42,6 @@ R5（分块解帧改直读，实测见同文 §4.3，解帧开销 +18% → 持�
 | O1–O6 | 见 §4 | — | 纯性能项（SigV4 规范化、header 访问、id 生成、fsync、beast 每请求系统调用） |
 
 ## 3. 风险项
-
-### R6（中）每请求多次路由表全扫描
-
-`match_route`（`service.cc:1198`）是 35 条表项的线性扫描，且每条都要
-`flag_matches` → `query_has`（对 query 数组线性查找）。dispatch 里它被调用于：
-api 名判定（`service.cc:903`）、匿名 website 判定（947）、policy 判定（978）、
-表桶守卫（996）、租户判定（1004），`route()` 里再一次（1385），405 分支还要再
-全扫一遍拼 Allow。加上 `reject_unsupported_subresource`（24 个子资源 ×
-`query_has`，`service.cc:311`）和 `enforce_query_whitelist`。
-
-单次都不贵，但这是每个请求都付、且完全冗余的固定开销。
-
-建议：dispatch 在拿到 bucket/key 后解析一次 `const Route*`，向下传递（policy、
-tenant、guard、route 复用同一个指针）；`flag_matches` 需要的 query 查找可以在
-`parse_target` 时顺手建一个小索引。
 
 ### R7（中）桶维度指标表满了不淘汰
 
@@ -169,10 +155,9 @@ R2 的 `stoull` 语义用一个三行程序即可确认（`-1` → 1844674407370
 
 ## 6. 建议的推进顺序
 
-1. **R6**（请求尾部的固定开销，改完跑一次
-   `scripts/bench_matrix.sh` 对照 [performance-baseline.md](performance-baseline.md)）；
-2. **R7**（可观测性自愈）；
-3. 其余按等级顺延；O1–O6 建议合并进第 1 步一起量。
+1. **R7**（可观测性自愈）；
+2. 其余按等级顺延。O1–O6 是纯性能项，先照 §4.4 的办法做
+   交错 A/B，别预设它们一定测得出来。
 
 ## 6.5 顺带发现（不在原清单里）
 

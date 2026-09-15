@@ -255,10 +255,17 @@ public:
     // route)
     static std::span<const Route> route_table();
     const Route* match_route(const http::HttpRequest& req, Scope scope) const;
+    // Which scope a (bucket, key) pair addresses. One definition: the four gates in
+    // dispatch each used to spell the nested conditional out again
+    static Scope scope_of(const std::string& bucket, const std::string& key) {
+        return bucket.empty() ? Scope::Service : key.empty() ? Scope::Bucket : Scope::Object;
+    }
 
 private:
-    Task<http::HttpResponse> route(http::HttpRequest& req, std::string bucket, std::string key,
-                                   const RequestAuth& auth);
+    // `r` is the route dispatch already resolved for this request (null = no match, i.e.
+    // 405): re-matching here would scan the table a sixth time for the same answer
+    Task<http::HttpResponse> route(http::HttpRequest& req, std::string bucket, std::string key, const RequestAuth& auth,
+                                   const Route* r);
 
     // handlers/buckets.cc
     Task<http::HttpResponse> list_buckets(const RequestAuth& auth);

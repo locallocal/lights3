@@ -233,12 +233,31 @@ public:
                     co_await finish_chunk();
                     continue;
                 }
-                if (buf_.empty() && !co_await fill()) malformed_body("truncated chunk data");
-                size_t n = std::min({out.size(), buf_.size(), static_cast<size_t>(chunk_remaining_)});
-                std::memcpy(out.data(), buf_.data(), n);
-                if (chunk_hash_) chunk_hash_->update(std::span(reinterpret_cast<const uint8_t*>(buf_.data()), n));
+                // A zero-length destination would otherwise read 0 from the inner reader
+                // and be mistaken for a truncated body
+                if (out.empty()) co_return 0;
+                size_t n;
+                if (buf_.empty()) {
+                    // Nothing buffered: read the chunk's data straight into the caller's
+                    // buffer. Routing payload through buf_ costs a copy in and a memmove
+                    // out, and -- worse -- caps every read at the fill buffer's 16KiB no
+                    // matter how much the caller asked for: the drivers ask for
+                    // io_chunk_size (64KiB), so a MiB of body took four times the
+                    // coroutine round trips it needed to. Only the framing (chunk headers,
+                    // the trailer section) goes through buf_ now
+                    size_t want = std::min<uint64_t>(out.size(), chunk_remaining_);
+                    n = co_await inner_->read(out.subspan(0, want));
+                    if (n == 0) malformed_body("truncated chunk data");
+                } else {
+                    // Payload left over from the fill that parsed this chunk's header
+                    n = std::min({out.size(), buf_.size(), static_cast<size_t>(chunk_remaining_)});
+                    std::memcpy(out.data(), buf_.data(), n);
+                    buf_.erase(0, n);
+                }
+                // The delivered bytes are the same either way, so both digests read them
+                // from the caller's buffer
+                if (chunk_hash_) chunk_hash_->update(std::span(reinterpret_cast<const uint8_t*>(out.data()), n));
                 for (auto& d : trailer_digests_) d.update(std::span<const std::byte>(out.data(), n));
-                buf_.erase(0, n);
                 chunk_remaining_ -= n;
                 delivered_ += n;
                 // Verification is not tied to EOF: after delivering the declared length, synchronously finish the

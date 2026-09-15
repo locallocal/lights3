@@ -171,9 +171,11 @@
   曾慢 15%，合并小缓冲后消除，见 http-adapter.md §2.4 ⑫）。
 - 不需要再留后续项：todo 中"性能基线跑出的新问题"一节已随之删除。
 
-## 4. 2026-09-15：请求尾部的固定开销（访问日志与进程级锁）
+## 4. 2026-09-15：走查条目的性能收口
 
-走查条目 R4。四处"每请求都付"的开销：`Logger::access()` 的进程级互斥、默认**同步**
+### 4.0 R4：请求尾部的固定开销（访问日志与进程级锁）
+
+四处"每请求都付"的开销：`Logger::access()` 的进程级互斥、默认**同步**
 的访问日志、限流器的键拷贝与第二次加锁、builtin 每请求两次全局锁 + 一次 `std::set`
 节点分配。前三项在 16 并发下都落在噪声里；**真正的大头是同步日志**。
 
@@ -206,6 +208,28 @@
 per-connection 原子位）单独测不出来 —— 限流默认关闭时根本不进那段代码，另两处每请求
 各几百纳秒，对 ~6 µs 的请求是噪声。它们照样改了：代价为零，且争用随核数与并发增长。
 
+### 4.3 R5：aws-chunked 解帧的中转缓冲
+
+`ChunkedSigV4BodyReader` 过去把**全部** body 先读进自己的 16KiB 栈缓冲再 memcpy 给调用
+方，于是单次 `read()` 最多吐 16KiB —— 驱动一次要 64KiB（`io_chunk_size`），一 MiB 的
+body 要跑四倍的协程往返，每个字节还多一次 memcpy 加一次 `erase(0,n)` 的 memmove。改成
+chunk 数据直接读进调用方的 span，只有框架（chunk 头、trailer 段）还走暂存区。
+
+方法：同一台机器、memory 后端 + builtin + auth 关闭，同样 128MiB 的 body 各传 6 次，
+一次普通 body、一次 aws-chunked（64KiB 一个 chunk）；比的是**同一轮内**两者的比值，
+避开机器漂移。
+
+| | 普通 body（中位） | aws-chunked（中位） | 分块/普通 |
+| --- | --- | --- | --- |
+| 改前 | 0.198 s | 0.234 s | **1.185** |
+| 改后 | 0.204 s | 0.196 s | **0.96**（噪声内持平） |
+
+分块路径吞吐 575 → 686 MB/s（**+19%**），解帧开销从 +18% 降到量不出来。
+
+"buf_ 改读游标去掉 erase" 的另一半**没做**：直读之后 `buf_` 只剩每个 chunk 头那次
+fill 的尾巴（≤16KiB），下一次 read 通常一次取空，`erase(0, 全部)` 本就是 O(1)；上表
+显示剩余开销已在噪声内，再加一层游标是拿复杂度换不出东西。
+
 ## 5. 复现
 
 ```bash
@@ -226,4 +250,4 @@ scripts/bench_matrix.sh build-seastar/lights3 build-rel/lights3-ctl --drivers se
 | --- | --- | --- |
 | 2026-09-05 | §4.3 数据面优化（预取、缓冲池、sendfile、pumping、ResumeOn 快路径、per-bucket 指标去锁、beast 读缓冲预留） | 大对象 GET +14～52%，beast PUT 3.5～10× |
 | 2026-09-13 | beast 每线程 io_context、会话看门狗、内存 BIO TlsStream；PipelinedMd5 请求体 MD5 流水化（http-adapter.md §2.4 ⑩–⑬） | beast TLS GET 4 MiB +93%（与其他驱动持平），4 MiB PUT 四驱动 +12～55%，p50 7.2 → 6.2 ms |
-| 2026-09-15 | 请求尾部去锁 + `log.async` 默认开（§4） | 64 并发 16 KiB：PUT +8.1%、GET +19.2%，GET p99 1.01 → 0.87 ms |
+| 2026-09-15 | 请求尾部去锁 + `log.async` 默认开（§4.0–4.2）；aws-chunked 解帧直读（§4.3） | 64 并发 16 KiB：PUT +8.1%、GET +19.2%，GET p99 1.01 → 0.87 ms；128 MiB 分块 PUT +19%，与普通 body 持平 |

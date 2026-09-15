@@ -102,6 +102,12 @@ chunk 头和 trailer 签名行被解析后丢弃，`x-amz-decoded-content-length
 被 RAII 清理，不会留下半个对象。
 
 Trailing checksum 的分工：头部声明的 `Content-MD5` / `x-amz-checksum-*` 由
+解帧只碰**框架**：chunk 头与 trailer 段走装饰器自己的 16KiB 暂存区，chunk 数据则直接
+读进调用方给的缓冲（`read()` 的 span），既不多一次 memcpy，也不再把每次 read 压到
+16KiB —— 驱动一次要 `io_chunk_size`（64KiB），过去要跑四趟协程往返才填满。实测
+128MiB PUT 的解帧开销由 +18% 降到与普通 body 持平
+（[performance-baseline.md](../development/performance-baseline.md) §4.3）。
+
 `ChecksumVerifyingReader`（checksum_guard.h）在 chunked 剥壳装饰器**之外**
 校验；`x-amz-trailer` 声明的校验和的期望值到 payload 结束才出现，因此在
 `ChunkedSigV4BodyReader` **内部**边解码边累积摘要、解析出 trailer 后比对，

@@ -112,7 +112,15 @@ layer consumes this decorated reader. On verification failure, `complete()` thro
 by RAII, leaving no half-written object behind.
 
 Division of labor for trailing checksums: header-declared `Content-MD5` /
-`x-amz-checksum-*` are verified by `ChecksumVerifyingReader` (checksum_guard.h)
+`x-amz-checksum-*` are verified by De-framing only touches the **framing**: chunk headers and the trailer section go through
+the decorator's own 16KiB staging buffer, while chunk data is read straight into the buffer
+the caller passed to `read()`. That saves a copy and, more importantly, stops capping every
+read at 16KiB -- the drivers ask for `io_chunk_size` (64KiB), so a MiB of body used to take
+four times the coroutine round trips it needed. Measured on a 128MiB PUT, the de-framing
+overhead went from +18% to parity with a plain body
+([performance-baseline.md](../development/performance-baseline.md) §4.3).
+
+`ChecksumVerifyingReader` (checksum_guard.h)
 **outside** the chunked de-framing decorator; for checksums declared via
 `x-amz-trailer` the expected value only arrives after the payload, so
 `ChunkedSigV4BodyReader` accumulates digests over the decoded stream **inside**

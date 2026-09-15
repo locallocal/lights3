@@ -43,12 +43,15 @@ void ThreadPool::post(std::function<void()> fn) {
     fn();
 }
 
-void ThreadPool::enqueue_bounded(std::function<void()> fn) {
+void ThreadPool::enqueue_deferrable(std::function<void()> fn) {
     // same as post: clock reads stay out of the critical section
     auto now = Clock::now();
     {
         std::lock_guard lk(m_);
         if (stopping_) throw std::runtime_error("ThreadPool: schedule after join");
+        // Over capacity the task is deferred, never refused: the timestamp is taken here
+        // either way, so the wait histogram charges the deferred time to the task that
+        // waited it
         if (queue_.size() >= capacity_)
             backlog_.push_back({std::move(fn), now});
         else
@@ -177,7 +180,7 @@ bool ThreadPool::ScheduleAwaiter::suspend_impl(std::coroutine_handle<> h) {
         return false;
     }
     try {
-        p.enqueue_bounded([s] {
+        p.enqueue_deferrable([s] {
             if (!s->claimed.exchange(true, std::memory_order_acq_rel)) s->h.resume();
         });
     } catch (...) {

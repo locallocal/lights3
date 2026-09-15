@@ -170,10 +170,16 @@ L2 逻辑，直到下一个挂起点。这省掉一次线程切换，代价就�
 | 入口 | 容量 | 用途 |
 | --- | --- | --- |
 | `post(fn)` | 无界 | 续体投递（executor post）：不可失败也不可等待，丢失续体等于挂死请求 |
-| `co_await schedule(token)` | 有界（默认 4096） | 业务切入池线程：队列满时任务进 backlog 等待列表，worker 腾出空位后按 FIFO 放行 |
+| `co_await schedule(token)` | **就绪**队列有界（默认 4096），入队本身不设限 | 业务切入池线程：就绪队列满时任务进 backlog 推迟启动，worker 腾出空位后按 FIFO 放行 |
 
-- **背压**：backlog 中的任务不占队列容量，但 `schedule()` 的协程保持挂起
-  ——相当于把压力传导回请求协程乃至 socket 读取，防止阻塞任务无限堆积；
+- **"有界"界的是就绪数，不是入队数**：超出 `queue_capacity` 的任务被**推迟**而不是
+  被拒绝，backlog 自身没有上限。真正的硬上限在别处——同一时刻能挂在 `schedule()`
+  上的协程数，即准入闸门 `runtime.max_inflight_requests` 乘以每请求的扇出，加上后台
+  作业；一条 backlog 记录是一个 `std::function`，几十字节，相对这些请求本就持有的
+  协程帧与 HTTP 缓冲不是约束项。所以这不是内存风险，而是"排队变长"，并且看得见：
+  `lights3_pool_backlogged` 与等待直方图（推迟的那段也计入）就是信号。
+- **背压**：backlog 中的任务不占就绪容量，但 `schedule()` 的协程保持挂起
+  ——压力经此传导回请求协程乃至 socket 读取；
 - **指标**（`stats()`，见 [s3-protocol.md](s3-protocol.md) §7）：
   队列深度、backlog 长度、完成计数经 `/-/metrics` 暴露，是容量调优的
   主要信号；入队→开跑等待时长直方图（<1ms / <10ms / <100ms / <1s / ≥1s）
@@ -322,7 +328,8 @@ duostore-data-rados-design.md §4.2）：嵌套的阻塞 acquire 会在全员各
 | rados `buffer_sem_` | `rados_buffer_total` 写缓冲总额度：首份阻塞 acquire（背压），双缓冲第二份 try_acquire（见 [duostore-data-rados-design.md](storage/duostore-data-rados-design.md) §4.2） |
 
 此外：每连接串行处理（HTTP/1.1 pipelining 不并行执行）由 driver 保证；
-线程池的有界队列 + backlog（§3.1）是最底层的第二道闸门。
+线程池的就绪队列 + backlog（§3.1）是最底层的第二道闸门 —— 它调的是节奏而非上限，
+上限在上面的准入闸门。
 
 ## 7. 后台任务的生命期
 

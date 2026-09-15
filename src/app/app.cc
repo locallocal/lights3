@@ -220,8 +220,7 @@ void Application::start_server() {
     // an entire request coroutine chain inline on the releasing call stack
     pool_exec_ = std::make_shared<ThreadPoolExecutor>(*pool_);
     inflight_ = std::make_shared<AsyncSemaphore>(cfg_.runtime.max_inflight_requests, pool_exec_.get());
-    // Observability for the admission gate and the timer thread
-    //: under load testing, "stuck at admission" vs
+    // Observability for the admission gate and the timer thread: under load testing, "stuck at admission" vs
     // "stuck in the pool" and "how long the timer was blocked by a slow
     // callback" can all be read straight from /-/metrics
     admission_counters_ = std::make_shared<http::AdmissionCounters>();

@@ -232,8 +232,7 @@ public:
     SocketBodyReader(BodyState* st, std::optional<uint64_t> len, PumpExecutor* conn_exec)
         : st_(st), len_(len), conn_exec_(conn_exec) {}
     Task<size_t> read(std::span<std::byte> buf) override {
-        // The blocking recv switches back to the connection's own thread
-        //: the handler coroutine chain runs on the
+        // The blocking recv switches back to the connection's own thread: the handler coroutine chain runs on the
         // shared ThreadPool, and recv-ing in place would pin pool threads on
         // slow clients — 16 slow uploads could occupy every pool thread; the
         // connection thread is idling in sync_wait_pumping at this moment

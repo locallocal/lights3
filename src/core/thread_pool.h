@@ -115,12 +115,10 @@ private:
 
     mutable std::mutex m_;
     std::condition_variable cv_;
-    // Continuation delivery (post) and blocking tasks (schedule) use separate queues
-    //: post's contract is "may neither fail nor wait", and with a
-    // shared 4096 queue a continuation would queue behind 4096 IOs under pressure.
-    // Workers always drain the continuation queue first — continuations are existing
-    // work that already yielded the thread, hence naturally higher priority
-    // post: unbounded
+    // Continuation delivery (post) and blocking tasks (schedule) use separate queues: post's contract is "may neither
+    // fail nor wait", and with a shared 4096 queue a continuation would queue behind 4096 IOs under pressure. Workers
+    // always drain the continuation queue first — continuations are existing work that already yielded the thread,
+    // hence naturally higher priority post: unbounded
     std::deque<Item> cont_queue_;
     // schedule: bounded by capacity_
     std::deque<Item> queue_;

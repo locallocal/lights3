@@ -212,9 +212,8 @@ struct PartInfo {
     std::string checksum_value{};
 };
 
-// Client-declared, gateway-verified checksum accompanying an UploadPart body
-//: persisted with the part record so complete can compute the
-// composite ("-N") object checksum from verified values only
+// Client-declared, gateway-verified checksum accompanying an UploadPart body: persisted with the part record so
+// complete can compute the composite ("-N") object checksum from verified values only
 struct PartChecksum {
     // uppercase wire name: CRC32 / CRC32C / SHA1 / SHA256
     std::string algorithm;

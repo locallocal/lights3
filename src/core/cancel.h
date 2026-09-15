@@ -105,10 +105,9 @@ public:
 
     // Deregister: on return, the callback is guaranteed to never run again — if
     // cancellation is currently firing (the callback batch runs outside the lock),
-    // block until the batch finishes, same semantics as TimerQueue::cancel
-    //. Self-deregistration on the firing thread (from inside a
-    // callback) does not wait, preventing self-deadlock; while waiting, do not hold
-    // locks the callbacks need
+    // block until the batch finishes, same semantics as TimerQueue::cancel. Self-deregistration on the firing thread
+    // (from inside a callback) does not wait, preventing self-deadlock; while waiting, do not hold locks the callbacks
+    // need
     void remove_callback(uint64_t id) {
         if (id == 0) return;
         std::unique_lock lk(m_);

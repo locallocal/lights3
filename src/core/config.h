@@ -134,8 +134,7 @@ struct HttpConfig {
     // extra certificates selected by SNI
     std::vector<TlsSniEntry> tls_sni;
     // The builtin driver is thread-per-connection, so io_threads is meaningless for
-    // it; when explicitly configured, WARN at startup instead of silently ignoring
-    //. Set by the parser
+    // it; when explicitly configured, WARN at startup instead of silently ignoring. Set by the parser
     bool io_threads_set = false;
     // ---- Shutdown/backpressure knobs: formerly hard-coded once per driver ----
     // max request body drained before returning an error

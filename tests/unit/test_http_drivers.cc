@@ -327,15 +327,20 @@ struct Client {
         fd = -1;
     }
 
-    void send_str(std::string_view s) {
+    void send_str(std::string_view s) { CHECK(try_send(s)); }
+
+    // Non-asserting variant: for the cases where the server is expected to stop reading
+    // and the write is supposed to fail partway
+    bool try_send(std::string_view s) {
         const char* p = s.data();
         size_t left = s.size();
         while (left > 0) {
             ssize_t n = ::send(fd, p, left, MSG_NOSIGNAL);
-            CHECK(n > 0);
+            if (n <= 0) return false;
             p += n;
             left -= static_cast<size_t>(n);
         }
+        return true;
     }
 
     bool read_line(std::string& line) {
@@ -875,7 +880,12 @@ TEST(http_driver_many_concurrent_bodies) {
         std::atomic<int> ok{0};
         std::vector<std::thread> ts_threads;
         ts_threads.reserve(kClients);
-        for (int i = 0; i < kClients; ++i)
+        for (int i = 0; i < kClients; ++i) {
+            // Ramped rather than a simultaneous connect storm: httplib's upstream listen
+            // backlog is 5, and 24 SYNs at once get dropped and retried, which shows up as
+            // connections the server never reads. The uploads still overlap -- each is
+            // 200 KB, far longer than the 10ms spacing
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
             ts_threads.emplace_back([&, i] {
                 try {
                     Client c(ts.port);
@@ -902,6 +912,7 @@ TEST(http_driver_many_concurrent_bodies) {
                 } catch (...) {
                 }
             });
+        }
         for (auto& t : ts_threads) t.join();
         CHECK_EQ(ok.load(), kClients);
     });
@@ -972,6 +983,41 @@ TEST(http_driver_obs_fold_does_not_smuggle) {
                                "POST /sum HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n"
                                " Content-Length: 44\r\n\r\n"
                                "GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+    });
+}
+
+// A request whose body the server chose not to consume still gets its response, and the
+// connection still ends in order. The second half is what this pins: close() on a socket
+// whose receive queue holds unread bytes makes Linux send an RST instead of a FIN (checked
+// directly at the syscall level), and a client that sees a reset cannot tell an orderly
+// end from a truncated one -- for a response without a Content-Length they are the same
+// bytes. builtin half-closes before the fd goes away for that reason; beast already did.
+// The response bytes themselves survive either way, because data already queued in the
+// peer's receive buffer is delivered before the reset is reported -- so what is asserted
+// is the ending, not the delivery
+TEST(http_driver_unconsumed_body_ends_the_connection_in_order) {
+    for_each_driver([](const std::string& d) {
+        // draining effectively off, so the server gives up on the body almost at once
+        TestServer ts(d, [](HttpConfig& c) { c.drain_limit = 1; });
+        Client c(ts.port);
+        const uint64_t declared = 8 * 1024 * 1024;
+        // /small answers without reading the body
+        c.send_str("POST /small HTTP/1.1\r\nHost: t\r\nContent-Length: " + std::to_string(declared) + "\r\n\r\n");
+        // Keep pushing until the server stops taking it, and only read afterwards: the
+        // shape where a reset would arrive with the response already buffered
+        std::string chunk(64 * 1024, 'x');
+        for (int i = 0; i < 128; ++i)
+            if (!c.try_send(chunk)) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        auto r = c.read_response();
+        CHECK(r.ok);
+        CHECK_EQ(r.status, 200);
+        // Whatever the driver decided about keep-alive, the connection must not end in a
+        // reset: 0 = FIN, EAGAIN = still open
+        char tmp[64];
+        ssize_t n = ::recv(c.fd, tmp, sizeof(tmp), 0);
+        if (n < 0) CHECK(errno == EAGAIN || errno == EWOULDBLOCK);
+        CHECK(n <= 0);
     });
 }
 

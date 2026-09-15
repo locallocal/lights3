@@ -275,6 +275,16 @@ were added for the problems the baseline turned up. Numbers in
   third-party dependencies; the security-side helpers (message-framing checks,
   outbound header filtering) are shared with the other three drivers via
   `drivers/common.h`.
+- Closing: `shutdown(SHUT_WR)` before `close()`. With unread bytes still in the
+  receive queue -- a client still uploading whose request was rejected and drained
+  only up to `drain_limit` -- a bare `close()` makes Linux send an RST instead of a
+  FIN. The response bytes already written arrive either way (data queued in the
+  peer's receive buffer is delivered before the reset is reported), so this is not
+  about losing the response: it is that **a client which sees a reset cannot tell an
+  orderly end from a truncated one**, and for a response without a Content-Length
+  those are the same bytes. Half-closing is by itself enough to make the close
+  orderly -- no lingering drain loop -- and both halves of that were measured on this
+  kernel. beast has always been orderly through `socket::shutdown`.
 - Model: thread-per-connection, synchronous. One detached thread with a 512KiB
   stack per connection; coroutines bridge via `sync_wait_pumping` (blocking body
   reads run back on the connection thread, never occupying the shared pool);

@@ -31,7 +31,11 @@ PUT +20%，见同文 §4.5；回归用例 `http_driver_many_concurrent_bodies`�
 `enqueue_bounded` 更名 `enqueue_deferrable`，回归用例
 `schedule_overflow_is_deferred_not_rejected`）、R10（builtin/seastar 以 400 拒绝
 obs-fold；**原来不只是"碰巧安全"** —— 带冒号的续行会让重复 Content-Length 逃过框架
-检查，其后的字节被当作下一个请求应答，回归用例 `http_driver_obs_fold_*` 两条）。
+检查，其后的字节被当作下一个请求应答，回归用例 `http_driver_obs_fold_*` 两条）、
+R11（builtin 关连接前补 `shutdown(SHUT_WR)`；**原判"客户端读不到 4xx"不成立** ——
+实测 Linux 会先交付对端缓冲里的数据再报 reset，真正的差别是客户端分不清正常结束与
+截断；半关一句就够，不需要 lingering 排空。回归用例
+`http_driver_unconsumed_body_ends_the_connection_in_order`）。
 
 等级：高＝可能损坏数据或绕过约束；中＝可被外部输入放大，或明显偏离 AWS 语义；
 低＝加固/一致性问题。
@@ -40,22 +44,11 @@ obs-fold；**原来不只是"碰巧安全"** —— 带冒号的续行会让重�
 
 | 编号 | 位置 | 等级 | 一句话 |
 | --- | --- | --- | --- |
-| R11 | `http/drivers/builtin/builtin_server.cc:780` | 低 | 关连接前未 `shutdown(SHUT_WR)`，极端情况客户端只看到 RST |
 | R12 | `s3/auth/sigv4.cc:792` | 低 | presigned 一律按 `UNSIGNED-PAYLOAD` 计签 |
 | R13 | `config/lights3.yaml` | 低 | `/-/metrics` 默认匿名，暴露桶名与后端拓扑 |
 | O1–O6 | 见 §4 | — | 纯性能项（SigV4 规范化、header 访问、id 生成、fsync、beast 每请求系统调用） |
 
 ## 3. 风险项
-
-### R11（低）关连接前未 `shutdown(SHUT_WR)`
-
-builtin 在连接线程结束后直接 `::close(fd)`（`builtin_server.cc:780`），beast 走
-`shutdown(both)`（`beast_server.cc:707`）。接收缓冲里还有未读数据时，Linux 会发
-RST，客户端可能读不到已经写出去的 4xx。
-
-实测下来风险很低：延迟 100-continue（`builtin_server.cc:151`）让大多数早拒绝根本
-不收 body；无 `Expect` 时 `drain_limit`（4MiB）也能吸收掉。10MB body + 非法桶名的
-两种写法都稳定拿到 400。归为加固项。
 
 ### R12（低）presigned 一律按 UNSIGNED-PAYLOAD 计签
 
@@ -83,47 +76,22 @@ RST，客户端可能读不到已经写出去的 4xx。
 
 ## 5. 复现方法
 
-R11 的现场验证（不需要凭证，端口任选）：
-
-```bash
-# 内置 YAML 子集不支持 flow 风格，按缩进块写（见 config/lights3.yaml）
-mkdir -p /tmp/l3data /tmp/l3stg
-cat > /tmp/noauth.yaml <<'EOF'
-http:
-  driver: builtin
-  bind: 127.0.0.1
-  port: 19123
-runtime:
-  io_threads: 4
-auth:
-  region: us-east-1
-backends:
-  - name: fs
-    type: localfs
-    root: /tmp/l3data
-    staging: /tmp/l3stg
-buckets:
-  default: fs
-EOF
-./build/lights3 --config /tmp/noauth.yaml &     # 启动时会 WARN: authentication is DISABLED
-
-curl -X PUT http://127.0.0.1:19123/bkt1                       # 建桶
-
-head -c 10000000 /dev/urandom > /tmp/big.bin        # R11：两种写法都应拿到 400
-curl -sS -o /dev/null -w '%{http_code}\n' -X PUT --data-binary @/tmp/big.bin \
-  http://127.0.0.1:19123/BADNAME/obj
-curl -sS -o /dev/null -w '%{http_code}\n' -X PUT -H 'Expect:' \
-  --data-binary @/tmp/big.bin http://127.0.0.1:19123/BADNAME/obj
-```
-
-R2 的 `stoull` 语义用一个三行程序即可确认（`-1` → 18446744073709551615，不抛）。
+剩下的 R12 / R13 都不需要跑服务：R12 读 `sigv4.cc` 的 presigned 分支即可判断，R13 是
+配置默认值。早先几条用过的"无凭证起服"模板（localfs + builtin + `auth:` 只留 region）
+见 git 历史里本文的旧版本，或直接照 `config/lights3.yaml` 删掉 credentials 一节。
 
 ## 6. 建议的推进顺序
 
-1. 按等级顺延（R11 起）。O1–O6 是纯性能项，先照 §4.4 的办法做交错 A/B，别预设它们一定
+1. 按等级顺延（R12 起）。O1–O6 是纯性能项，先照 §4.4 的办法做交错 A/B，别预设它们一定
    测得出来。
 
 ## 6.5 顺带发现（不在原清单里）
+
+- `http_driver_many_concurrent_bodies`（R8 时新加）对 httplib 是 flaky 的：24 个客户端
+  同时 connect 会打爆 cpp-httplib 上游那个 5 的 listen backlog，SYN 被丢弃重传，表现为
+  "服务端从没读过的连接"。**与泵线程池无关** —— 改 R8 之前的版本同样 2/12 失败，把连接
+  建立错峰 10ms 后 27/27 通过（上传本身仍然重叠，每个 200 KB 远长于 10ms）。已在
+  R11 这轮修掉；记在这里是因为我一开始误判成 R8 的回归，多跑几轮才排除。
 
 - `duostore_pack_chunked_put_buffer_and_spill` 在 ASan 下报 512KiB 泄漏（2 次
   `PipelinedMd5::make_buffers`，`duostore_backend.cc:1157` 的 `pump_body`）：put 在中途

@@ -2575,3 +2575,29 @@ TEST(service_user_metadata_size_capped) {
     // Lowering it never retroactively hides what is already stored
     CHECK_EQ(sync_wait(svc.dispatch(make_req("HEAD", "/bkt/unlimited"))).status, 200);
 }
+
+// A name that never resolved to a bucket must not open a per-bucket metrics series: the
+// table is capped, so any credentialed client hitting random names could otherwise push
+// the real buckets out of it. Errors *on* a real bucket still count -- they are real
+// traffic to a real bucket
+TEST(service_unknown_bucket_opens_no_metric_series) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/realbkt")));
+    auto miss_key = sync_wait(svc.dispatch(make_req("GET", "/realbkt/nope")));
+    CHECK_EQ(miss_key.status, 404);
+    CHECK(contains(body_of(miss_key), "<Code>NoSuchKey</Code>"));
+
+    auto miss_bucket = sync_wait(svc.dispatch(make_req("GET", "/ghostbkt/nope")));
+    CHECK_EQ(miss_bucket.status, 404);
+    CHECK(contains(body_of(miss_bucket), "<Code>NoSuchBucket</Code>"));
+    // the error XML's own bytes must not open the series either
+    auto miss_head = sync_wait(svc.dispatch(make_req("HEAD", "/ghostbkt2")));
+    CHECK_EQ(miss_head.status, 404);
+
+    auto metrics_resp = sync_wait(svc.dispatch(make_req("GET", "/-/metrics")));
+    auto out = body_of(metrics_resp);
+    CHECK(contains(out, "lights3_bucket_requests_total{bucket=\"realbkt\"}"));
+    CHECK(!contains(out, "ghostbkt"));
+    // the access log still carries the name (per-request, not per-series) -- covered by
+    // the access-log tests; here only the metrics face is asserted
+}

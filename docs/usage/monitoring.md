@@ -100,6 +100,13 @@ Recording 规则（供 dashboard 与告警共用）：`lights3:requests:rate5m`�
 | CloudProxy | 远端请求 P99、重试比、错误码、连接池等待与 ETag 不符 |
 | S3 Tables | 目录请求按 op、4xx/5xx 按状态、提交按结果（ok / conflict / error）、提交 P99、深校验检查文件数与跳过的快照 |
 
+**桶维度的基数**：`lights3_bucket_*` 最多跟踪 512 个桶，超出后**淘汰最久未触碰**的那
+个，它的计数折进 `bucket="_other"` —— 系列会消失、总量不会丢。所以活跃桶超过 512 时
+要预期系列有进有出（桶回来时计数从 0 重新开始，`rate()`/`increase()` 本就按计数器重置
+处理，绝对累计值则不再连续）；看 top-N 用 `topk(… rate(...))` 不受影响。命中不存在的
+桶的请求**不开系列**（否则任何持凭证的客户端用随机桶名就能把真实桶挤出表），但访问日志
+与审计记录照常带上那个名字。
+
 **tiered 水位**：`lights3_tiered_local_used_bytes` / `_total_bytes` /
 `_high_watermark_bytes`（statvfs，正是水位逻辑看到的量）与
 `lights3_tiered_local_cached_bytes` / `_quota_bytes`（账面本地字节与逻辑配额）

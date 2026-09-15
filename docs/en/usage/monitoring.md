@@ -105,6 +105,16 @@ Recording rules (shared by dashboard and alerts): `lights3:requests:rate5m`,
 | CloudProxy | remote request P99, retry ratio, error codes, pool wait and ETag mismatches |
 | S3 Tables | catalog requests by op, 4xx / 5xx by status, commits by outcome (ok / conflict / error), commit P99, deep-validation files checked and snapshots skipped |
 
+**Per-bucket cardinality**: `lights3_bucket_*` tracks at most 512 buckets; past that the
+**least-recently-touched** one is evicted and its counters fold into `bucket="_other"` --
+the series goes away, the totals do not. So with more than 512 active buckets expect series
+to come and go (a bucket that returns restarts from 0, which `rate()` / `increase()`
+already treat as a counter reset, while the absolute cumulative value is no longer
+continuous); top-N views built on `topk(… rate(...))` are unaffected. A request naming a
+bucket that does not exist opens **no** series at all -- otherwise any credentialed client
+could push the real buckets out of the table with random names -- while the access log and
+the audit record still carry the name.
+
 **Tiered watermark**: five gauges give the position directly --
 `lights3_tiered_local_used_bytes` / `_total_bytes` / `_high_watermark_bytes`
 (statvfs, exactly what the watermark logic sees) and

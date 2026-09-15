@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <list>
 #include <map>
 #include <mutex>
 #include <string>
@@ -131,9 +132,13 @@ private:
         uint64_t requests = 0;
         uint64_t bytes_in = 0;
         uint64_t bytes_out = 0;
+        // position in bucket_lru_ (front = most recently touched); unused for other_
+        std::list<std::string>::iterator lru{};
     };
-    // Returns the slot under lock; new buckets beyond the cap share the "_other" slot
+    // Returns the slot under lock, evicting the least-recently-touched bucket when the
+    // table is full
     BucketStats& bucket_slot_locked(std::string_view bucket);
+    void evict_bucket_locked();
 
     std::atomic<uint64_t> inflight_{0};
     std::atomic<uint64_t> by_method_[kMethodCount]{};
@@ -158,6 +163,14 @@ private:
     // name key)
     mutable std::mutex bucket_m_;
     std::map<std::string, BucketStats, std::less<>> by_bucket_;
+    // MRU first. The table is capped, and the cap used to be a one-way door: the first
+    // kMaxTrackedBuckets names seen kept their series forever and everything after them
+    // was folded into "_other" -- so a deployment with more buckets than the cap could
+    // never see its active ones, and a credentialed client hitting random names could
+    // wedge the table permanently. Now the coldest bucket is evicted instead, and its
+    // counters fold into other_ so the series disappears but the totals do not
+    std::list<std::string> bucket_lru_;
+    BucketStats other_;
 
     // indexed by S3ErrorCode
     std::atomic<uint64_t> errors_[kS3ErrorCodeCount]{};

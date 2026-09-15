@@ -153,6 +153,7 @@ void Application::start_server() {
     service_->set_pool_stats([pool = pool_] { return pool->stats(); });
     service_->set_request_timeout(std::chrono::seconds(cfg_.http.request_timeout_sec));
     service_->set_min_part_size(cfg_.http.min_part_size);
+    service_->set_max_user_metadata(cfg_.http.max_user_metadata_size);
     service_->set_slow_request_threshold(std::chrono::milliseconds(cfg_.log.slow_request_threshold_ms));
     service_->set_backend_metrics(metrics_);
     service_->set_credential_store(cred_store_);
@@ -818,6 +819,12 @@ ConfigReloadReport Application::reload_config() {
         service_->set_min_part_size(fresh.http.min_part_size);
         report.applied.push_back(change("http.min_part_size", cfg_.http.min_part_size, fresh.http.min_part_size));
         cfg_.http.min_part_size = fresh.http.min_part_size;
+    }
+    if (cfg_.http.max_user_metadata_size != fresh.http.max_user_metadata_size) {
+        service_->set_max_user_metadata(fresh.http.max_user_metadata_size);
+        report.applied.push_back(
+            change("http.max_user_metadata_size", cfg_.http.max_user_metadata_size, fresh.http.max_user_metadata_size));
+        cfg_.http.max_user_metadata_size = fresh.http.max_user_metadata_size;
     }
     if (cfg_.runtime.max_inflight_requests != fresh.runtime.max_inflight_requests) {
         inflight_->set_capacity(fresh.runtime.max_inflight_requests);

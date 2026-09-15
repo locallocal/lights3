@@ -159,7 +159,7 @@ Task<http::HttpResponse> S3Service::create_multipart(http::HttpRequest& req, std
     // Quota gate: a bucket already over its limit refuses to start an
     // upload at all; the per-part gate in upload_part then judges each part's bytes
     check_quota(bucket, 0, 0, auth);
-    auto meta = meta_from_headers(req);
+    auto meta = meta_from_headers(req, max_user_metadata());
     // Declared checksum algorithm survives create→complete. Only the
     // COMPOSITE form is implemented: CRC64NVME (full-object only per AWS) and an
     // explicit FULL_OBJECT request get an honest 501 instead of a silently absent

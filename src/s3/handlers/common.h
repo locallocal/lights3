@@ -72,9 +72,12 @@ inline std::string encode_tagging(const std::vector<std::pair<std::string, std::
     return out;
 }
 
-// Shared by PutObject / CreateMultipartUpload: extracts Content-Type, x-amz-meta-*, and
-// the first-class S3 metadata fields, incl. x-amz-tagging
-inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
+// Shared by PutObject / CopyObject(REPLACE) / CreateMultipartUpload: extracts Content-Type,
+// x-amz-meta-*, and the first-class S3 metadata fields, incl. x-amz-tagging.
+// max_user_meta (http.max_user_metadata_size, 0 = unlimited) is enforced here rather than
+// at each caller: this is the single place user metadata enters the system, and the one
+// gate the three write paths share
+inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req, uint64_t max_user_meta) {
     storage::ObjectMeta meta;
     if (auto ct = req.headers.get("Content-Type")) meta.content_type = *ct;
     for (auto& f : storage::kStdMetaFields) {
@@ -83,6 +86,11 @@ inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
             meta.*f.field = *v;
         }
     }
+    // AWS measures user metadata as the sum of key and value lengths, the key without its
+    // x-amz-meta- prefix -- the same bytes that get persisted. A repeated header name
+    // overwrites, and only the surviving pair is charged, so what is measured is exactly
+    // what the backend will store
+    uint64_t user_meta_bytes = 0;
     for (auto& [k, v] : req.headers.items()) {
         std::string lk;
         for (char c : k) lk.push_back(http::HeaderMap::lower(c));
@@ -91,6 +99,11 @@ inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
             meta.user_meta[lk.substr(11)] = v;
         }
     }
+    for (auto& [k, v] : meta.user_meta) user_meta_bytes += k.size() + v.size();
+    if (max_user_meta > 0 && user_meta_bytes > max_user_meta)
+        throw S3Error(S3ErrorCode::MetadataTooLarge,
+                      "Your metadata headers exceed the maximum allowed metadata size of " +
+                          std::to_string(max_user_meta) + " bytes (" + std::to_string(user_meta_bytes) + " sent).");
     // AWS constraint on the redirect target (docs/usage/static-website.md §5.1): the value is
     // served verbatim as a Location header on the anonymous website plane, so free-form
     // schemes (javascript:, data:) must never get in

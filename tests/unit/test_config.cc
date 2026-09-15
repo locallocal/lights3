@@ -259,6 +259,18 @@ TEST(config_max_header_size_bounded) {
              size_t(1024 * 1024));
 }
 
+TEST(config_max_user_metadata_size_bounded) {
+    const char* backends = "backends:\n  - name: m\n    type: memory\n";
+    auto cfg = [&](const char* line) { return Config::from_string(std::string("http:\n") + line + backends); };
+    // AWS's 2KB unless configured
+    CHECK_EQ(cfg("  port: 9000\n").http.max_user_metadata_size, uint64_t(2 * 1024));
+    CHECK_EQ(cfg("  max_user_metadata_size: 8KiB\n").http.max_user_metadata_size, uint64_t(8 * 1024));
+    // 0 = no limit, and is a legal setting unlike the timeout family
+    CHECK_EQ(cfg("  max_user_metadata_size: 0\n").http.max_user_metadata_size, uint64_t(0));
+    // a slipped unit (MiB written as GiB) must not become "effectively unlimited"
+    CHECK(throws([&] { cfg("  max_user_metadata_size: 4GiB\n"); }));
+}
+
 TEST(config_idle_timeout_rejects_zero) {
     const char* backends = "backends:\n  - name: m\n    type: memory\n";
     // 0 means "never" to builtin but "expire immediately" to beast — rejected rather

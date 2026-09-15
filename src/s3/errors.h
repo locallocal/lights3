@@ -40,6 +40,7 @@ namespace lights3::s3 {
     X(InvalidToken, 400)                 \
     X(KeyTooLongError, 400)              \
     X(MalformedXML, 400)                 \
+    X(MetadataTooLarge, 400)             \
     X(MethodNotAllowed, 405)             \
     X(MissingContentLength, 411)         \
     X(NoSuchBucket, 404)                 \

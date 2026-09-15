@@ -390,6 +390,7 @@ Config Config::from_string(const std::string& text) {
         if (auto v = http->get("request_timeout"); !v.empty()) cfg.http.request_timeout_sec = parse_duration_sec(v);
         // Minimum multipart part size: 0 = no limit
         if (auto v = http->get("min_part_size"); !v.empty()) cfg.http.min_part_size = parse_size(v);
+        if (auto v = http->get("max_user_metadata_size"); !v.empty()) cfg.http.max_user_metadata_size = parse_size(v);
         if (auto v = http->get("transfer_stall_timeout"); !v.empty())
             cfg.http.transfer_stall_timeout_sec = parse_duration_sec(v);
         cfg.http.max_connections = to_int("http.max_connections", http->get("max_connections"),
@@ -750,6 +751,10 @@ Config Config::from_string(const std::string& text) {
     check_range("http.trailer_max_size", static_cast<long long>(cfg.http.trailer_max_size), 1024LL, 1'048'576LL);
     check_range("http.io_chunk_size", static_cast<long long>(cfg.http.io_chunk_size), 4096LL, 8LL * 1'048'576);
     check_range("http.body_queue_cap", static_cast<long long>(cfg.http.body_queue_cap), 4096LL, 1'073'741'824LL);
+    // 0 = no limit; the upper bound is max_header_size's own ceiling, since user metadata
+    // can never outgrow the header block it arrives in
+    check_range("http.max_user_metadata_size", static_cast<long long>(cfg.http.max_user_metadata_size), 0LL,
+                1'048'576LL);
     check_range("http.shutdown_grace", cfg.http.shutdown_grace_sec, 0, 300);
     check_range("http.shutdown_force_wait", cfg.http.shutdown_force_wait_sec, 0, 300);
     if (cfg.backends.empty()) throw std::runtime_error("config: no backends configured");

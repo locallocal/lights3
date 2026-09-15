@@ -85,6 +85,7 @@ inline RestError from_s3_error(const s3::S3Error& e, std::string_view path) {
         case S3ErrorCode::InvalidBucketName:
         case S3ErrorCode::KeyTooLongError:
         case S3ErrorCode::EntityTooLarge:
+        case S3ErrorCode::MetadataTooLarge:
             return bad_request(e.message);
         case S3ErrorCode::NotImplemented:
             return unsupported(e.message);

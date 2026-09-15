@@ -202,7 +202,7 @@ Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::stri
 
     // Declared checksum persists with the object: header form is known
     // now; trailer form resolves through the pending slot once the body drains
-    storage::ObjectMeta meta = meta_from_headers(req);
+    storage::ObjectMeta meta = meta_from_headers(req, max_user_metadata());
     attach_request_checksum(req, meta);
     std::string cs_algo = meta.checksum_algorithm;
     std::string cs_value = meta.checksum_value;
@@ -249,7 +249,7 @@ Task<http::HttpResponse> S3Service::copy_object(http::HttpRequest& req, std::str
 
     storage::ObjectMeta meta;
     if (directive == "REPLACE") {
-        meta = meta_from_headers(req);
+        meta = meta_from_headers(req, max_user_metadata());
         // The bytes are unchanged by a copy, so the source's checksum and part layout
         // still describe the new object; REPLACE only swaps the
         // user-editable metadata

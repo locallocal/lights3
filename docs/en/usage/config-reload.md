@@ -51,6 +51,7 @@ Report shape (admin API / `lights3-ctl reload` output):
 | `http.request_timeout` | from the next request (dispatch reads an atomic per request) |
 | `http.transfer_stall_timeout` | from the next request (the admission handler reads an atomic per request) |
 | `http.min_part_size` | from the next CompleteMultipartUpload |
+| `http.max_user_metadata_size` | from the next write that carries metadata (PutObject / CopyObject REPLACE / CreateMultipartUpload); objects already stored are never re-judged |
 | `http.metrics_access` | from the next `GET /-/metrics` (dispatch reads an atomic) |
 | `runtime.max_inflight_requests` | `AsyncSemaphore::set_capacity`: growing wakes queued requests at once; shrinking waits for in-flight permits to return (`available` may go negative briefly, nothing new is admitted meanwhile) |
 | `ratelimit.per_ip_* / per_ak_*` | limiters are rebuilt and swapped atomically; in-flight requests hold the old instance until they finish, so nothing dangles (`max_tracked` excepted: restart only) |

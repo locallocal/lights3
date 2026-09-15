@@ -91,6 +91,12 @@ struct HttpConfig {
     // 5MiB, 0 = no limit. Relax it when a toolchain that ignores this rule sits in
     // front, or when this instance is merely a proxy for another lights3
     uint64_t min_part_size = 5ull * 1024 * 1024;
+    // Total user metadata (x-amz-meta-*) a write may carry, summed as key length + value
+    // length over every such header. AWS fixes it at 2KB; 0 = no limit. Same kind of knob
+    // as min_part_size: relax it when migrating from a gateway that allowed more, since
+    // the stored objects would otherwise become un-re-uploadable. Note max_header_size
+    // still bounds the whole header block, so raising this past it has no effect
+    uint64_t max_user_metadata_size = 2 * 1024;
     // Transfer stall limit: the total no-progress duration allowed for streaming
     // send/receive **as a whole**. All four drivers reset their per-chunk timeouts
     // chunk by chunk, so a client sending 1 byte every 59 seconds could hold a

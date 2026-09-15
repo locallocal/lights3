@@ -2520,3 +2520,58 @@ TEST(service_metrics_root_gate) {
     open.set_metrics_root_only(true);
     CHECK_EQ(sync_wait(open.dispatch(make_req("GET", "/-/metrics"))).status, 200);
 }
+
+// Total user metadata is capped (http.max_user_metadata_size, AWS's 2KB by default):
+// without it the only bound was max_header_size, and the whole blob went into every
+// backend's metadata record on every write
+TEST(service_user_metadata_size_capped) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    // key ("a") + value, summed over the headers, is what AWS measures
+    auto with_meta = [&](const char* path, size_t value_len, const char* name = "x-amz-meta-a") {
+        auto req = make_req("PUT", path, "hi");
+        req.headers.add(name, std::string(value_len, 'x'));
+        return req;
+    };
+
+    // 2047 = 1 ("a") + 2046 -> just inside; one more byte -> 400 MetadataTooLarge
+    CHECK_EQ(sync_wait(svc.dispatch(with_meta("/bkt/ok", 2047))).status, 200);
+    auto over = sync_wait(svc.dispatch(with_meta("/bkt/over", 2048)));
+    CHECK_EQ(over.status, 400);
+    CHECK(contains(over.small_body, "<Code>MetadataTooLarge</Code>"));
+    // and nothing was written
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("HEAD", "/bkt/over"))).status, 404);
+
+    // The sum is over all headers, not each one: two halves that individually fit
+    auto pair = make_req("PUT", "/bkt/pair", "hi");
+    pair.headers.add("x-amz-meta-a", std::string(1200, 'x'));
+    pair.headers.add("x-amz-meta-b", std::string(1200, 'x'));
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(pair))).status, 400);
+
+    // CreateMultipartUpload and CopyObject(REPLACE) carry metadata too and share the gate
+    auto mpu = make_req("POST", "/bkt/mpu", "", {{"uploads", ""}});
+    mpu.headers.add("x-amz-meta-a", std::string(4096, 'x'));
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(mpu))).status, 400);
+    auto cp = make_req("PUT", "/bkt/copy");
+    cp.headers.add("x-amz-copy-source", "/bkt/ok");
+    cp.headers.add("x-amz-metadata-directive", "REPLACE");
+    cp.headers.add("x-amz-meta-a", std::string(4096, 'x'));
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(cp))).status, 400);
+    // COPY keeps the source's metadata verbatim and is not re-judged: an object that got
+    // in under a larger limit stays copyable after the limit is lowered
+    auto plain_copy = make_req("PUT", "/bkt/copy2");
+    plain_copy.headers.add("x-amz-copy-source", "/bkt/ok");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(plain_copy))).status, 200);
+
+    // Hot-reloadable in both directions; 0 = unlimited
+    svc.set_max_user_metadata(4 * 1024);
+    CHECK_EQ(sync_wait(svc.dispatch(with_meta("/bkt/raised", 3000))).status, 200);
+    svc.set_max_user_metadata(0);
+    CHECK_EQ(sync_wait(svc.dispatch(with_meta("/bkt/unlimited", 64 * 1024))).status, 200);
+    auto got = sync_wait(svc.dispatch(make_req("HEAD", "/bkt/unlimited")));
+    CHECK_EQ(got.headers.get("x-amz-meta-a").value_or("").size(), size_t(64 * 1024));
+    svc.set_max_user_metadata(16);
+    CHECK_EQ(sync_wait(svc.dispatch(with_meta("/bkt/lowered", 100))).status, 400);
+    // Lowering it never retroactively hides what is already stored
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("HEAD", "/bkt/unlimited"))).status, 200);
+}
